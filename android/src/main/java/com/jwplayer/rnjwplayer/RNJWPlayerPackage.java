@@ -15,7 +15,10 @@ public class RNJWPlayerPackage implements ReactPackage {
 
     @Override
     public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
-        return Arrays.<NativeModule>asList(new RNJWPlayerModule(reactContext));
+        return Arrays.<NativeModule>asList(
+            new RNJWPlayerModule(reactContext),
+            new RNJWPlayerHeadlessModule(reactContext)
+        );
     }
 
     // Backwards compatability for RN < 0.47

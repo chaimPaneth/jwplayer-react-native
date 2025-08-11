@@ -174,6 +174,12 @@ export default class JWPlayer extends Component {
 		config: PropTypes.shape({
 			license: PropTypes.string.isRequired,
 			forceLegacyConfig: PropTypes.bool,
+			/**
+			 * Only enable if you are prepared to implement `onBeforeNextPlaylistItem` on the JS side
+			 * And resolve the promise with `resolveNextPlaylistItem` inside the callback
+			 * Otherwise, the player will not proceed to the next item
+			 */
+			playlistItemCallbackEnabled: PropTypes.bool,
 			backgroundAudioEnabled: PropTypes.bool,
 			category: PropTypes.oneOf([
 				'Ambient',
@@ -374,6 +380,16 @@ export default class JWPlayer extends Component {
 		onCaptionsChanged: PropTypes.func,
 		onCaptionsList: PropTypes.func,
 		onAudioTracks: PropTypes.func,
+		/**
+		 * Callback that is fired when the player is about to play the next playlist item.
+		 * Indented to be paired with `playlistItemCallbackEnabled` prop
+		 * 
+		 * Android will only fire after index 0 (starting at index 1) 
+	 	 * 
+	     * iOS will fire all playlist items (including index 0)
+		 */
+		onBeforeNextPlaylistItem: PropTypes.func,
+		resolveNextPlaylistItem: PropTypes.func
 	};
 
 	constructor(props) {
@@ -517,6 +533,11 @@ export default class JWPlayer extends Component {
 	loadPlaylist(playlistItems) {
 		if (RNJWPlayerManager)
 			RNJWPlayerManager.loadPlaylist(this.getRNJWPlayerBridgeHandle(), playlistItems);
+	}
+
+	loadPlaylistWithUrl(playlistUrl) {
+		if (RNJWPlayerManager)
+			RNJWPlayerManager.loadPlaylistWithUrl(this.getRNJWPlayerBridgeHandle(), playlistUrl);
 	}
 
 	setFullscreen(fullscreen) {
@@ -706,6 +727,22 @@ export default class JWPlayer extends Component {
 		}
 	}
 
+	/**
+	 * Only to be called in the onBeforeNextPlaylistItem callback.
+	 * If called outside of the callback, it will not have any effect.
+	 * 
+	 * Can only be called once inside the onBeforeNextPlaylistItem callback.
+	 * @param {PlaylistItem | JwPlaylistItem} playlistItem 
+	 */
+	resolveNextPlaylistItem(playlistItem) { 
+		if (RNJWPlayerManager) {
+			RNJWPlayerManager.resolveNextPlaylistItem(
+				this.getRNJWPlayerBridgeHandle(),
+				playlistItem
+			);
+		}
+	}
+
 	getRNJWPlayerBridgeHandle() {
 		return findNodeHandle(this[this.ref_key]);
 	}
@@ -720,3 +757,13 @@ export default class JWPlayer extends Component {
 		);
 	}
 }
+
+// Export the headless module for Android Auto integration
+const JWPlayerHeadless = require('./src/JWPlayerHeadless').default;
+module.exports = Object.assign(JWPlayer, {
+  JWPlayerHeadless,
+  JWPlayerAdClients,
+  JWPlayerAdEvents,
+  JWPlayerState,
+  default: JWPlayer,
+});

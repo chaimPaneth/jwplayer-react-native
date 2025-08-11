@@ -10,16 +10,20 @@ import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.UIManager;
+import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.uimanager.IllegalViewOperationException;
+import com.facebook.react.uimanager.NativeViewHierarchyManager;
+import com.facebook.react.uimanager.UIBlock;
 import com.facebook.react.uimanager.UIManagerHelper;
+import com.facebook.react.uimanager.UIManagerModule;
 import com.facebook.react.uimanager.common.UIManagerType;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.PlayerState;
 import com.jwplayer.pub.api.configuration.PlayerConfig;
 import com.jwplayer.pub.api.media.adaptive.QualityLevel;
 import com.jwplayer.pub.api.media.audio.AudioTrack;
-
 import java.util.List;
 
 public class RNJWPlayerModule extends ReactContextBaseJavaModule {
@@ -388,6 +392,16 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         });
     }
 
+    @ReactMethod
+    public void resolveNextPlaylistItem(final int reactTag, final ReadableMap playlistItem) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            RNJWPlayerView playerView = getPlayerView(reactTag);
+            if (playerView != null && playerView.mPlayerView != null) {
+                playerView.resolveNextPlaylistItem(playlistItem);
+            }
+        });
+    }
+
     private int stateToInt(PlayerState playerState) {
         switch (playerState) {
             case IDLE:
@@ -406,4 +420,55 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 return -1;
         }
     }
+
+    /**
+     * Check for active headless playback and get comprehensive state for app handoff
+     * This method is designed for React Native app wake-up scenarios
+     */
+    @ReactMethod
+    public void checkForActiveHeadlessPlayback(Promise promise) {
+        try {
+            JWPlayerNativePlaybackHandler nativePlaybackHandler = JWPlayerNativePlaybackHandler.getInstance(mReactContext);
+            WritableMap playbackState = nativePlaybackHandler.getComprehensivePlaybackState();
+            if (playbackState != null) {
+                android.util.Log.d(TAG, "📱 JAVA: Active headless playback detected for app handoff");
+                promise.resolve(playbackState);
+            } else {
+                android.util.Log.d(TAG, "📱 JAVA: No active headless playback found");
+                promise.resolve(null);
+            }
+        } catch (Exception e) {
+            android.util.Log.e(TAG, "📱 JAVA: Error checking for headless playback", e);
+            promise.reject("CHECK_HEADLESS_PLAYBACK_ERROR", "Failed to check headless playback state", e);
+        }
+    }
+
+    /**
+     * Get pending media info from headless mode for app restoration (legacy method)
+     */
+    @ReactMethod
+    public void getPendingMediaInfo(Promise promise) {
+        try {
+            JWPlayerNativePlaybackHandler nativePlaybackHandler = JWPlayerNativePlaybackHandler.getInstance(mReactContext);
+            WritableMap pendingMedia = nativePlaybackHandler.getPendingMediaInfo();
+            promise.resolve(pendingMedia);
+        } catch (Exception e) {
+            promise.reject("GET_PENDING_MEDIA_ERROR", "Failed to get pending media info", e);
+        }
+    }
+
+    /**
+     * Clear pending media info after handling
+     */
+    @ReactMethod
+    public void clearPendingMedia(Promise promise) {
+        try {
+            JWPlayerNativePlaybackHandler nativePlaybackHandler = JWPlayerNativePlaybackHandler.getInstance(mReactContext);
+            nativePlaybackHandler.clearPendingMedia();
+            promise.resolve(true);
+        } catch (Exception e) {
+            promise.reject("CLEAR_PENDING_MEDIA_ERROR", "Failed to clear pending media", e);
+        }
+    }
+
 }

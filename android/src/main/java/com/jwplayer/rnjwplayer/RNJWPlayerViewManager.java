@@ -1,12 +1,16 @@
-
 package com.jwplayer.rnjwplayer;
 
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.common.MapBuilder;
 import com.facebook.react.uimanager.SimpleViewManager;
 import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.annotations.ReactProp;
+import com.mediabrowser.MediaSessionSingleton;
+import android.support.v4.media.session.MediaSessionCompat;
 
 import java.util.Map;
 
@@ -17,6 +21,7 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
   public static final String REACT_CLASS = "RNJWPlayerView";
 
   private final ReactApplicationContext mAppContext;
+  private final JWPlayerNativePlaybackHandler nativePlaybackHandler;
 
   private static final String TAG = "RNJWPlayerViewManager";
 
@@ -27,6 +32,7 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
 
   public RNJWPlayerViewManager(ReactApplicationContext context) {
     mAppContext = context;
+    nativePlaybackHandler = JWPlayerNativePlaybackHandler.getInstance(context);
   }
 
   @Override
@@ -174,6 +180,10 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
                     MapBuilder.of(
                             "phasedRegistrationNames",
                             MapBuilder.of("bubbled", "onLoaded")))
+            .put("topBeforeNextPlaylistItem",
+                    MapBuilder.of(
+                            "phasedRegistrationNames",
+                            MapBuilder.of("bubbled", "onBeforeNextPlaylistItem")))
             .build();
   }
 
@@ -182,5 +192,39 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
     view.destroyPlayer();
     super.onDropViewInstance(view);
     view = null;
+  }
+
+  /**
+   * Get pending media info from headless mode for app restoration
+   */
+  @ReactMethod
+  public void getPendingMediaInfo(Promise promise) {
+    try {
+      WritableMap pendingMedia = nativePlaybackHandler.getPendingMediaInfo();
+      promise.resolve(pendingMedia);
+    } catch (Exception e) {
+      promise.reject("GET_PENDING_MEDIA_ERROR", "Failed to get pending media info", e);
+    }
+  }
+
+  /**
+   * Clear pending media info after handling
+   */
+  @ReactMethod
+  public void clearPendingMedia(Promise promise) {
+    try {
+      nativePlaybackHandler.clearPendingMedia();
+      promise.resolve(true);
+    } catch (Exception e) {
+      promise.reject("CLEAR_PENDING_MEDIA_ERROR", "Failed to clear pending media", e);
+    }
+  }
+
+  /**
+   * Handle media selection from headless mode
+   */
+  public void handleHeadlessMediaSelection(String mediaId, String title, String subtitle, 
+                                         String icon, Map<String, Object> extras) {
+    nativePlaybackHandler.handleHeadlessMediaSelection(mediaId, title, subtitle, icon, extras);
   }
 }

@@ -40,6 +40,7 @@ RCT_EXPORT_VIEW_PROPERTY(onPlayerReady, RCTDirectEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onSetupPlayerError, RCTDirectEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onPlayerError, RCTDirectEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onPlayerWarning, RCTDirectEventBlock);
+RCT_EXPORT_VIEW_PROPERTY(onBeforeNextPlaylistItem, RCTDirectEventBlock);
 
 /* ad events */
 RCT_EXPORT_VIEW_PROPERTY(onPlayerAdWarning, RCTDirectEventBlock);
@@ -95,6 +96,8 @@ RCT_EXTERN_METHOD(setVolume: (nonnull NSNumber *)reactTag :(nonnull NSNumber *)v
 
 RCT_EXTERN_METHOD(togglePIP: (nonnull NSNumber *)reactTag)
 
+RCT_EXTERN_METHOD(resolveNextPlaylistItem: (nonnull NSNumber *)reactTag :(nonnull NSDictionary *)playlistItem)
+
 #if USE_GOOGLE_CAST
 
 RCT_EXTERN_METHOD(setUpCastController: (nonnull NSNumber *)reactTag)
@@ -133,7 +136,7 @@ RCT_EXTERN_METHOD(reset)
 
 RCT_EXTERN_METHOD(loadPlaylist: (nonnull NSNumber *)reactTag: (nonnull NSArray *)playlist)
 
-RCT_EXTERN_METHOD(loadPlaylist: (nonnull NSNumber *)reactTag: (nonnull NSString *)playlist)
+RCT_EXTERN_METHOD(loadPlaylistWithUrl: (nonnull NSNumber *)reactTag: (nonnull NSString *)playlist)
 
 RCT_EXTERN_METHOD(setFullscreen: (nonnull NSNumber *)reactTag: (BOOL)fullscreen)
 

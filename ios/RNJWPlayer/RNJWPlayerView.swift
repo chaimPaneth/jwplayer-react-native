@@ -16,7 +16,12 @@ import JWPlayerKit
     import GoogleCast
 #endif
 
-class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDelegate, JWAVDelegate, JWPlayerViewDelegate, JWPlayerViewControllerDelegate, JWDRMContentKeyDataSource, JWTimeEventListener, AVPictureInPictureControllerDelegate {
+class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
+    JWAdDelegate, JWAVDelegate, JWPlayerViewDelegate,
+    JWPlayerViewControllerFullScreenDelegate, JWPlayerViewControllerUIDelegate,
+    JWPlayerViewControllerRelatedDelegate, JWDRMContentKeyDataSource,
+    JWTimeEventListener, AVPictureInPictureControllerDelegate
+{ 
     
     // MARK: - RNJWPlayer allocation
 
@@ -41,6 +46,7 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
     var castController: JWCastController!
     var isCasting: Bool = false
     var availableDevices: [AnyObject]!
+    var onBeforeNextPlaylistItemCompletion: ((JWPlayerItem?) -> ())?
     
     @objc var onBuffer: RCTDirectEventBlock?
     @objc var onUpdateBuffer: RCTDirectEventBlock?
@@ -87,6 +93,7 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
     @objc var onCastingFailed: RCTDirectEventBlock?
     @objc var onCaptionsChanged: RCTDirectEventBlock?
     @objc var onCaptionsList: RCTDirectEventBlock?
+    @objc var onBeforeNextPlaylistItem: RCTDirectEventBlock?
     
     init() {
         super.init(frame: CGRect(x: 20, y: 0, width: UIScreen.main.bounds.width - 40, height: 300))
@@ -283,6 +290,7 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
 
     func setNewConfig(config: [String : Any]) {
         let forceLegacyConfig = config["forceLegacyConfig"] as? Bool?
+        let playlistItemCallback = config["playlistItemCallbackEnabled"] as? Bool?
         let data:Data! = try? JSONSerialization.data(withJSONObject: config, options:.prettyPrinted)
         let jwConfig = try? JWJSONParser.config(from:data)
         
@@ -310,11 +318,13 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
                 self.deinitAudioSession()
             }
             
+            // Pull out top level iOS DRM values from config if present
+            // This is most often used in non-legacy configs using JWP DRM solutions
+            processSpcUrl = config["processSpcUrl"] as? String
+            fairplayCertUrl = config["certificateUrl"] as? String
+            contentUUID = config["contentUUID"] as? String
+            
             if forceLegacyConfig == true {
-                // Pull from top level of config
-                processSpcUrl = config["processSpcUrl"] as? String
-                fairplayCertUrl = config["certificateUrl"] as? String
-                contentUUID = config["contentUUID"] as? String
 
                 // Dangerous: check playlist for processSpcUrl / fairplayCertUrl in playlist
                 // Only checks first playlist item as multi-item DRM playlists are ill advised
@@ -330,7 +340,6 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
                     }
                 }
             } else {
-                // TODO -- Ensure JWJSONParser pulls out cert/spc for sources (Expected in JW iOS SDK v4.19.0)
             }
 
             do {
@@ -348,6 +357,11 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
                         self.setupPlayerViewController(config: config, playerConfig: jwConfig!)
                     }
                 }
+                
+                if playlistItemCallback == true {
+                    self.setupPlaylistItemCallback()
+                }
+
             } catch {
                 print(error)
             }
@@ -359,6 +373,47 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
     @objc func setControls(_ controls:Bool) {
         if let playerViewControllerView = playerViewController?.view {
             self.toggleUIGroup(view: playerViewControllerView, name: "JWPlayerKit.InterfaceView", ofSubview: nil, show: controls)
+        }
+    }
+
+    func setupPlaylistItemCallback() {
+        playerViewController.player.setPlaylistItemCallback { [weak self] item, index, completion in
+            print("setPlaylistItemCallback called with index \(index)")
+            guard let self = self else {
+                print("setPlaylistItemCallback: self is nil, resuming normally")
+                completion(item)
+                return
+            }
+            
+            if let onBeforeNextPlaylistItem = self.onBeforeNextPlaylistItem {
+                print("Storing completion handler and triggering onBeforeNextPlaylistItem")
+                // Store the completion handler first, before any other operations
+                self.onBeforeNextPlaylistItemCompletion = completion
+                print("Completion handler stored: \(self.onBeforeNextPlaylistItemCompletion != nil)")
+
+                do {
+                    let data = try JSONSerialization.data(withJSONObject: item.toJSONObject(), options: [.prettyPrinted])
+                    let jsonString = String(data: data, encoding: .utf8) ?? "{}"
+
+                    print("Triggering onBeforeNextPlaylistItem with index \(index)")
+                    print("Completion handler before event: \(self.onBeforeNextPlaylistItemCompletion != nil)")
+
+                    // Pass the playlist item to the React Native side
+                    onBeforeNextPlaylistItem([
+                        "playlistItem": jsonString,
+                        "index": index
+                    ])
+                    print("Completion handler after event: \(self.onBeforeNextPlaylistItemCompletion != nil)")
+                
+                } catch {
+                    print("Error serializing playlist item: \(error)")
+                    self.onBeforeNextPlaylistItemCompletion?(item) // Call completion handler directly on error
+                    self.onBeforeNextPlaylistItemCompletion = nil
+                }
+            } else {
+                print("No onBeforeNextPlaylistItem handler set, calling completion directly")
+                completion(item)
+            }
         }
     }
 
@@ -1231,10 +1286,6 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
     func jwplayerContentDidComplete(_ player:JWPlayer) {
         self.onComplete?([:])
     }
-    
-    func jwplayerContentIsBuffering(_ player: any JWPlayerKit.JWPlayer) {
-
-    }
 
     func jwplayer(_ player:JWPlayer, didLoadPlaylistItem item:JWPlayerItem, at index:UInt) {
 //        var sourceDict: [String: Any] = [:]
@@ -1486,6 +1537,11 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
                                                        object: audioSession)
 
             NotificationCenter.default.addObserver(self,
+                                                   selector: #selector(handleSecondaryAudioHint(_:)),
+                                                   name: AVAudioSession.silenceSecondaryAudioHintNotification,
+                                                       object: audioSession)
+
+            NotificationCenter.default.addObserver(self,
                                                    selector:#selector(applicationWillResignActive(_:)),
                                                    name:UIApplication.willResignActiveNotification, object:nil)
 
@@ -1628,18 +1684,14 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
         case .ended:
             guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
             let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-            if options.contains(.shouldResume) && !userPaused && backgroundAudioEnabled {
-                // Interruption ended. Playback should resume.
+            let shouldResume = options.isEmpty || options.contains(.shouldResume)
+            if shouldResume && !userPaused && backgroundAudioEnabled {
                 DispatchQueue.main.async { [self] in
-                    if (playerView != nil) {
-                        playerView.player.play()
-                    } else if (playerViewController != nil) {
-                        playerViewController.player.play()
-                    }
+                    try? audioSession.setActive(true, options: .notifyOthersOnDeactivation) // optional but safe
+                    (playerView?.player ?? playerViewController?.player)?.play()
                     print("handleInterruption :- Play")
                 }
-            }
-            else {
+            } else {
                 // Interruption ended. Playback should not resume.
                 DispatchQueue.main.async { [self] in
                     wasInterrupted = true
@@ -1654,6 +1706,22 @@ class RNJWPlayerView : UIView, JWPlayerDelegate, JWPlayerStateDelegate, JWAdDele
             }
         @unknown default:
             break
+        }
+    }
+
+    @objc func handleSecondaryAudioHint(_ n: Notification) {
+        guard let info = n.userInfo,
+              let raw = info[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt,
+              let hint = AVAudioSession.SilenceSecondaryAudioHintType(rawValue: raw)
+        else { return }
+
+        switch hint {
+        case .begin:
+            // Waze (or Siri, GPS, etc.) wants to duck you
+            (playerView?.player ?? playerViewController?.player)?.volume = 0.2    // or player.pause()
+        case .end:
+            (playerView?.player ?? playerViewController?.player)?.volume = 1.0    // or resume
+        @unknown default: break
         }
     }
 

@@ -225,7 +225,28 @@ class RNJWPlayerViewManager: RCTViewManager {
             }
         }
     }
-    
+
+    @objc func resolveNextPlaylistItem(_ reactTag: NSNumber, _ playlistItem: NSDictionary) {
+        self.bridge.uiManager.addUIBlock { uiManager, viewRegistry in
+            guard let view = self.getPlayerView(reactTag: reactTag) else {
+                print("Invalid view returned from registry, expecting RNJWPlayerView")
+                return
+            }
+            
+            if let completion = view.onBeforeNextPlaylistItemCompletion {
+                do {
+                    let item = try view.getPlayerItem(item: playlistItem as! [String: Any])
+                    completion(item)
+                } catch {
+                    print("Error creating JWPlayerItem: \(error)")
+                }
+                view.onBeforeNextPlaylistItemCompletion = nil
+            } else {
+                print("Warning: resolveNextPlaylistItem called but no completion handler was set OR completion handler was already called")
+            }
+        }
+    }
+
 #if USE_GOOGLE_CAST
     @objc func setUpCastController(_ reactTag: NSNumber) {
         DispatchQueue.main.async {
@@ -527,7 +548,18 @@ class RNJWPlayerViewManager: RCTViewManager {
                 } else if let playerViewController = view.playerViewController {
                     playerViewController.player.loadPlaylist(items: playlistArray)
                 }
-            } else if let playlistString = playlist as? String, let url = URL(string: playlistString) {
+            }
+        }
+    }
+    
+    @objc func loadPlaylistWithUrl(_ reactTag: NSNumber, _ playlistString: String) {
+        DispatchQueue.main.async {
+            guard let view = self.getPlayerView(reactTag: reactTag) else {
+                print("Invalid view returned from registry, expecting RNJWPlayerView")
+                return
+            }
+                        
+            if let url = URL(string: playlistString) {
                 if let playerView = view.playerView {
                     playerView.player.loadPlaylist(url: url)
                 } else if let playerViewController = view.playerViewController {

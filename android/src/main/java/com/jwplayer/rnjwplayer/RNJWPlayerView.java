@@ -3,6 +3,7 @@ package com.jwplayer.rnjwplayer;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -28,6 +29,7 @@ import android.widget.RelativeLayout;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.lifecycle.Lifecycle;
 import androidx.lifecycle.LifecycleEventObserver;
 import androidx.lifecycle.LifecycleObserver;
@@ -53,6 +55,7 @@ import com.jwplayer.pub.api.JsonHelper;
 import com.jwplayer.pub.api.UiGroup;
 import com.jwplayer.pub.api.background.MediaService;
 import com.jwplayer.pub.api.background.MediaServiceController;
+import com.jwplayer.pub.api.background.ServiceMediaApi;
 import com.jwplayer.pub.api.configuration.PlayerConfig;
 import com.jwplayer.pub.api.configuration.UiConfig;
 import com.jwplayer.pub.api.configuration.ads.AdvertisingConfig;
@@ -120,6 +123,7 @@ import com.jwplayer.pub.api.fullscreen.delegates.SystemUiDelegate;
 import com.jwplayer.pub.api.license.LicenseUtil;
 import com.jwplayer.pub.api.media.captions.Caption;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
+import com.jwplayer.rnjwplayer.session.RNJWMediaServiceController;
 import com.jwplayer.ui.views.CueMarkerSeekbar;
 
 import org.json.JSONObject;
@@ -157,6 +161,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         VideoPlayerEvents.OnCaptionsListListener,
         VideoPlayerEvents.OnCaptionsChangedListener,
         VideoPlayerEvents.OnMetaListener,
+        VideoPlayerEvents.PlaylistItemCallbackListener,
 
         CastingEvents.OnCastListener,
 
@@ -234,8 +239,11 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     private ThemedReactContext mThemedReactContext;
 
-    private MediaServiceController mMediaServiceController;
+    private RNJWMediaServiceController mMediaServiceController;
     private PipHandlerReceiver mReceiver = null;
+
+    // Add completion handler field
+    PlaylistItemDecision itemUpdatePromise = null;
 
     private void doBindService() {
         if (mMediaServiceController != null) {
@@ -354,17 +362,14 @@ public class RNJWPlayerView extends RelativeLayout implements
         return registry;
     }
 
-    // // closest to `ondestroy` for a view without listening to the activity event
-    // // The activity event can be deceptive in React-Native
-    // @Override
-    // protected void onDetachedFromWindow() {
-    //     super.onDetachedFromWindow();
-    //     registry.setCurrentState(Lifecycle.State.DESTROYED);
-    // }
+
 
     public void destroyPlayer() {
         if (mPlayer != null) {
             unRegisterReceiver();
+
+            // Let the playback manager know this player is being destroyed.
+            PlaybackManager.getInstance().clearPlayer(this);
 
             // If we are casting we need to break the cast session as there is no simple
             // way to reconnect to an existing session if the player that created it is dead
@@ -379,6 +384,9 @@ public class RNJWPlayerView extends RelativeLayout implements
             // Stop listening to activities lifecycle
             mActivity.getLifecycle().removeObserver(lifecycleObserver);
             mPlayer.deregisterActivityForPip();
+
+            // Remove playlist item callback listener
+            mPlayer.removePlaylistItemCallbackListener();
 
             mPlayer.removeListeners(this,
                     // VideoPlayerEvents
@@ -457,7 +465,54 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
     }
 
-    public void setupPlayerView(Boolean backgroundAudioEnabled) {
+    /**
+     * Destroy any existing background player from JWPlayerNativePlaybackHandler
+     * Similar to destroyPlayer() but for background players to prevent conflicts
+     */
+    private void destroyBackgroundPlayer() {
+        // THIS METHOD IS DEPRECATED AND REPLACED BY PlaybackManager
+        // Kept for reference during transition, should be removed later.
+        try {
+            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
+            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
+            Object handlerInstance = getInstanceMethod.invoke(null, getContext());
+            
+            if (handlerInstance != null) {
+                // Check if background player is active
+                java.lang.reflect.Method isActiveMethod = handlerClass.getMethod("isBackgroundPlayerActive");
+                Boolean isActive = (Boolean) isActiveMethod.invoke(handlerInstance);
+                
+                if (isActive != null && isActive) {
+                    android.util.Log.d("RNJWPlayerView", "Found active background player, destroying it to prevent conflicts");
+                    
+                    // Get background player info before destroying for logging
+                    try {
+                        java.lang.reflect.Method getInfoMethod = handlerClass.getMethod("getCurrentBackgroundPlayerInfo");
+                        Object backgroundInfo = getInfoMethod.invoke(handlerInstance);
+                        if (backgroundInfo instanceof java.util.Map) {
+                            java.util.Map<String, Object> bgInfo = (java.util.Map<String, Object>) backgroundInfo;
+                            android.util.Log.d("RNJWPlayerView", "Destroying background player playing: " + bgInfo.get("title"));
+                        }
+                    } catch (Exception infoError) {
+                        // Ignore info retrieval errors
+                    }
+                    
+                    // Stop and cleanup background player completely (similar to destroyPlayer)
+                    java.lang.reflect.Method stopMethod = handlerClass.getMethod("stopAndCleanup");
+                    stopMethod.invoke(handlerInstance);
+                    
+                    android.util.Log.d("RNJWPlayerView", "Successfully destroyed background player to prevent dual playback");
+                } else {
+                    android.util.Log.d("RNJWPlayerView", "No active background player found, proceeding with UI player setup");
+                }
+            }
+        } catch (Exception e) {
+            android.util.Log.w("RNJWPlayerView", "Could not check/destroy background player: " + e.getMessage());
+            // Continue with UI player setup even if background player check fails
+        }
+    }
+
+    public void setupPlayerView(Boolean backgroundAudioEnabled, Boolean playlistItemCallbackEnabled) {
         if (mPlayer != null) {
 
             mPlayer.addListeners(this,
@@ -522,9 +577,33 @@ public class RNJWPlayerView extends RelativeLayout implements
             } else {
                 mPlayer.setFullscreenHandler(new fullscreenHandler());
             }
-
             mPlayer.allowBackgroundAudio(backgroundAudioEnabled);
+
+            if (playlistItemCallbackEnabled) {
+                mPlayer.setPlaylistItemCallbackListener(this);
+            }
         }
+    }
+
+    public void resolveNextPlaylistItem(ReadableMap playlistItem) {
+        if (itemUpdatePromise == null) {
+            return;
+        }
+
+        if (playlistItem == null) {
+            itemUpdatePromise.continuePlayback();
+            itemUpdatePromise = null;
+            return;
+        }
+
+        try {
+            PlaylistItem updatedPlaylistItem = Util.getPlaylistItem(playlistItem);
+            itemUpdatePromise.modify(updatedPlaylistItem);
+        } catch (Exception exception) {
+            itemUpdatePromise.continuePlayback();
+        }
+
+        itemUpdatePromise = null;
     }
 
     /**
@@ -628,6 +707,18 @@ public class RNJWPlayerView extends RelativeLayout implements
         return delegate;
     }
 
+    @Override
+    public void onBeforeNextPlaylistItem(PlaylistItemDecision playlistItemDecision, PlaylistItem nextItem, int indexOfNextItem) {
+        WritableMap event = Arguments.createMap();
+        Gson gson = new Gson();
+        event.putString("message", "onBeforeNextPlaylistItem");
+        event.putInt("index", indexOfNextItem);
+        event.putString("playlistItem", gson.toJson(nextItem));
+        getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topBeforeNextPlaylistItem", event);
+
+        itemUpdatePromise = playlistItemDecision;
+    }
+
     private class fullscreenHandler implements FullscreenHandler {
         ViewGroup mPlayerViewContainer = (ViewGroup) mPlayerView.getParent();
         private View mDecorView;
@@ -655,9 +746,6 @@ public class RNJWPlayerView extends RelativeLayout implements
             if (mPlayerViewContainer != null) {
                 mPlayerViewContainer.removeView(mPlayerView);
             }
-
-            // Initialize a new rendering surface.
-            // mPlayerView.initializeSurface();
 
             // Add the JWPlayerView to the RootView as soon as the UI thread is ready.
             mRootView.post(new Runnable() {
@@ -724,24 +812,18 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         @Override
         public void onAllowRotationChanged(boolean b) {
-            Log.e(TAG, "onAllowRotationChanged: " + b);
         }
 
         @Override
         public void onAllowFullscreenPortraitChanged(boolean allowFullscreenPortrait) {
-            Log.e(TAG, "onAllowFullscreenPortraitChanged: " + allowFullscreenPortrait);
         }
 
         @Override
         public void updateLayoutParams(ViewGroup.LayoutParams layoutParams) {
-            // View.setSystemUiVisibility(int).
-            // Log.e(TAG, "updateLayoutParams: "+layoutParams );
         }
 
         @Override
         public void setUseFullscreenLayoutFlags(boolean b) {
-            // View.setSystemUiVisibility(int).
-            // Log.e(TAG, "setUseFullscreenLayoutFlags: "+b );
         }
     }
 
@@ -821,10 +903,10 @@ public class RNJWPlayerView extends RelativeLayout implements
                 // Must be Exported to get intents
                 mActivity.registerReceiver(mReceiver, intentFilter, Context.RECEIVER_EXPORTED);
             } else {
-                mActivity.registerReceiver(mReceiver, intentFilter); // Safe API level < 34
+                ContextCompat.registerReceiver(mActivity, mReceiver, intentFilter, ContextCompat.RECEIVER_EXPORTED); // Safe API level < 34
             }
         } else {
-            mActivity.registerReceiver(mReceiver, intentFilter); // Safe API level < 34
+            ContextCompat.registerReceiver(mActivity, mReceiver, intentFilter, ContextCompat.RECEIVER_EXPORTED); // Safe API level < 34
         }
     }
 
@@ -916,6 +998,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         JSONObject obj;
         PlayerConfig jwConfig = null;
         Boolean forceLegacy = prop.hasKey("forceLegacyConfig") ? prop.getBoolean("forceLegacyConfig") : false;
+        Boolean playlistItemCallbackEnabled = prop.hasKey("playlistItemCallbackEnabled") ? prop.getBoolean("playlistItemCallbackEnabled") : false;
         Boolean isJwConfig = false;
         if (!forceLegacy) {
             try {
@@ -1036,7 +1119,9 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         Context simpleContext = getNonBuggyContext(getReactContext(), getAppContext());
 
-        this.destroyPlayer();
+        // Use the PlaybackManager to stop any active player before creating a new one.
+        // This replaces the reflection-based destroyBackgroundPlayer() call.
+        PlaybackManager.getInstance().stopAndCleanupCurrentPlayer();
 
         mPlayerView = new RNJWPlayer(simpleContext);
 
@@ -1051,9 +1136,12 @@ public class RNJWPlayerView extends RelativeLayout implements
         addView(mPlayerView);
 
         // Ensure we have a valid state before applying to the player
-        registry.setCurrentState(Lifecycle.State.STARTED);
+        registry.setCurrentState(registry.getCurrentState()); // This is a hack to ensure player and view know the lifecycle state
 
         mPlayer = mPlayerView.getPlayer(this);
+
+        // Register this new player view as the active player
+        PlaybackManager.getInstance().setActivePlayer(mPlayer, this);
 
         if (prop.hasKey("controls")) { // Hack for controls hiding not working right away
             mPlayerView.getPlayer().setControls(prop.getBoolean("controls"));
@@ -1155,11 +1243,68 @@ public class RNJWPlayerView extends RelativeLayout implements
             backgroundAudioEnabled = prop.getBoolean("backgroundAudioEnabled");
         }
 
-        setupPlayerView(backgroundAudioEnabled);
+        setupPlayerView(backgroundAudioEnabled, playlistItemCallbackEnabled);
 
+        setupMediaSessionHelper();
+    }
+    
+    /**
+     * Get the context to use for MediaSession operations
+     */
+    private Context getMediaSessionContext() {
+        return getNonBuggyContext(getReactContext(), getAppContext());
+    }
+    
+    /**
+     * Check if MediaSession already exists (from MediaBrowserService)
+     */
+    private boolean hasExistingMediaSession() {
+        try {
+            Class<?> singletonClass = Class.forName("com.mediabrowser.MediaSessionSingleton");
+            java.lang.reflect.Method getInstanceMethod = singletonClass.getMethod("getInstance", Context.class);
+            Object sessionInstance = getInstanceMethod.invoke(null, getMediaSessionContext());
+            return sessionInstance != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void setupMediaSessionHelper() {
         if (backgroundAudioEnabled) {
-            audioManager = (AudioManager) simpleContext.getSystemService(Context.AUDIO_SERVICE);
-            mMediaServiceController = new MediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
+            // The check for an existing player is now handled by the PlaybackManager
+            // at the beginning of setupPlayer(). The destroyBackgroundPlayer() call here
+            // is no longer needed.
+            
+            Context context = getMediaSessionContext();
+            ServiceMediaApi serviceMediaApi = new ServiceMediaApi(mPlayer);
+            com.jwplayer.rnjwplayer.session.RNJWNotificationHelper notificationHelper = new com.jwplayer.rnjwplayer.session.RNJWNotificationHelper.Builder(context, (NotificationManager) mActivity.getSystemService(Context.NOTIFICATION_SERVICE)).build();
+            
+            // Check if MediaSession already exists (from MediaBrowserService)
+            // If it exists, use it; if not, create new one
+            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper rNJWMediaSessionHelper;
+            try {
+                if (hasExistingMediaSession()) {
+                    // Use existing session - don't take audio focus since MediaBrowserService manages it
+                    rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
+                    android.util.Log.d("RNJWPlayerView", "Using existing MediaSession from MediaBrowserService");
+                } else {
+                    // Create new session and request audio focus
+                    rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
+                    // Request audio focus since we're creating a new session
+                    requestAudioFocus();
+                    android.util.Log.d("RNJWPlayerView", "Created new MediaSession");
+                }
+            } catch (Exception e) {
+                // Fallback to creating new session
+                rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
+                requestAudioFocus();
+                android.util.Log.d("RNJWPlayerView", "Created new MediaSession (fallback)");
+            }
+            
+            mMediaServiceController = new RNJWMediaServiceController.Builder(mActivity, mPlayer)
+                    .serviceMediaApi(serviceMediaApi)
+                    .mediaSessionHelper(rNJWMediaSessionHelper)
+                    .notificationHelper(notificationHelper)
                     .build();
         }
     }
@@ -1196,7 +1341,6 @@ public class RNJWPlayerView extends RelativeLayout implements
                         playbackNowAuthorized = false;
                     }
                 }
-                Log.e(TAG, "audioRequest: " + res);
             }
         } else {
             int result = 0;
@@ -1214,7 +1358,6 @@ public class RNJWPlayerView extends RelativeLayout implements
             if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 hasAudioFocus = true;
             }
-            Log.e(TAG, "audioRequest: " + result);
         }
     }
 
@@ -1617,7 +1760,10 @@ public class RNJWPlayerView extends RelativeLayout implements
     public void onFirstFrame(FirstFrameEvent firstFrameEvent) {
         if (backgroundAudioEnabled) {
             doBindService();
-            requestAudioFocus();
+            // Only request audio focus if we're creating a new session
+            if (!hasExistingMediaSession()) {
+                requestAudioFocus();
+            }
         }
         WritableMap onFirstFrame = Arguments.createMap();
         onFirstFrame.putString("message", "onLoaded");
@@ -1817,8 +1963,16 @@ public class RNJWPlayerView extends RelativeLayout implements
             doUnbindService();
         } else {
             if (backgroundAudioEnabled) {
-                mMediaServiceController = new MediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
+                Context simpleContext = getNonBuggyContext(getReactContext(), getAppContext());
+                ServiceMediaApi serviceMediaApi = new ServiceMediaApi(mPlayer);
+                com.jwplayer.rnjwplayer.session.RNJWNotificationHelper notificationHelper = new com.jwplayer.rnjwplayer.session.RNJWNotificationHelper.Builder(simpleContext, (NotificationManager) mActivity.getSystemService(Context.NOTIFICATION_SERVICE)).build();
+                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(simpleContext, notificationHelper, serviceMediaApi);
+                mMediaServiceController = new RNJWMediaServiceController.Builder(mActivity, mPlayer)
+                        .serviceMediaApi(serviceMediaApi)
+                        .mediaSessionHelper(rNJWMediaSessionHelper)
+                        .notificationHelper(notificationHelper)
                         .build();
+
                 doBindService();
             }
         }
