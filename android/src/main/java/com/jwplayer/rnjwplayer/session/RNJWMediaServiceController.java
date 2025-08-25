@@ -40,7 +40,7 @@ public class RNJWMediaServiceController implements ServiceConnection {
         if (serviceMediaApi != null) {
             serviceMediaApi.getPlayer().allowBackgroundAudio(true);
             this.e = serviceMediaApi;
-            this.d.a(serviceMediaApi);
+            this.d.setupServiceMediaApi(serviceMediaApi);
         }
 
     }

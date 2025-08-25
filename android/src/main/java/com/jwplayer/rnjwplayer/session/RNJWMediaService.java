@@ -23,7 +23,7 @@ public class RNJWMediaService extends Service {
 
     public void doStartForeground(RNJWMediaSessionHelper mediaSessionHelper, RNJWNotificationHelper notificationHelper, ServiceMediaApi serviceMediaApi) {
         if (this.b != null) {
-            this.b.a();
+            this.b.cleanup();
         }
 
         this.b = mediaSessionHelper;
@@ -46,7 +46,7 @@ public class RNJWMediaService extends Service {
 
     public boolean onUnbind(Intent intent) {
         if (this.b != null) {
-            this.b.a();
+            this.b.cleanup();
         }
 
         this.stopForeground(true);
@@ -56,7 +56,7 @@ public class RNJWMediaService extends Service {
 
     public void onDestroy() {
         if (this.b != null) {
-            this.b.a();
+            this.b.cleanup();
         }
 
     }
