@@ -18,9 +18,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import androidx.core.content.ContextCompat;
 
-import com.jwplayer.rnjwplayer.misc.a;
-import com.jwplayer.rnjwplayer.misc.b;
-import com.jwplayer.rnjwplayer.misc.c;
+import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
+import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
+import com.jwplayer.rnjwplayer.misc.PlaybackStateCompatWrapper;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.PlayerState;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
@@ -42,13 +42,13 @@ import com.longtailvideo.jwplayer.o.f;
 import com.mediabrowser.MediaSessionSingleton;
 
 public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener {
-    private JWPlayer c;
-    private f d;
-    com.jwplayer.rnjwplayer.misc.b a;
-    private ServiceMediaApi e;
-    private final RNJWNotificationHelper f;
-    final Context b;
-    private final com.jwplayer.rnjwplayer.misc.a g;
+    private JWPlayer jwPlayer;
+    private f albumArtLoadTask;
+    MediaSessionStateProvider mediaSessionStateProvider;
+    private ServiceMediaApi serviceMediaApi;
+    private final RNJWNotificationHelper rnjwNotificationHelper;
+    final Context context;
+    private final MediaServiceFactory mediaServiceFactory;
 
     private BroadcastReceiver mediaButtonFallbackReceiver;
 
@@ -62,68 +62,68 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         @Override
         public void onPlay() {
             try {
-                if (e != null) {
-                    e.onPlay();
-                } else if (c != null) {
-                    c.play();
+                if (serviceMediaApi != null) {
+                    serviceMediaApi.onPlay();
+                } else if (jwPlayer != null) {
+                    jwPlayer.play();
                 }
             } catch (Exception ex) {
                 Log.w(TAG, "mediaSessionCallback onPlay error: " + ex.getMessage());
             }
-            if (c != null) {
-                updatePlaybackState(c, PlaybackStateCompat.STATE_PLAYING);
+            if (jwPlayer != null) {
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
             }
         }
 
         @Override
         public void onPause() {
             try {
-                if (e != null) {
-                    e.onPause();
-                } else if (c != null) {
-                    c.pause();
+                if (serviceMediaApi != null) {
+                    serviceMediaApi.onPause();
+                } else if (jwPlayer != null) {
+                    jwPlayer.pause();
                 }
             } catch (Exception ex) {
                 Log.w(TAG, "mediaSessionCallback onPause error: " + ex.getMessage());
             }
-            if (c != null) {
-                updatePlaybackState(c, PlaybackStateCompat.STATE_PAUSED);
+            if (jwPlayer != null) {
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
             }
         }
 
         @Override
         public void onStop() {
             try {
-                if (e != null) {
-                    e.onStop();
-                } else if (c != null) {
-                    c.stop();
+                if (serviceMediaApi != null) {
+                    serviceMediaApi.onStop();
+                } else if (jwPlayer != null) {
+                    jwPlayer.stop();
                 }
             } catch (Exception ex) {
                 Log.w(TAG, "mediaSessionCallback onStop error: " + ex.getMessage());
             }
-            if (c != null) {
-                updatePlaybackState(c, PlaybackStateCompat.STATE_STOPPED);
+            if (jwPlayer != null) {
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_STOPPED);
             }
         }
 
         @Override
-        public void onSeekTo(long pos) {
-            performSeekTo(pos);
-            if (c != null) {
+        public void onSeekTo(long position) {
+            performSeekTo(position);
+            if (jwPlayer != null) {
                 // Keep state (playing vs paused) consistent after seek
-                int st = (c.getState() == PlayerState.PLAYING)
+                int playerState = (jwPlayer.getState() == PlayerState.PLAYING)
                         ? PlaybackStateCompat.STATE_PLAYING
                         : PlaybackStateCompat.STATE_PAUSED;
-                updatePlaybackState(c, st, pos);
+                updatePlaybackState(jwPlayer, playerState, position);
             }
         }
 
         @Override
         public void onSkipToNext() {
             try {
-                if (e != null) {
-                    e.onSkipToNext();
+                if (serviceMediaApi != null) {
+                    serviceMediaApi.onSkipToNext();
                 }
             } catch (Exception ex) {
                 Log.w(TAG, "mediaSessionCallback onSkipToNext error: " + ex.getMessage());
@@ -133,8 +133,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         @Override
         public void onSkipToPrevious() {
             try {
-                if (e != null) {
-                    e.onSkipToPrevious();
+                if (serviceMediaApi != null) {
+                    serviceMediaApi.onSkipToPrevious();
                 }
             } catch (Exception ex) {
                 Log.w(TAG, "mediaSessionCallback onSkipToPrevious error: " + ex.getMessage());
@@ -162,8 +162,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                             case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
                                 boolean isPlaying = false;
                                 try {
-                                    if (a != null && a.a != null) {
-                                        PlaybackStateCompat playbackState = a.a.getController().getPlaybackState();
+                                    if (mediaSessionStateProvider != null && mediaSessionStateProvider.mediaSessionCompat != null) {
+                                        PlaybackStateCompat playbackState = mediaSessionStateProvider.mediaSessionCompat.getController().getPlaybackState();
                                         if (playbackState != null) {
                                             int state = playbackState.getState();
                                             isPlaying = (state == PlaybackStateCompat.STATE_PLAYING || 
@@ -172,8 +172,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                                     }
                                 } catch (Exception ex) {
                                     // Fallback to JWPlayer state if MediaSession state unavailable
-                                    if (c != null) {
-                                        isPlaying = (c.getState() == PlayerState.PLAYING);
+                                    if (jwPlayer != null) {
+                                        isPlaying = (jwPlayer.getState() == PlayerState.PLAYING);
                                     }
                                 }
                                 
@@ -206,13 +206,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     };
 
     public RNJWMediaSessionHelper(Context context, RNJWNotificationHelper notificationHelper, ServiceMediaApi serviceMediaApi) {
-        this(context, notificationHelper, serviceMediaApi, new a());
+        this(context, notificationHelper, serviceMediaApi, new MediaServiceFactory());
     }
 
-    private RNJWMediaSessionHelper(Context context, RNJWNotificationHelper notificationHelper, ServiceMediaApi serviceMediaApi, a bgaFactory) {
-        this.b = context;
-        this.f = notificationHelper;
-        this.g = bgaFactory;
+    private RNJWMediaSessionHelper(Context context, RNJWNotificationHelper notificationHelper, ServiceMediaApi serviceMediaApi, MediaServiceFactory bgaFactory) {
+        this.context = context;
+        this.rnjwNotificationHelper = notificationHelper;
+        this.mediaServiceFactory = bgaFactory;
         
         // Set this as the active instance for delegation
         activeInstance = this;
@@ -223,30 +223,29 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     final void setupServiceMediaApi(ServiceMediaApi serviceMediaApi) {
         this.cleanup();
         if (serviceMediaApi != null) {
-            this.c = serviceMediaApi.getPlayer();
-            Context var10001 = this.b;
-            String var3 = RNJWMediaSessionHelper.class.getSimpleName();
-            Context var2 = var10001;
-            this.a =  new b(MediaSessionSingleton.getInstance(var2));
-//            this.a = new b(new MediaSessionCompat(var2, var3));
-            this.e = serviceMediaApi;
+            this.jwPlayer = serviceMediaApi.getPlayer();
+            Context currentContext = this.context;
+            this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
+//            String simpleName = RNJWMediaSessionHelper.class.getSimpleName();
+//            this.a = new b(new MediaSessionCompat(currentContext, simpleName));
+            this.serviceMediaApi = serviceMediaApi;
 
             // Attach callback (was previously intentionally omitted)
             try {
-                if (this.a != null && this.a.a != null) {
-                    this.a.a.setCallback(mediaSessionCallback);
+                if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
+                    this.mediaSessionStateProvider.mediaSessionCompat.setCallback(mediaSessionCallback);
                 }
             } catch (Exception cbEx) {
                 Log.w(TAG, "Failed to set MediaSession callback: " + cbEx.getMessage());
             }
 
-            setupMediaButtonFallback(var2);
+            setupMediaButtonFallback(currentContext);
             
             // Check if background player is active and coordinate
             try {
                 Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
                 java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-                Object handlerInstance = getInstanceMethod.invoke(null, this.b);
+                Object handlerInstance = getInstanceMethod.invoke(null, this.context);
                 
                 if (handlerInstance != null) {
                     // Check if background player is active
@@ -273,10 +272,10 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // DON'T set callback here - MediaBrowserService already has the callback set
             // and it will delegate to us when needed via static methods or fallback to direct handling
             
-            this.c.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
-            JWPlayer var4 = this.c;
-            this.updatePlaylistItem(var4.getPlaylistItem());
-            this.updatePlayerState(var4.getState());
+            this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
+            JWPlayer currentJwPlayer = this.jwPlayer;
+            this.updatePlaylistItem(currentJwPlayer.getPlaylistItem());
+            this.updatePlayerState(currentJwPlayer.getState());
         }
 
     }
@@ -286,7 +285,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void updatePlaybackState(JWPlayer player, int state, Long overridePositionMs) {
-        if (this.a == null || this.a.a == null || player == null) {
+        if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null || player == null) {
             return;
         }
 
@@ -309,9 +308,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 PlaybackStateCompat.ACTION_SEEK_TO |
                 PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID;
 
-        if (e != null) {
+        if (serviceMediaApi != null) {
             try {
-                long caps = this.e.getNotificationCapabilities();
+                long caps = this.serviceMediaApi.getNotificationCapabilities();
                 actions |= caps;
             } catch (Exception ex) {
                 Log.w(TAG, "updatePlaybackState: capabilities read failed " + ex.getMessage());
@@ -325,8 +324,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 .setActions(actions);
 
         try {
-            this.a.a.setPlaybackState(builder.build());
-            this.a.a.setActive(true);
+            this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(builder.build());
+            this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
         } catch (Exception ex) {
             Log.w(TAG, "updatePlaybackState: set failed " + ex.getMessage());
         }
@@ -334,42 +333,43 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void setupMediaButtonFallback(Context ctx) {
         if (mediaButtonFallbackReceiver != null) return;
+
         mediaButtonFallbackReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (!Intent.ACTION_MEDIA_BUTTON.equals(intent.getAction())) return;
                 
-                KeyEvent ke = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
-                if (ke == null || ke.getAction() != KeyEvent.ACTION_DOWN) return;
-                int kc = ke.getKeyCode();
+                KeyEvent keyEvent = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                if (keyEvent == null || keyEvent.getAction() != KeyEvent.ACTION_DOWN) return;
+                int keyCode = keyEvent.getKeyCode();
 
                 // Fallback handling if session callback not invoked
                 try {
-                    MediaSessionCompat session = (a != null) ? a.a : null;
-                    MediaControllerCompat.TransportControls tc = (session != null)
+                    MediaSessionCompat session = (mediaSessionStateProvider != null) ? mediaSessionStateProvider.mediaSessionCompat : null;
+                    MediaControllerCompat.TransportControls transportControls = (session != null)
                             ? session.getController().getTransportControls() : null;
 
                     boolean handled = false;
-                    if (kc == KeyEvent.KEYCODE_MEDIA_PLAY
-                            || kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
-                            || kc == KeyEvent.KEYCODE_MEDIA_PAUSE) {
+                    if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY
+                            || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+                            || keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE) {
 
-                        PlayerState ps = (c != null) ? c.getState() : null;
+                        PlayerState ps = (jwPlayer != null) ? jwPlayer.getState() : null;
 
-                        if (kc == KeyEvent.KEYCODE_MEDIA_PLAY ||
-                                (kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && ps != PlayerState.PLAYING)) {
-                            if (tc != null) tc.play(); else if (c != null) c.play();
+                        if (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
+                                (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && ps != PlayerState.PLAYING)) {
+                            if (transportControls != null) transportControls.play(); else if (jwPlayer != null) jwPlayer.play();
                             handled = true;
-                        } else if (kc == KeyEvent.KEYCODE_MEDIA_PAUSE ||
-                                (kc == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && ps == PlayerState.PLAYING)) {
-                            if (tc != null) tc.pause(); else if (c != null) c.pause();
+                        } else if (keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE ||
+                                (keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE && ps == PlayerState.PLAYING)) {
+                            if (transportControls != null) transportControls.pause(); else if (jwPlayer != null) jwPlayer.pause();
                             handled = true;
                         }
                     }
                     if (handled) {
-                        int st = (c != null && c.getState() == PlayerState.PLAYING)
+                        int playerState = (jwPlayer != null && jwPlayer.getState() == PlayerState.PLAYING)
                                 ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
-                        updatePlaybackState(c, st);
+                        updatePlaybackState(jwPlayer, playerState);
                     }
                 } catch (Exception ex) {
                     Log.w(TAG, "Fallback media button handling error " + ex.getMessage());
@@ -377,11 +377,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         };
         try {
-            IntentFilter f = new IntentFilter(Intent.ACTION_MEDIA_BUTTON);
+            IntentFilter intentFilter = new IntentFilter(Intent.ACTION_MEDIA_BUTTON);
             ContextCompat.registerReceiver(
                     ctx,
                     mediaButtonFallbackReceiver,
-                    f,
+                    intentFilter,
                     ContextCompat.RECEIVER_EXPORTED);
         } catch (Exception ex) {
             Log.w(TAG, "setupMediaButtonFallback: register failed " + ex.getMessage());
@@ -389,91 +389,89 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     final void cleanup() {
-        RNJWNotificationHelper var1;
-        if (this.a != null) {
+        RNJWNotificationHelper notificationHelper;
+        if (this.mediaSessionStateProvider != null) {
              // Unregister fallback receiver if present
             if (mediaButtonFallbackReceiver != null) {
                 try {
-                    b.unregisterReceiver(mediaButtonFallbackReceiver);
+                    context.unregisterReceiver(mediaButtonFallbackReceiver);
                 } catch (Exception unregEx) {
                     Log.w(TAG, "Failed to unregister media button fallback receiver: " + unregEx.getMessage());
                 }
                 mediaButtonFallbackReceiver = null;
             }
 
-            this.a.a.setActive(false);
-            this.e = null;
+            this.mediaSessionStateProvider.mediaSessionCompat.setActive(false);
+            this.serviceMediaApi = null;
             
             // Clear active instance if this is the active one
             if (activeInstance == this) {
                 activeInstance = null;
             }
-            var1 = null;
 
             try {
-                this.a.a.setCallback(null);
+                this.mediaSessionStateProvider.mediaSessionCompat.setCallback(null);
             } catch (Exception ignore) {}
-            this.a.a.release();
-            this.a = null;
+            this.mediaSessionStateProvider.mediaSessionCompat.release();
+            this.mediaSessionStateProvider = null;
         }
 
-        if (this.c != null) {
-            this.c.removeListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
-            (var1 = this.f).a.cancel(var1.b);
-            if (this.d != null) {
-                this.d.cancel(true);
-                this.d = null;
+        if (this.jwPlayer != null) {
+            this.jwPlayer.removeListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
+            (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
+            if (this.albumArtLoadTask != null) {
+                this.albumArtLoadTask.cancel(true);
+                this.albumArtLoadTask = null;
             }
 
-            this.c = null;
+            this.jwPlayer = null;
         }
 
     }
 
     private void updatePlayerState(PlayerState playerState) {
-        com.jwplayer.rnjwplayer.misc.c var5 = this.a.a();
-        c.a var2 = new c.a(var5);
-        long var3 = this.e.getNotificationCapabilities();
-        var2.a.setActions(var3 | PlaybackStateCompat.ACTION_SEEK_TO);
-        byte var8 = 0;
+        PlaybackStateCompatWrapper currentPlaybackState = this.mediaSessionStateProvider.getPlaybackState();
+        PlaybackStateCompatWrapper.Builder playbackStateBuilder = new PlaybackStateCompatWrapper.Builder(currentPlaybackState);
+        long notificationCapabilities = this.serviceMediaApi.getNotificationCapabilities();
+        playbackStateBuilder.builder.setActions(notificationCapabilities | PlaybackStateCompat.ACTION_SEEK_TO);
+        byte playbackState = 0;
         switch (playerState) {
             case PLAYING:
-                var8 = PlaybackStateCompat.STATE_PLAYING;
+                playbackState = PlaybackStateCompat.STATE_PLAYING;
                 break;
             case PAUSED:
-                var8 = PlaybackStateCompat.STATE_PAUSED;
+                playbackState = PlaybackStateCompat.STATE_PAUSED;
                 break;
             case BUFFERING:
-                var8 = PlaybackStateCompat.STATE_BUFFERING;
+                playbackState = PlaybackStateCompat.STATE_BUFFERING;
                 break;
             case ERROR:
-                var8 = PlaybackStateCompat.STATE_ERROR;
+                playbackState = PlaybackStateCompat.STATE_ERROR;
                 break;
             case IDLE:
             default:
-                var8 = PlaybackStateCompat.STATE_STOPPED;
+                playbackState = PlaybackStateCompat.STATE_STOPPED;
         }
-        long var9 = (long)this.c.getPosition() * 1000; // (long)(this.c.getPosition() * 1000.0);
-        var2.a.setState(var8, var9, 1.0F);
-        b var10000 = this.a;
-        c var10 = new c(var2.a.build());
-        var10000.a.setPlaybackState(var10.a);
-        boolean var7 = playerState != PlayerState.ERROR && playerState != PlayerState.IDLE;
-        this.a.a.setActive(var7);
-        if (var7) {
-            this.f.a(this.b, this.a, this.e);
+        long positionMs = (long)this.jwPlayer.getPosition() * 1000; // (long)(this.c.getPosition() * 1000.0);
+        playbackStateBuilder.builder.setState(playbackState, positionMs, 1.0F);
+        PlaybackStateCompatWrapper updatedPlaybackState =  new PlaybackStateCompatWrapper(playbackStateBuilder.builder.build());
+        this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(updatedPlaybackState.playbackStateCompat);
+        boolean isActive = playerState != PlayerState.ERROR && playerState != PlayerState.IDLE;
+        this.mediaSessionStateProvider.mediaSessionCompat.setActive(isActive);
+        if (isActive) {
+            this.rnjwNotificationHelper.showNotification(this.context, this.mediaSessionStateProvider, this.serviceMediaApi);
         } else {
-            RNJWNotificationHelper var11;
-            (var11 = this.f).a.cancel(var11.b);
+            RNJWNotificationHelper currentNotificationHelper;
+            (currentNotificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(currentNotificationHelper.notificationId);
         }
     }
 
     private void updatePlaylistItem(PlaylistItem playlistItem) {
-        if (playlistItem == null || this.c == null) {
+        if (playlistItem == null || this.jwPlayer == null) {
             return;
         }
 
-        PlaylistItem currentItem = this.c.getPlaylistItem();
+        PlaylistItem currentItem = this.jwPlayer.getPlaylistItem();
 
         long duration = 0L;
         if (currentItem != null && currentItem.getDuration() != null && currentItem.getDuration() > 0) {
@@ -504,19 +502,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         builder.putLong("android.media.metadata.DURATION", duration);
 
-        if (this.a != null && this.a.a != null) {
-            this.a.a.setMetadata(builder.build());
+        if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
+            this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(builder.build());
         }
 
-        if (this.d != null) {
-            this.d.cancel(true);
-            this.d = null;
+        if (this.albumArtLoadTask != null) {
+            this.albumArtLoadTask.cancel(true);
+            this.albumArtLoadTask = null;
         }
 
         if (playlistItem.getImage() != null && !playlistItem.getImage().isEmpty()) {
-            f.a var3 = this::updateAlbumArt;
-            this.d = new f(var3);
-            this.d.execute(new String[]{playlistItem.getImage()});
+            f.a albumArtCallback = this::updateAlbumArt;
+            this.albumArtLoadTask = new f(albumArtCallback);
+            this.albumArtLoadTask.execute(new String[]{playlistItem.getImage()});
         }
     }
 
@@ -526,7 +524,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onError(ErrorEvent errorEvent) {
         this.updatePlayerState(PlayerState.ERROR);
-        this.a.a.release();
+        this.mediaSessionStateProvider.mediaSessionCompat.release();
     }
 
     public void onAdComplete(AdCompleteEvent adCompleteEvent) {
@@ -543,55 +541,55 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onBuffer(BufferEvent bufferEvent) {
         this.updatePlayerState(PlayerState.BUFFERING);
-        updatePlaybackState(c, PlaybackStateCompat.STATE_BUFFERING);
+        updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING);
     }
 
     public void onPause(PauseEvent pauseEvent) {
         this.updatePlayerState(PlayerState.PAUSED);
-        updatePlaybackState(c, PlaybackStateCompat.STATE_PAUSED);
+        updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
     }
 
     public void onPlay(PlayEvent playEvent) {
         this.updatePlayerState(PlayerState.PLAYING);
-        updatePlaybackState(c, PlaybackStateCompat.STATE_PLAYING);
+        updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
     }
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
-        if (this.a == null || this.a.a == null) return;
+        if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null) return;
 
         try {
             // Build a PAUSED playback state
             // This keeps the progress bar interactive and shows correct button state
-            com.jwplayer.rnjwplayer.misc.c capsWrapper = this.a.a();
-            c.a stateBuilder = new c.a(capsWrapper);
+            PlaybackStateCompatWrapper capsWrapper = this.mediaSessionStateProvider.getPlaybackState();
+            PlaybackStateCompatWrapper.Builder stateBuilder = new PlaybackStateCompatWrapper.Builder(capsWrapper);
 
             // Include seek actions so progress bar remains interactive
             long actions = PlaybackStateCompat.ACTION_PLAY
                     | PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
                     | PlaybackStateCompat.ACTION_SEEK_TO;
 
-            if (this.e != null) {
+            if (this.serviceMediaApi != null) {
                 try {
-                    long caps = this.e.getNotificationCapabilities();
+                    long caps = this.serviceMediaApi.getNotificationCapabilities();
                     actions |= caps;
                 } catch (Exception ex) {
                     Log.w(TAG, "Could not get service capabilities: " + ex.getMessage());
                 }
             }
 
-            stateBuilder.a.setActions(actions);
+            stateBuilder.builder.setActions(actions);
 
             // Get the total duration for positioning at the end
             long totalDurationMs = 0;
             long positionMs = 0;
             
             try {
-                if (this.c != null && this.c.getPlaylistItem() != null && this.c.getPlaylistItem().getDuration() != null) {
-                    totalDurationMs = (long)(this.c.getPlaylistItem().getDuration() * 1000);
+                if (this.jwPlayer != null && this.jwPlayer.getPlaylistItem() != null && this.jwPlayer.getPlaylistItem().getDuration() != null) {
+                    totalDurationMs = (long)(this.jwPlayer.getPlaylistItem().getDuration() * 1000);
                     positionMs = totalDurationMs; // Position at the end
                 } else {
                     // Fallback: try to get current position
-                    positionMs = this.c != null ? (long)(this.c.getPosition() * 1000) : 0L;
+                    positionMs = this.jwPlayer != null ? (long)(this.jwPlayer.getPosition() * 1000) : 0L;
                 }
             } catch (Exception ex) {
                 Log.w(TAG, "Could not get duration/position for completion: " + ex.getMessage());
@@ -600,18 +598,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
             // Set to PAUSED state with normal playback rate so progress bar stays interactive
             // Position at the end, but with rate 1.0f so seeking works
-            stateBuilder.a.setState(PlaybackStateCompat.STATE_PAUSED, positionMs, 1.0f);
+            stateBuilder.builder.setState(PlaybackStateCompat.STATE_PAUSED, positionMs, 1.0f);
 
-            this.a.a.setPlaybackState(new c(stateBuilder.a.build()).a);
+            this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(new PlaybackStateCompatWrapper(stateBuilder.builder.build()).playbackStateCompat);
 
             // Keep session active so UI remains available
-            this.a.a.setActive(true);
+            this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
 
             // Explicitly show notification (like the a(PlayerState) method does)
-            this.f.a(this.b, this.a, this.e);
+            this.rnjwNotificationHelper.showNotification(this.context, this.mediaSessionStateProvider, this.serviceMediaApi);
 
             try {
-                updatePlaybackState(c, PlaybackStateCompat.STATE_PAUSED);
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
             } catch (Exception ignore) {}
         } catch (Exception ex) {
             Log.w(TAG, "Failed to set completion state", ex);
@@ -619,13 +617,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     void updateAlbumArt(Bitmap bitmap) {
-        if (this.a != null) {
-            MediaMetadataCompat var2;
-            MediaMetadataCompat.Builder var4;
-            (var4 = (var2 = this.a.a.getController().getMetadata()) == null ? new MediaMetadataCompat.Builder() : new MediaMetadataCompat.Builder(var2)).putBitmap("android.media.metadata.ART", bitmap);
-            b var10000 = this.a;
-            MediaMetadataCompat var3 = var4.build();
-            var10000.a.setMetadata(var3);
+        if (this.mediaSessionStateProvider != null) {
+            MediaMetadataCompat mediaMetadataCompat;
+            MediaMetadataCompat.Builder builder;
+            (builder = (mediaMetadataCompat = this.mediaSessionStateProvider.mediaSessionCompat.getController().getMetadata()) == null ? new MediaMetadataCompat.Builder() : new MediaMetadataCompat.Builder(mediaMetadataCompat)).putBitmap("android.media.metadata.ART", bitmap);
+            MediaMetadataCompat metadataCompat = builder.build();
+            this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(metadataCompat);
         }
     }
     
@@ -647,7 +644,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // Then, handle JWPlayer logic - start actual playback
             Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
             java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-            Object handlerInstance = getInstanceMethod.invoke(null, this.b);
+            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
             
             if (handlerInstance != null) {
                 // Extract media info from extras
@@ -684,7 +681,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // Try to seek in background player first
             Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
             java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-            Object handlerInstance = getInstanceMethod.invoke(null, this.b);
+            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
             
             if (handlerInstance != null) {
                 // Check if background player exists and seek
@@ -694,9 +691,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         } catch (Exception e) { }       
         
         // Always seek UI player too (or as fallback) so its reported position updates promptly
-        if (this.c != null) {
+        if (this.jwPlayer != null) {
             try {
-                this.c.seek(positionMs / 1000.0);
+                this.jwPlayer.seek(positionMs / 1000.0);
             } catch (Exception uiSeekError) {
                 Log.e(TAG, "UI player seek failed", uiSeekError);
             }
@@ -720,9 +717,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handlePlay() {
-        if (activeInstance != null && activeInstance.e != null) {
+        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
             try {
-                activeInstance.e.onPlay();
+                activeInstance.serviceMediaApi.onPlay();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handlePlay", e);
@@ -733,9 +730,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handlePause() {
-        if (activeInstance != null && activeInstance.e != null) {
+        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
             try {
-                activeInstance.e.onPause();
+                activeInstance.serviceMediaApi.onPause();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handlePause", e);
@@ -746,9 +743,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleStop() {
-        if (activeInstance != null && activeInstance.e != null) {
+        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
             try {
-                activeInstance.e.onStop();
+                activeInstance.serviceMediaApi.onStop();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleStop", e);
@@ -759,9 +756,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSkipToNext() {
-        if (activeInstance != null && activeInstance.e != null) {
+        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
             try {
-                activeInstance.e.onSkipToNext();
+                activeInstance.serviceMediaApi.onSkipToNext();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleSkipToNext", e);
@@ -772,9 +769,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSkipToPrevious() {
-        if (activeInstance != null && activeInstance.e != null) {
+        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
             try {
-                activeInstance.e.onSkipToPrevious();
+                activeInstance.serviceMediaApi.onSkipToPrevious();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleSkipToPrevious", e);
@@ -788,20 +785,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (activeInstance != null) {
             try {
                 activeInstance.performSeekTo(position);
-                if (activeInstance.e != null) {
+                if (activeInstance.serviceMediaApi != null) {
                     try {
-                        activeInstance.e.onSeekTo(position);
+                        activeInstance.serviceMediaApi.onSeekTo(position);
                     } catch (Exception se) {
                         Log.w(TAG, "Service seek delegation failed: " + se.getMessage());
                     }
                 }
 
                 // Update playback state immediately with requested position
-                if (activeInstance.c != null) {
-                    int st = (activeInstance.c.getState() == PlayerState.PLAYING)
+                if (activeInstance.jwPlayer != null) {
+                    int playerState = (activeInstance.jwPlayer.getState() == PlayerState.PLAYING)
                             ? PlaybackStateCompat.STATE_PLAYING
                             : PlaybackStateCompat.STATE_PAUSED;
-                    activeInstance.updatePlaybackState(activeInstance.c, st, position);
+                    activeInstance.updatePlaybackState(activeInstance.jwPlayer, playerState, position);
                 }
                 return true;
             } catch (Exception e) {

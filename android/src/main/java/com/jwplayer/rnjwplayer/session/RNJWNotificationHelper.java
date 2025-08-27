@@ -17,110 +17,111 @@ import android.support.v4.media.session.MediaSessionCompat;
 
 import androidx.core.app.NotificationCompat;
 
-import com.jwplayer.rnjwplayer.misc.a;
+import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
+import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
 import com.longtailvideo.jwplayer.R.drawable;
 
 public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
-    final NotificationManager a;
-    private NotificationChannel c;
-    private final int d;
-    final int b;
-    private final String e;
-    private final String f;
-    private final String g;
-    private final com.jwplayer.rnjwplayer.misc.a h;
+    final NotificationManager notificationManager;
+    private NotificationChannel notificationChannel;
+    private final int smallIconResId;
+    final int notificationId;
+    private final String notificationChannelId;
+    private final String channelName;
+    private final String channelDescription;
+    private final MediaServiceFactory mediaServiceFactory;
 
-    protected RNJWNotificationHelper(NotificationManager notificationManager, int iconDrawableResource, int notificationId, String notificationChannelId, String channelNameDisplayedToUser, String channelDescription, a factory) {
-        this.a = notificationManager;
-        this.d = iconDrawableResource;
-        this.b = notificationId;
-        this.e = notificationChannelId;
-        this.f = channelNameDisplayedToUser;
-        this.g = channelDescription;
-        this.h = factory;
+    protected RNJWNotificationHelper(NotificationManager notificationManager, int iconDrawableResource, int notificationId, String notificationChannelId, String channelNameDisplayedToUser, String channelDescription, MediaServiceFactory factory) {
+        this.notificationManager = notificationManager;
+        this.smallIconResId = iconDrawableResource;
+        this.notificationId = notificationId;
+        this.notificationChannelId = notificationChannelId;
+        this.channelName = channelNameDisplayedToUser;
+        this.channelDescription = channelDescription;
+        this.mediaServiceFactory = factory;
         if (VERSION.SDK_INT >= 26) {
-            String notificationId1 = this.f;
-            String iconDrawableResource1 = this.e;
-            this.c = new NotificationChannel(iconDrawableResource1, notificationId1, NotificationManager.IMPORTANCE_LOW);
-            this.c.setDescription(this.g);
-            this.c.setShowBadge(false);
-            this.c.setLockscreenVisibility(1);
-            this.a.createNotificationChannel(this.c);
+            String channelName = this.channelName;
+            String channelId = this.notificationChannelId;
+            this.notificationChannel = new NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_LOW);
+            this.notificationChannel.setDescription(this.channelDescription);
+            this.notificationChannel.setShowBadge(false);
+            this.notificationChannel.setLockscreenVisibility(1);
+            this.notificationManager.createNotificationChannel(this.notificationChannel);
         }
 
     }
 
-    final Notification a(Context var1, com.jwplayer.rnjwplayer.misc.b var2, ServiceMediaApi var3) {
-        MediaDescriptionCompat var4 = var2.a.getController().getMetadata().getDescription();
-        String var7 = this.e;
-        NotificationCompat.Builder var5 = new NotificationCompat.Builder(var1, var7);
-        var3.addNotificationActions(var1, var5);
-        var5.setContentTitle(var4.getTitle()).setContentText(var4.getSubtitle()).setSubText(var4.getDescription()).setLargeIcon(var4.getIconBitmap()).setOnlyAlertOnce(true).setStyle((new androidx.media.app.NotificationCompat.MediaStyle()).setMediaSession(var2.a.getSessionToken()).setShowActionsInCompactView(var3.getCompactActions())).setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setSmallIcon(this.d).setDeleteIntent(var3.getActionIntent(var1, 86));
-        Intent var9;
-        (var9 = new Intent(var1, var1.getClass())).setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        var5.setContentIntent(PendingIntent.getActivity(var1, 0, var9, PendingIntent.FLAG_IMMUTABLE));
-        Notification var8 = var5.build();
-        this.a.notify(this.b, var8);
-        return var8;
+    final Notification showNotification(Context context, MediaSessionStateProvider stateProvider, ServiceMediaApi serviceMediaApi) {
+        MediaDescriptionCompat description = stateProvider.mediaSessionCompat.getController().getMetadata().getDescription();
+        String channelId = this.notificationChannelId;
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId);
+        serviceMediaApi.addNotificationActions(context, builder);
+        builder.setContentTitle(description.getTitle()).setContentText(description.getSubtitle()).setSubText(description.getDescription()).setLargeIcon(description.getIconBitmap()).setOnlyAlertOnce(true).setStyle((new androidx.media.app.NotificationCompat.MediaStyle()).setMediaSession(stateProvider.mediaSessionCompat.getSessionToken()).setShowActionsInCompactView(serviceMediaApi.getCompactActions())).setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setSmallIcon(this.smallIconResId).setDeleteIntent(serviceMediaApi.getActionIntent(context, 86));
+        Intent activityIntent;
+        (activityIntent = new Intent(context, context.getClass())).setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        builder.setContentIntent(PendingIntent.getActivity(context, 0, activityIntent, PendingIntent.FLAG_IMMUTABLE));
+        Notification notification = builder.build();
+        this.notificationManager.notify(this.notificationId, notification);
+        return notification;
     }
 
     public static class Builder {
-        protected NotificationManager a;
-        protected a b;
-        protected int c;
-        protected int d;
-        protected String e;
-        protected String f;
-        protected String g;
+        protected NotificationManager notificationManager;
+        protected MediaServiceFactory mediaServiceFactory;
+        protected int iconDrawableResource;
+        protected int notificationId;
+        protected String notificationChannelId;
+        protected String channelName;
+        protected String channelDescription;
 
-        protected Context h;
+        protected Context context;
 
         public Builder(Context context, NotificationManager notificationManager) {
-            this(context, notificationManager, new a());
+            this(context, notificationManager, new MediaServiceFactory());
         }
 
-        private Builder(Context context, NotificationManager manager, a factory) {
-            this.h = context;
-            int appIcon = this.h.getResources().getIdentifier("ic_app_icon", "drawable", this.h.getPackageName());
+        private Builder(Context context, NotificationManager manager, MediaServiceFactory factory) {
+            this.context = context;
+            int appIcon = this.context.getResources().getIdentifier("ic_app_icon", "drawable", this.context.getPackageName());
 
-            this.c = appIcon > 0 ? appIcon : drawable.ic_jw_play;
+            this.iconDrawableResource = appIcon > 0 ? appIcon : drawable.ic_jw_play;
 
-            this.d = 2005;
-            this.e = "NotificationBarController";
-            this.f = "Player Notification";
-            this.g = "Control playback of the media player";
-            this.a = manager;
-            this.b = factory;
+            this.notificationId = 2005;
+            this.notificationChannelId = "NotificationBarController";
+            this.channelName = "Player Notification";
+            this.channelDescription = "Control playback of the media player";
+            this.notificationManager = manager;
+            this.mediaServiceFactory = factory;
         }
 
         public Builder iconDrawableResource(int iconDrawableResource) {
-            this.c = iconDrawableResource;
+            this.iconDrawableResource = iconDrawableResource;
             return this;
         }
 
         public Builder notificationId(int notificationId) {
-            this.d = notificationId;
+            this.notificationId = notificationId;
             return this;
         }
 
         public Builder notificationChannelId(String notificationChannelId) {
-            this.e = notificationChannelId;
+            this.notificationChannelId = notificationChannelId;
             return this;
         }
 
         public Builder channelNameDisplayedToUser(String channelNameDisplayedToUser) {
-            this.f = channelNameDisplayedToUser;
+            this.channelName = channelNameDisplayedToUser;
             return this;
         }
 
         public Builder channelDescription(String channelDescription) {
-            this.g = channelDescription;
+            this.channelDescription = channelDescription;
             return this;
         }
 
         public RNJWNotificationHelper build() {
-            return new RNJWNotificationHelper(this.a, this.c, this.d, this.e, this.f, this.g, this.b);
+            return new RNJWNotificationHelper(this.notificationManager, this.iconDrawableResource, this.notificationId, this.notificationChannelId, this.channelName, this.channelDescription, this.mediaServiceFactory);
         }
     }
 }
