@@ -42,6 +42,8 @@ import com.longtailvideo.jwplayer.o.f;
 import com.mediabrowser.MediaSessionSingleton;
 
 public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener {
+    private static final String TAG = "RNJWMediaSessionHelper";
+
     private JWPlayer jwPlayer;
     private f albumArtLoadTask;
     MediaSessionStateProvider mediaSessionStateProvider;
@@ -51,8 +53,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private final MediaServiceFactory mediaServiceFactory;
 
     private BroadcastReceiver mediaButtonFallbackReceiver;
-
-    private static final String TAG = "RNJWMediaSessionHelper";
     
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
@@ -473,12 +473,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         PlaylistItem currentItem = this.jwPlayer.getPlaylistItem();
 
-        long duration = 0L;
-        if (currentItem != null && currentItem.getDuration() != null && currentItem.getDuration() > 0) {
-            duration = (long) (currentItem.getDuration() * 1000);
-        }
-
-        MediaMetadataCompat.Builder builder = new MediaMetadataCompat.Builder();
+        // Keep last known or existing metadata
+        MediaMetadataCompat existing = (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null)
+                ? this.mediaSessionStateProvider.mediaSessionCompat.getController().getMetadata()
+                : null;
+        MediaMetadataCompat.Builder builder = (existing == null)
+                ? new MediaMetadataCompat.Builder()
+                : new MediaMetadataCompat.Builder(existing);
 
         builder.putString("android.media.metadata.DISPLAY_TITLE", 
             playlistItem.getTitle() != null ? playlistItem.getTitle() : "");
@@ -499,8 +500,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             builder.putString("android.media.metadata.ARTIST", "");
             builder.putString("android.media.metadata.TITLE", "");
         }
-
-        builder.putLong("android.media.metadata.DURATION", duration);
 
         if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
             this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(builder.build());
