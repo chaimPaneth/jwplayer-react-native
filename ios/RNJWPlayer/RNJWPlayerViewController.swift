@@ -267,9 +267,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
         super.pictureInPictureControllerWillStartPictureInPicture(pictureInPictureController)
     }
 
-    override func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController,
-      restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
-    ) {
+    override func pictureInPictureController(_ pictureInPictureController:AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler:@escaping (Bool) -> Void) {
         super.pictureInPictureController(pictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler: completionHandler)
     }
 
