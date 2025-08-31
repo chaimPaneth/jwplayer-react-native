@@ -15,25 +15,25 @@ import androidx.media.session.MediaButtonReceiver;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 
 public class RNJWMediaService extends Service {
-    protected final IBinder a = new Binder();
-    protected RNJWMediaSessionHelper b;
+    protected final IBinder binder = new Binder();
+    protected RNJWMediaSessionHelper mediaSessionHelper;
 
     public RNJWMediaService() {
     }
 
     public void doStartForeground(RNJWMediaSessionHelper mediaSessionHelper, RNJWNotificationHelper notificationHelper, ServiceMediaApi serviceMediaApi) {
-        if (this.b != null) {
-            this.b.cleanup();
+        if (this.mediaSessionHelper != null) {
+            this.mediaSessionHelper.cleanup();
         }
 
-        this.b = mediaSessionHelper;
-        Notification mediaSessionHelper1 = notificationHelper.a(this.b.b, this.b.a, serviceMediaApi);
-        this.startForeground(notificationHelper.b, mediaSessionHelper1);
+        this.mediaSessionHelper = mediaSessionHelper;
+        Notification mediaSessionHelper1 = notificationHelper.showNotification(this.mediaSessionHelper.context, this.mediaSessionHelper.mediaSessionStateProvider, serviceMediaApi);
+        this.startForeground(notificationHelper.notificationId, mediaSessionHelper1);
     }
 
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (this.b != null) {
-            MediaButtonReceiver.handleIntent(this.b.a.a, intent);
+        if (this.mediaSessionHelper != null) {
+            MediaButtonReceiver.handleIntent(this.mediaSessionHelper.mediaSessionStateProvider.mediaSessionCompat, intent);
         }
 
         return Service.START_STICKY;
@@ -41,12 +41,12 @@ public class RNJWMediaService extends Service {
 
     @Nullable
     public IBinder onBind(Intent intent) {
-        return this.a;
+        return this.binder;
     }
 
     public boolean onUnbind(Intent intent) {
-        if (this.b != null) {
-            this.b.cleanup();
+        if (this.mediaSessionHelper != null) {
+            this.mediaSessionHelper.cleanup();
         }
 
         this.stopForeground(true);
@@ -55,8 +55,8 @@ public class RNJWMediaService extends Service {
     }
 
     public void onDestroy() {
-        if (this.b != null) {
-            this.b.cleanup();
+        if (this.mediaSessionHelper != null) {
+            this.mediaSessionHelper.cleanup();
         }
 
     }

@@ -14,108 +14,103 @@ import android.os.IBinder;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.jwplayer.rnjwplayer.misc.a;
+import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 
 public class RNJWMediaServiceController implements ServiceConnection {
-    protected RNJWMediaService a;
-    protected AppCompatActivity b;
-    protected RNJWNotificationHelper c;
-    protected RNJWMediaSessionHelper d;
-    protected ServiceMediaApi e;
-    protected Class<? extends RNJWMediaService> f;
-    private com.jwplayer.rnjwplayer.misc.a g;
+    protected RNJWMediaService rnjwMediaService;
+    protected AppCompatActivity appCompatActivity;
+    protected RNJWNotificationHelper rnjwNotificationHelper;
+    protected RNJWMediaSessionHelper rnjwMediaSessionHelper;
+    protected ServiceMediaApi serviceMediaApi;
+    protected Class<? extends RNJWMediaService> mediaServiceClass;
+    private MediaServiceFactory mediaServiceFactory;
 
-    protected RNJWMediaServiceController(AppCompatActivity activity, RNJWNotificationHelper notificationHelper, RNJWMediaSessionHelper mediaSessionHelper, ServiceMediaApi serviceMediaApi, Class<? extends RNJWMediaService> mediaServiceClass, a bgaFactory) {
-        this.b = activity;
-        this.c = notificationHelper;
-        this.d = mediaSessionHelper;
-        this.e = serviceMediaApi;
-        this.f = mediaServiceClass;
-        this.g = bgaFactory;
+    protected RNJWMediaServiceController(AppCompatActivity activity, RNJWNotificationHelper notificationHelper, RNJWMediaSessionHelper mediaSessionHelper, ServiceMediaApi serviceMediaApi, Class<? extends RNJWMediaService> mediaServiceClass, MediaServiceFactory mediaServiceFactory) {
+        this.appCompatActivity = activity;
+        this.rnjwNotificationHelper = notificationHelper;
+        this.rnjwMediaSessionHelper = mediaSessionHelper;
+        this.serviceMediaApi = serviceMediaApi;
+        this.mediaServiceClass = mediaServiceClass;
+        this.mediaServiceFactory = mediaServiceFactory;
     }
 
     public void updateServiceMediaApi(@NonNull ServiceMediaApi serviceMediaApi) {
         if (serviceMediaApi != null) {
             serviceMediaApi.getPlayer().allowBackgroundAudio(true);
-            this.e = serviceMediaApi;
-            this.d.setupServiceMediaApi(serviceMediaApi);
+            this.serviceMediaApi = serviceMediaApi;
+            this.rnjwMediaSessionHelper.setupServiceMediaApi(serviceMediaApi);
         }
 
     }
 
     public void bindService() {
-        if (this.a == null) {
-            Class var2 = this.f;
-            AppCompatActivity var1 = this.b;
-            this.b.bindService(new Intent(var1, var2), this, Context.BIND_AUTO_CREATE);
+        if (this.rnjwMediaService == null) {
+            Class<? extends RNJWMediaService> serviceClass = this.mediaServiceClass;
+            AppCompatActivity activity = this.appCompatActivity;
+            this.appCompatActivity.bindService(new Intent(activity, serviceClass), this, Context.BIND_AUTO_CREATE);
         }
-
     }
 
     public void unbindService() {
-        if (this.a != null) {
-            this.e.getPlayer().allowBackgroundAudio(false);
-            this.b.unbindService(this);
-            this.a = null;
+        if (this.rnjwMediaService != null) {
+            this.serviceMediaApi.getPlayer().allowBackgroundAudio(false);
+            this.appCompatActivity.unbindService(this);
+            this.rnjwMediaService = null;
         }
 
-        this.b = null;
+        this.appCompatActivity = null;
     }
 
     public void onServiceConnected(ComponentName name, IBinder service) {
-        this.a = ((RNJWMediaService.Binder)service).getService();
-        this.a.doStartForeground(this.d, this.c, this.e);
-        this.e.getPlayer().allowBackgroundAudio(true);
+        this.rnjwMediaService = ((RNJWMediaService.Binder)service).getService();
+        this.rnjwMediaService.doStartForeground(this.rnjwMediaSessionHelper, this.rnjwNotificationHelper, this.serviceMediaApi);
+        this.serviceMediaApi.getPlayer().allowBackgroundAudio(true);
     }
 
     public void onServiceDisconnected(ComponentName name) {
-        this.a = null;
+        this.rnjwMediaService = null;
     }
 
     public static class Builder {
-        protected AppCompatActivity a;
-        protected RNJWNotificationHelper b;
-        protected RNJWMediaSessionHelper c;
-        protected ServiceMediaApi d;
-        protected Class<? extends RNJWMediaService> e;
-        protected a f;
+        protected AppCompatActivity compatActivity;
+        protected RNJWNotificationHelper notificationHelper;
+        protected RNJWMediaSessionHelper mediaSessionHelper;
+        protected ServiceMediaApi mediaApi;
+        protected Class<? extends RNJWMediaService> mediaServiceClass;
+        protected MediaServiceFactory mediaServiceFactory;
 
         public Builder(AppCompatActivity activity, JWPlayer player) {
-            this(activity, player, new a());
+            this(activity, player, new MediaServiceFactory());
         }
 
-        private Builder(AppCompatActivity activity, JWPlayer player, a factory) {
-            this.a = activity;
-            this.f = factory;
-            this.b = (new RNJWNotificationHelper.Builder(this.a, (NotificationManager)activity.getSystemService(Context.NOTIFICATION_SERVICE))).build();
-            this.d = new ServiceMediaApi(player);
-            AppCompatActivity var10001 = activity;
-            ServiceMediaApi player1 = this.d;
-            RNJWNotificationHelper activity1 = this.b;
-            AppCompatActivity factory1 = var10001;
-            this.c = new RNJWMediaSessionHelper(factory1, activity1, player1);
-            this.e = RNJWMediaService.class;
+        private Builder(AppCompatActivity activity, JWPlayer player, MediaServiceFactory factory) {
+            this.compatActivity = activity;
+            this.mediaServiceFactory = factory;
+            this.notificationHelper = (new RNJWNotificationHelper.Builder(this.compatActivity, (NotificationManager)activity.getSystemService(Context.NOTIFICATION_SERVICE))).build();
+            this.mediaApi = new ServiceMediaApi(player);
+            this.mediaSessionHelper = new RNJWMediaSessionHelper(activity, this.notificationHelper, this.mediaApi);
+            this.mediaServiceClass = RNJWMediaService.class;
         }
 
         public Builder notificationHelper(RNJWNotificationHelper notificationHelper) {
-            this.b = notificationHelper;
+            this.notificationHelper = notificationHelper;
             return this;
         }
 
         public Builder serviceMediaApi(ServiceMediaApi serviceMediaApi) {
-            this.d = serviceMediaApi;
+            this.mediaApi = serviceMediaApi;
             return this;
         }
 
         public Builder mediaSessionHelper(RNJWMediaSessionHelper mediaSessionHelper) {
-            this.c = mediaSessionHelper;
+            this.mediaSessionHelper = mediaSessionHelper;
             return this;
         }
 
         public RNJWMediaServiceController build() {
-            return new RNJWMediaServiceController(this.a, this.b, this.c, this.d, this.e, this.f);
+            return new RNJWMediaServiceController(this.compatActivity, this.notificationHelper, this.mediaSessionHelper, this.mediaApi, this.mediaServiceClass, this.mediaServiceFactory);
         }
     }
 }
