@@ -7,6 +7,8 @@ package com.jwplayer.rnjwplayer.session;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.os.Bundle;
+import android.os.SystemClock;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.MediaControllerCompat;
@@ -41,6 +43,9 @@ import com.jwplayer.pub.api.media.playlists.PlaylistItem;
 import com.longtailvideo.jwplayer.o.f;
 import com.mediabrowser.MediaSessionSingleton;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener {
     private static final String TAG = "RNJWMediaSessionHelper";
 
@@ -53,9 +58,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private final MediaServiceFactory mediaServiceFactory;
 
     private BroadcastReceiver mediaButtonFallbackReceiver;
-    
+
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
+
+    // Pending seek info
+    private static Long pendingSeekMs = null;
+    private static String pendingSeekMediaId = null;
+    private static boolean pendingSeekApplied = false;
 
     // MediaSession callback to handle transport controls on Android 13/14+
     private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
@@ -429,6 +439,44 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     }
 
+    private static long extractResumePosition(Bundle extras) {
+       if (extras == null) return -1;
+
+        // Parse JSON payload from extras: "info"
+        String infoJson = extras.getString("info", null);
+
+        if (infoJson != null) {
+            try {
+                JSONObject obj = new JSONObject(infoJson);
+
+                Double sec = readSeconds(obj, "timepoint");
+
+                if (sec != null && sec > 0) {
+                    long ms = (long) (sec * 1000L);
+                    return ms;
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Failed parsing extras JSON for resume: " + e.getMessage());
+            }
+        }
+        return 0L;
+    }
+
+    /** Helper: reads a seconds value from JSON by key, accepting numbers or numeric strings. */
+    private static Double readSeconds(JSONObject obj, String key) {
+        if (!obj.has(key)) return null;
+        try {
+        // Try native number first
+        double val = obj.optDouble(key, Double.NaN);
+        if (!Double.isNaN(val)) return val;
+
+        // If stored as string, parse
+        String s = obj.optString(key, null);
+        if (s != null) return Double.parseDouble(s);
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     private void updatePlayerState(PlayerState playerState) {
         PlaybackStateCompatWrapper currentPlaybackState = this.mediaSessionStateProvider.getPlaybackState();
         PlaybackStateCompatWrapper.Builder playbackStateBuilder = new PlaybackStateCompatWrapper.Builder(currentPlaybackState);
@@ -452,8 +500,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             default:
                 playbackState = PlaybackStateCompat.STATE_STOPPED;
         }
-        long positionMs = (long)this.jwPlayer.getPosition() * 1000; // (long)(this.c.getPosition() * 1000.0);
-        playbackStateBuilder.builder.setState(playbackState, positionMs, 1.0F);
+        
+        // Get player position
+        // Use actual player position, not controller extras
+        long positionMs = 0L;
+        try {
+            positionMs = (long) (this.jwPlayer != null ? this.jwPlayer.getPosition() * 1000 : 0);
+        } catch (Exception ex) {
+            positionMs = 0L;
+        }
+
+        float speed = (playbackState == PlaybackStateCompat.STATE_PLAYING) ? 1.0F : 0.0F;
+        playbackStateBuilder.builder
+            .setState(playbackState, positionMs, speed);
+
         PlaybackStateCompatWrapper updatedPlaybackState =  new PlaybackStateCompatWrapper(playbackStateBuilder.builder.build());
         this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(updatedPlaybackState.playbackStateCompat);
         boolean isActive = playerState != PlayerState.ERROR && playerState != PlayerState.IDLE;
@@ -519,6 +579,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
+        // Try to apply pending seek when the item switches
+        applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
     }
 
     public void onError(ErrorEvent errorEvent) {
@@ -541,6 +603,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onBuffer(BufferEvent bufferEvent) {
         this.updatePlayerState(PlayerState.BUFFERING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING);
+        // Try to apply pending seek while buffering
+        applyPendingSeekWhenReady(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
     }
 
     public void onPause(PauseEvent pauseEvent) {
@@ -551,6 +615,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onPlay(PlayEvent playEvent) {
         this.updatePlayerState(PlayerState.PLAYING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
+        // Try to apply pending seek as soon as playback starts
+        applyPendingSeekWhenReady(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
     }
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
@@ -629,7 +695,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * Handle media item selection from Android Auto
      * This handles both MediaBrowser logic (React Native notification) and JWPlayer logic (actual playback)
      */
-    private void handleMediaItemSelection(String mediaId, android.os.Bundle extras) {
+    private void handleMediaItemSelection(String mediaId, Bundle extras) {
         try {
             // First, call MediaBrowserService static method to send to React Native
             try {
@@ -651,6 +717,10 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 String subtitle = extras != null ? extras.getString("subtitle", "") : "";
                 String icon = extras != null ? extras.getString("icon", "") : "";
                 
+                pendingSeekMs = extractResumePosition(extras);
+                pendingSeekMediaId = mediaId;
+                pendingSeekApplied = false;
+
                 // Create extras map
                 java.util.Map<String, Object> extrasMap = new java.util.HashMap<>();
                 if (extras != null) {
@@ -698,11 +768,34 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
     }
+
+    private void applyPendingSeekWhenReady(PlaylistItem item) {
+        if (pendingSeekMs == null || jwPlayer == null || pendingSeekApplied) return;
+
+        // Do not block on id mismatches: items can legitimately differ across domains
+        double duration = 0;
+        try { duration = jwPlayer.getDuration(); } catch (Exception ignored) {}
+        PlayerState st = jwPlayer.getState();
+
+        if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
+            Log.d(TAG, "Applying pending seek to " + pendingSeekMs + " ms");
+            performSeekTo(pendingSeekMs);
+            pendingSeekApplied = true;
+            pendingSeekMs = null;
+            pendingSeekMediaId = null;
+        } else {
+            Log.d(TAG, "Pending seek not applied; player not ready yet");
+        }
+    }
     
     /**
      * Static methods for MediaBrowserService to delegate to active instance
      */
     public static boolean handlePlayFromMediaId(String mediaId, android.os.Bundle extras) {
+        pendingSeekMs = extractResumePosition(extras);
+        pendingSeekMediaId = mediaId;
+        pendingSeekApplied = false;
+
         if (activeInstance != null) {
             try {
                 activeInstance.handleMediaItemSelection(mediaId, extras);
