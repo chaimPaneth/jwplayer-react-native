@@ -778,7 +778,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         PlayerState st = jwPlayer.getState();
 
         if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
-            Log.d(TAG, "Applying pending seek to " + pendingSeekMs + " ms");
             performSeekTo(pendingSeekMs);
             pendingSeekApplied = true;
             pendingSeekMs = null;
