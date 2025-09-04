@@ -242,11 +242,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void storeSeekPosition(long position) {
+        if (externalMediaId == null) {
+            return;
+        }
+        
         try {
             Class<?> mbs = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method reportSeek =
-                    mbs.getMethod("reportSeekFromNative", long.class);
-            reportSeek.invoke(null, position); // position in ms
+                    mbs.getMethod("updateSeekPosition", String.class, long.class);
+            reportSeek.invoke(null, externalMediaId, position); // position in ms
         } catch (Exception ignore) {
             // Safe to ignore; just don't break the seek
             Log.w(TAG, "Could not report seek to React Native: " + ignore.getMessage());
