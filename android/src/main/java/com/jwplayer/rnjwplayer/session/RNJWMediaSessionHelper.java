@@ -19,6 +19,7 @@ import android.content.BroadcastReceiver;
 import android.content.Intent;
 import android.content.IntentFilter;
 import androidx.core.content.ContextCompat;
+import android.support.v4.media.MediaBrowserCompat;
 
 import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
@@ -72,99 +73,37 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
         @Override
         public void onPlay() {
-            try {
-                if (serviceMediaApi != null) {
-                    serviceMediaApi.onPlay();
-                } else if (jwPlayer != null) {
-                    jwPlayer.play();
-                }
-            } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onPlay error: " + ex.getMessage());
-            }
-            if (jwPlayer != null) {
-                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
-            }
+            performPlay();
         }
 
         @Override
         public void onPause() {
-            try {
-                if (serviceMediaApi != null) {
-                    serviceMediaApi.onPause();
-                } else if (jwPlayer != null) {
-                    jwPlayer.pause();
-                }
-            } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onPause error: " + ex.getMessage());
-            }
-            if (jwPlayer != null) {
-                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
-            }
-            
-            captureAndStoreSeekPosition();
+            performPause();
         }
 
         @Override
         public void onStop() {
-            try {
-                if (serviceMediaApi != null) {
-                    serviceMediaApi.onStop();
-                } else if (jwPlayer != null) {
-                    jwPlayer.stop();
-                }
-            } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onStop error: " + ex.getMessage());
-            }
-            if (jwPlayer != null) {
-                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_STOPPED);
-            }
-
-            captureAndStoreSeekPosition();
+            performStop();
         }
 
         @Override
         public void onSeekTo(long position) {
-            performSeekTo(position);
-            if (jwPlayer != null) {
-                // Keep state (playing vs paused) consistent after seek
-                int playerState = (jwPlayer.getState() == PlayerState.PLAYING)
-                        ? PlaybackStateCompat.STATE_PLAYING
-                        : PlaybackStateCompat.STATE_PAUSED;
-                updatePlaybackState(jwPlayer, playerState, position);
-            }
-
-            storeSeekPosition(position);
+            performSeekTo(position);            
         }
 
         @Override
         public void onSkipToNext() {
-            try {
-                if (serviceMediaApi != null) {
-                    serviceMediaApi.onSkipToNext();
-                }
-            } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onSkipToNext error: " + ex.getMessage());
-            }
+            performSkipToNext();
         }
 
         @Override
         public void onSkipToPrevious() {
-            try {
-                if (serviceMediaApi != null) {
-                    serviceMediaApi.onSkipToPrevious();
-                }
-            } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onSkipToPrevious error: " + ex.getMessage());
-            }
+            performSkipToPrevious();
         }
 
         @Override
-        public void onPlayFromMediaId(String mediaId, android.os.Bundle extras) {
-            try {
-                handleMediaItemSelection(mediaId, extras);
-            } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onPlayFromMediaId error: " + ex.getMessage());
-            }
+        public void onPlayFromMediaId(String mediaId, Bundle extras) {
+            performMediaItemSelection(mediaId, extras);
         }
 
         @Override
@@ -238,11 +177,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 }
             }
         } catch (Exception ignore) {}
+
         storeSeekPosition(positionMs);
     }
 
     public void storeSeekPosition(long position) {
         if (externalMediaId == null) {
+            Log.d(TAG, "storeSeekPosition: externalMediaId is null");
             return;
         }
         
@@ -622,7 +563,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
         // Try to apply pending seek when the item switches
-        applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+        // Resolve the app-level mediaId to look up the MediaBrowser item
+        if (externalMediaId != null) {
+            long resumeMs = queryResumeViaReflection(externalMediaId); // contract: -1 = absent
+
+            if (resumeMs >= 0) {
+                pendingSeekMs = resumeMs;
+                pendingSeekApplied = false;
+                applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+            }
+        }
     }
 
     public void onError(ErrorEvent errorEvent) {
@@ -732,12 +682,155 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(metadataCompat);
         }
     }
+
+    private long queryResumeViaReflection(String mediaId) {
+        if (mediaId == null || mediaId.isEmpty()) return 0L;
+        try {
+            Class<?> c = Class.forName("com.mediabrowser.MediaItemsResumeProvider");
+            java.lang.reflect.Method m = c.getMethod("getResumePositionMs", String.class);
+            Object out = m.invoke(null, mediaId);
+            return (out instanceof Number) ? ((Number) out).longValue() : 0L;
+        } catch (Throwable t) {
+            Log.d(TAG, "Resume provider unavailable: " + t.getMessage());
+            return 0L;
+        }
+    }
+
+    private void applyPendingSeekWhenReady(PlaylistItem item) {
+        if (pendingSeekMs == null || jwPlayer == null || pendingSeekApplied) return;
+
+        // Do not block on id mismatches: items can legitimately differ across domains
+        double duration = 0;
+        try { duration = jwPlayer.getDuration(); } catch (Exception ignored) {}
+        PlayerState st = jwPlayer.getState();
+
+        if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
+            Log.d(TAG, "Applying pending seek to " + pendingSeekMs + " ms (duration: " + duration + ", state: " + st + ")");
+            performSeekTo(pendingSeekMs);
+            pendingSeekApplied = true;
+            pendingSeekMs = null;
+        } else {
+            Log.d(TAG, "Pending seek not applied; player not ready yet. Duration: " + duration + ", State: " + st);
+        }
+    }
     
+    private void performPlay() {
+        try {
+            if (serviceMediaApi != null) {
+                serviceMediaApi.onPlay();
+            } else if (jwPlayer != null) {
+                jwPlayer.play();
+            }
+            if (jwPlayer != null) {
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "performPlay error: " + e.getMessage());
+        }
+    }
+
+    private void performPause() {
+        try {
+            if (serviceMediaApi != null) {
+                serviceMediaApi.onPause();
+            } else if (jwPlayer != null) {
+                jwPlayer.pause();
+            }
+
+            if (jwPlayer != null) {
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "performPause error: " + e.getMessage());
+        }
+
+        captureAndStoreSeekPosition();
+    }
+
+    private void performStop() {
+        try {
+            if (serviceMediaApi != null) {
+                serviceMediaApi.onStop();
+            } else if (jwPlayer != null) {
+                jwPlayer.stop();
+            }
+
+             if (jwPlayer != null) {
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_STOPPED);
+            }
+        } catch (Exception ex) {
+            Log.w(TAG, "mediaSessionCallback onStop error: " + ex.getMessage());
+        }       
+
+        captureAndStoreSeekPosition();
+    }
+
+    private void performSkipToNext() {
+        try {
+            if (serviceMediaApi != null) {
+                serviceMediaApi.onSkipToNext();
+            }
+        } catch (Exception ex) {
+            Log.w(TAG, "mediaSessionCallback onSkipToNext error: " + ex.getMessage());
+        }
+    }
+
+    private void performSkipToPrevious() {
+        try {
+            if (serviceMediaApi != null) {
+                serviceMediaApi.onSkipToPrevious();
+            }
+        } catch (Exception ex) {
+            Log.w(TAG, "mediaSessionCallback onSkipToPrevious error: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Handle seek to position for both UI and background players
+     */
+    private void performSeekTo(long positionMs) {
+        try {
+            // Try to seek in background player first
+            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
+            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
+            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
+            
+            if (handlerInstance != null) {
+                // Check if background player exists and seek
+                java.lang.reflect.Method seekMethod = handlerClass.getMethod("seekToPosition", long.class);
+                seekMethod.invoke(handlerInstance, positionMs);
+                Log.d(TAG, "Performed seek in background player to " + positionMs + " ms");
+            }
+        } catch (Exception e) { }
+        
+        long position = (long) (positionMs / 1000.0);
+
+        // Always seek UI player too (or as fallback) so its reported position updates promptly
+        if (this.jwPlayer != null) {
+            try {
+                this.jwPlayer.seek(position);
+                Log.d(TAG, "Performed seek in UI player to " + position + " m");
+            } catch (Exception uiSeekError) {
+                Log.e(TAG, "UI player seek failed", uiSeekError);
+            }
+        }
+
+        if (jwPlayer != null) {
+            // Keep state (playing vs paused) consistent after seek
+            int playerState = (jwPlayer.getState() == PlayerState.PLAYING)
+                    ? PlaybackStateCompat.STATE_PLAYING
+                    : PlaybackStateCompat.STATE_PAUSED;
+            updatePlaybackState(jwPlayer, playerState, position);
+        }
+
+        storeSeekPosition(positionMs);
+    }
+
     /**
      * Handle media item selection from Android Auto
      * This handles both MediaBrowser logic (React Native notification) and JWPlayer logic (actual playback)
      */
-    private void handleMediaItemSelection(String mediaId, Bundle extras) {
+    private void performMediaItemSelection(String mediaId, Bundle extras) {
         try {
             // First, call MediaBrowserService static method to send to React Native
             try {
@@ -784,63 +877,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             Log.e(TAG, "Error handling media item selection", e);
         }
     }
-    
-    /**
-     * Handle seek to position for both UI and background players
-     */
-    private void performSeekTo(long positionMs) {
-        try {
-            // Try to seek in background player first
-            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
-            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
-            
-            if (handlerInstance != null) {
-                // Check if background player exists and seek
-                java.lang.reflect.Method seekMethod = handlerClass.getMethod("seekToPosition", long.class);
-                seekMethod.invoke(handlerInstance, positionMs);
-            }
-        } catch (Exception e) { }       
-        
-        // Always seek UI player too (or as fallback) so its reported position updates promptly
-        if (this.jwPlayer != null) {
-            try {
-                this.jwPlayer.seek(positionMs / 1000.0);
-            } catch (Exception uiSeekError) {
-                Log.e(TAG, "UI player seek failed", uiSeekError);
-            }
-        }
-    }
 
-    private void applyPendingSeekWhenReady(PlaylistItem item) {
-        if (pendingSeekMs == null || jwPlayer == null || pendingSeekApplied) return;
-
-        // Do not block on id mismatches: items can legitimately differ across domains
-        double duration = 0;
-        try { duration = jwPlayer.getDuration(); } catch (Exception ignored) {}
-        PlayerState st = jwPlayer.getState();
-
-        if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
-            performSeekTo(pendingSeekMs);
-            pendingSeekApplied = true;
-            pendingSeekMs = null;
-        } else {
-            Log.d(TAG, "Pending seek not applied; player not ready yet");
-        }
-    }
-    
     /**
      * Static methods for MediaBrowserService to delegate to active instance
      */
     public static boolean handlePlayFromMediaId(String mediaId, android.os.Bundle extras) {
         pendingSeekMs = extractResumePosition(extras);
         pendingSeekApplied = false;
-
+        
         externalMediaId = mediaId;
 
         if (activeInstance != null) {
             try {
-                activeInstance.handleMediaItemSelection(mediaId, extras);
+                activeInstance.performMediaItemSelection(mediaId, extras);
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handlePlayFromMediaId", e);
@@ -851,9 +900,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handlePlay() {
-        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
+        if (activeInstance != null) {
             try {
-                activeInstance.serviceMediaApi.onPlay();
+                activeInstance.performPlay();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handlePlay", e);
@@ -864,9 +913,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handlePause() {
-        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
+        if (activeInstance != null) {
             try {
-                activeInstance.serviceMediaApi.onPause();
+                activeInstance.performPause();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handlePause", e);
@@ -877,9 +926,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleStop() {
-        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
+        if (activeInstance != null) {
             try {
-                activeInstance.serviceMediaApi.onStop();
+                activeInstance.performStop();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleStop", e);
@@ -890,9 +939,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSkipToNext() {
-        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
+        if (activeInstance != null) {
             try {
-                activeInstance.serviceMediaApi.onSkipToNext();
+                activeInstance.performSkipToNext();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleSkipToNext", e);
@@ -903,9 +952,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSkipToPrevious() {
-        if (activeInstance != null && activeInstance.serviceMediaApi != null) {
+        if (activeInstance != null) {
             try {
-                activeInstance.serviceMediaApi.onSkipToPrevious();
+                activeInstance.performSkipToPrevious();
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleSkipToPrevious", e);
@@ -919,21 +968,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (activeInstance != null) {
             try {
                 activeInstance.performSeekTo(position);
-                if (activeInstance.serviceMediaApi != null) {
-                    try {
-                        activeInstance.serviceMediaApi.onSeekTo(position);
-                    } catch (Exception se) {
-                        Log.w(TAG, "Service seek delegation failed: " + se.getMessage());
-                    }
-                }
-
-                // Update playback state immediately with requested position
-                if (activeInstance.jwPlayer != null) {
-                    int playerState = (activeInstance.jwPlayer.getState() == PlayerState.PLAYING)
-                            ? PlaybackStateCompat.STATE_PLAYING
-                            : PlaybackStateCompat.STATE_PAUSED;
-                    activeInstance.updatePlaybackState(activeInstance.jwPlayer, playerState, position);
-                }
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleSeekTo", e);
