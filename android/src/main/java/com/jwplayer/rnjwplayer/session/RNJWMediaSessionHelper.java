@@ -5,21 +5,25 @@
 
 package com.jwplayer.rnjwplayer.session;
 
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import androidx.core.content.ContextCompat;
 import android.graphics.Bitmap;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
+import android.media.AudioFocusRequest;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.MediaControllerCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.util.Log;
 import android.view.KeyEvent;
-import android.content.BroadcastReceiver;
-import android.content.Intent;
-import android.content.IntentFilter;
-import androidx.core.content.ContextCompat;
-import android.support.v4.media.MediaBrowserCompat;
 
 import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
@@ -59,6 +63,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private final MediaServiceFactory mediaServiceFactory;
 
     private BroadcastReceiver mediaButtonFallbackReceiver;
+
+    // Audio focus management
+    private AudioManager audioManager;
+    private AudioFocusRequest audioFocusRequest;
+    private AudioManager.OnAudioFocusChangeListener legacyFocusChangeListener;
+    private boolean wasPlayingBeforeFocusLoss = false;
+    private boolean currentlyHasFocus = false;
+    private boolean isPlayingFromAndroidAuto = false;
+    private long lastFocusRequestTime = 0;
+    private static final long FOCUS_LOSS_IGNORE_WINDOW_MS = 1000; // 1 second
 
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
@@ -381,8 +395,215 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
     }
 
+    // Audio focus management
+    private boolean requestAudioFocusForPlayback(Context ctx) {
+        // If this is from Android Auto, let Android Auto handle audio focus
+        if (isPlayingFromAndroidAuto) {
+            currentlyHasFocus = true; // Assume we have focus
+            return true;
+        }
+
+        // Don't request if we already have focus
+        if (currentlyHasFocus) {
+            return true;
+        }
+        
+        lastFocusRequestTime = System.currentTimeMillis();
+        
+        if (audioManager == null) {
+            audioManager = (android.media.AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+        }
+        if (audioManager == null) {
+            Log.w(TAG, "AudioManager unavailable - cannot request focus");
+            return false;
+        }
+
+        int resultRequestAudioFocus = android.media.AudioManager.AUDIOFOCUS_REQUEST_FAILED;
+
+        if (android.os.Build.VERSION.SDK_INT >= 26) {
+            if (audioFocusRequest == null) {
+                audioFocusRequest = new android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
+                    .setOnAudioFocusChangeListener(fc -> {
+                        handleAudioFocusChange(fc);
+                    })
+                    .setAudioAttributes(new android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build())
+                    .build();
+            }
+            
+            resultRequestAudioFocus = audioManager.requestAudioFocus(audioFocusRequest);
+        } else {
+            // Legacy focus request for pre-26
+            if (legacyFocusChangeListener == null) {
+                legacyFocusChangeListener = fc -> {
+                    handleAudioFocusChange(fc);
+                };
+            }
+            
+            resultRequestAudioFocus = audioManager.requestAudioFocus(
+                legacyFocusChangeListener,
+                android.media.AudioManager.STREAM_MUSIC,
+                android.media.AudioManager.AUDIOFOCUS_GAIN
+            );
+        }
+
+        if (resultRequestAudioFocus == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            currentlyHasFocus = true;
+        }
+        
+        if (resultRequestAudioFocus != android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+            Log.w(TAG, "Audio focus request denied: " + resultRequestAudioFocus);
+        }
+        return resultRequestAudioFocus == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
+
+    private void handleAudioFocusChange(int focusChange) {
+        long currentTime = System.currentTimeMillis();
+        boolean currentlyPlaying = isCurrentlyPlaying();
+        long timeSinceLastRequest = currentTime - lastFocusRequestTime;
+
+        switch (focusChange) {
+            case android.media.AudioManager.AUDIOFOCUS_GAIN:
+                currentlyHasFocus = true;
+                if (wasPlayingBeforeFocusLoss) {
+                    wasPlayingBeforeFocusLoss = false;
+                    try {
+                        if (mediaSessionStateProvider != null && mediaSessionStateProvider.mediaSessionCompat != null) {
+                            mediaSessionStateProvider.mediaSessionCompat
+                                .getController()
+                                .getTransportControls()
+                                .play();
+                        } else if (jwPlayer != null) {
+                            jwPlayer.play();
+                        }
+                    } catch (Exception ignore) {
+                        Log.w(TAG, "Error resuming after focus gain: " + ignore.getMessage());
+                    }
+                }
+                break;
+                
+            case android.media.AudioManager.AUDIOFOCUS_LOSS:
+                // Ignore focus loss if it happens too soon after requesting focus
+                currentlyHasFocus = false;
+                if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
+                    return;
+                }
+                
+                if (isCurrentlyPlaying()) {
+                    wasPlayingBeforeFocusLoss = true;
+                    pausePlayback();
+                }
+                break;
+                
+            case android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                currentlyHasFocus = false;
+                // Also ignore transient loss if too soon
+                if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
+                    return;
+                }
+                
+                if (isCurrentlyPlaying()) {
+                    wasPlayingBeforeFocusLoss = true;
+                    pausePlayback();
+                }
+                break;
+                
+            case android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                break;
+                
+            default:
+                break;
+        }
+    }
+
+    private boolean isCurrentlyPlaying() {
+        try {
+            if (jwPlayer != null) {
+                return jwPlayer.getState() == PlayerState.PLAYING;
+            } else if (mediaSessionStateProvider != null && mediaSessionStateProvider.mediaSessionCompat != null) {
+                PlaybackStateCompat playbackState = mediaSessionStateProvider.mediaSessionCompat.getController().getPlaybackState();
+                if (playbackState != null) {
+                    int state = playbackState.getState();
+                    return state == PlaybackStateCompat.STATE_PLAYING || state == PlaybackStateCompat.STATE_BUFFERING;
+                }
+            }
+        } catch (Exception ignore) {}
+        return false;
+    }
+
+    private void pausePlayback() {
+        Log.d(TAG, "Pausing playback due to audio focus loss");        
+
+        // Don't pause during any seek operation
+        if (isAnySeekInProgress()) {
+            Log.d(TAG, "Seek in progress - skipping pause");
+            return;
+        }
+        
+        try {
+            if (mediaSessionStateProvider != null && mediaSessionStateProvider.mediaSessionCompat != null) {
+                mediaSessionStateProvider.mediaSessionCompat
+                    .getController()
+                    .getTransportControls()
+                    .pause();
+            } else if (jwPlayer != null) {
+                jwPlayer.pause();
+            }
+        } catch (Exception ignore) {
+            Log.w(TAG, "Error pausing after focus loss: " + ignore.getMessage());
+        }
+    }
+
+    private void releaseAudioFocus() {
+        if (audioManager != null) {
+            try {
+                if (android.os.Build.VERSION.SDK_INT >= 26 && audioFocusRequest != null) {
+                    int result = audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                    audioFocusRequest = null;
+                } else if (legacyFocusChangeListener != null) {
+                    int result = audioManager.abandonAudioFocus(legacyFocusChangeListener);
+                    legacyFocusChangeListener = null;
+                }
+            } catch (Exception ex) {
+                Log.w(TAG, "Error releasing audio focus: " + ex.getMessage());
+            }
+            audioManager = null;
+        }
+        
+        currentlyHasFocus = false;
+        wasPlayingBeforeFocusLoss = false;
+    }
+
+    // Reset the flag when playback ends or changes
+    private void resetAndroidAutoFlag() {
+        isPlayingFromAndroidAuto = false;
+    }
+    
+    // End Audio focus management
+
+    private boolean hasAudioFocus() {
+        // This is a simplified check - Android doesn't provide a direct way to query focus state
+        // You could track this with a boolean field updated in focus change listener
+        return audioManager != null && (audioFocusRequest != null || legacyFocusChangeListener != null);
+    }
+
+    private boolean isAnySeekInProgress() {
+        // Check both pending seek (media selection) and recent manual seek
+        boolean hasPendingSeek = pendingSeekMs != null && !pendingSeekApplied;
+        // boolean hasRecentManualSeek = (System.currentTimeMillis() - lastManualSeekTime) < MANUAL_SEEK_PROTECTION_MS;
+        
+        return hasPendingSeek; // || hasRecentManualSeek;
+    }
+
     final void cleanup() {
+        resetAndroidAutoFlag();
+        releaseAudioFocus();
+
         RNJWNotificationHelper notificationHelper;
+
         if (this.mediaSessionStateProvider != null) {
              // Unregister fallback receiver if present
             if (mediaButtonFallbackReceiver != null) {
@@ -612,6 +833,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
+        resetAndroidAutoFlag();
+
         if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null) return;
 
         try {
@@ -715,6 +938,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     private void performPlay() {
+        boolean focusGranted = requestAudioFocusForPlayback(context);
+        if (!focusGranted) {
+            Log.w(TAG, "Audio focus not granted - proceeding anyway");
+        }
+
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onPlay();
@@ -789,6 +1017,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * Handle seek to position for both UI and background players
      */
     private void performSeekTo(long positionMs) {
+        boolean shouldRequestFocus = false;
+
         try {
             // Try to seek in background player first
             Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
@@ -820,7 +1050,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             int playerState = (jwPlayer.getState() == PlayerState.PLAYING)
                     ? PlaybackStateCompat.STATE_PLAYING
                     : PlaybackStateCompat.STATE_PAUSED;
+
+            shouldRequestFocus = (playerState == PlaybackStateCompat.STATE_PLAYING);
             updatePlaybackState(jwPlayer, playerState, position);
+        }
+
+        if (shouldRequestFocus) {
+            boolean focusGranted = requestAudioFocusForPlayback(context);
+            if (!focusGranted) {
+                Log.w(TAG, "Audio focus not granted for seek during playback");
+            }
         }
 
         storeSeekPosition(positionMs);
@@ -831,6 +1070,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * This handles both MediaBrowser logic (React Native notification) and JWPlayer logic (actual playback)
      */
     private void performMediaItemSelection(String mediaId, Bundle extras) {
+        // Mark that this is from Android Auto
+        isPlayingFromAndroidAuto = true;
+
         try {
             // First, call MediaBrowserService static method to send to React Native
             try {
@@ -881,7 +1123,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     /**
      * Static methods for MediaBrowserService to delegate to active instance
      */
-    public static boolean handlePlayFromMediaId(String mediaId, android.os.Bundle extras) {
+    public static boolean handlePlayFromMediaId(String mediaId, Bundle extras) {
         pendingSeekMs = extractResumePosition(extras);
         pendingSeekApplied = false;
         
