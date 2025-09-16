@@ -230,61 +230,77 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     final void setupServiceMediaApi(ServiceMediaApi serviceMediaApi) {
         this.cleanup();
         if (serviceMediaApi != null) {
-            this.jwPlayer = serviceMediaApi.getPlayer();
-            Context currentContext = this.context;
-            this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
-//            String simpleName = RNJWMediaSessionHelper.class.getSimpleName();
-//            this.a = new b(new MediaSessionCompat(currentContext, simpleName));
             this.serviceMediaApi = serviceMediaApi;
 
-            // Attach callback (was previously intentionally omitted)
-            try {
-                if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
-                    this.mediaSessionStateProvider.mediaSessionCompat.setCallback(mediaSessionCallback);
-                }
-            } catch (Exception cbEx) {
-                Log.w(TAG, "Failed to set MediaSession callback: " + cbEx.getMessage());
-            }
+            initServiceMediaApi();
+        }
+    }
 
-            setupMediaButtonFallback(currentContext);
-            
-            // Check if background player is active and coordinate
-            try {
-                Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
-                java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-                Object handlerInstance = getInstanceMethod.invoke(null, this.context);
-                
-                if (handlerInstance != null) {
-                    // Check if background player is active
-                    java.lang.reflect.Method isActiveMethod = handlerClass.getMethod("isBackgroundPlayerActive");
-                    Boolean isBackgroundActive = (Boolean) isActiveMethod.invoke(handlerInstance);
-                    
-                    if (isBackgroundActive != null && isBackgroundActive) {                       
-                        // Get background player info
-                        java.lang.reflect.Method getInfoMethod = handlerClass.getMethod("getCurrentBackgroundPlayerInfo");
-                        Object backgroundInfo = getInfoMethod.invoke(handlerInstance);
-                        
-                        if (backgroundInfo instanceof java.util.Map) {
-                            java.util.Map<String, Object> bgInfo = (java.util.Map<String, Object>) backgroundInfo;
-                            // Transfer background player to UI if they're playing the same content
-                            java.lang.reflect.Method transferMethod = handlerClass.getMethod("transferToUIPlayer");
-                            Object transferResult = transferMethod.invoke(handlerInstance);                            
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Could not coordinate with background player: " + e.getMessage());
-            }
-            
-            // DON'T set callback here - MediaBrowserService already has the callback set
-            // and it will delegate to us when needed via static methods or fallback to direct handling
-            
-            this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
-            JWPlayer currentJwPlayer = this.jwPlayer;
-            this.updatePlaylistItem(currentJwPlayer.getPlaylistItem());
-            this.updatePlayerState(currentJwPlayer.getState());
+    private void initServiceMediaApi() {
+        Log.d(TAG, "initServiceMediaApi");
+
+        if (activeInstance != this) {
+            Log.w(TAG, "initServiceMediaApi: This instance is not active; skipping initialization");
+            return;
         }
 
+        if (this.mediaSessionStateProvider != null) {
+            Log.w(TAG, "initServiceMediaApi: MediaSession already initialized");
+            return;
+        }
+
+        this.jwPlayer = serviceMediaApi.getPlayer();
+        Context currentContext = this.context;
+        this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
+//            String simpleName = RNJWMediaSessionHelper.class.getSimpleName();
+//            this.a = new b(new MediaSessionCompat(currentContext, simpleName));
+
+        // Attach callback (was previously intentionally omitted)
+        try {
+            if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
+                this.mediaSessionStateProvider.mediaSessionCompat.setCallback(mediaSessionCallback);
+            }
+        } catch (Exception cbEx) {
+            Log.w(TAG, "Failed to set MediaSession callback: " + cbEx.getMessage());
+        }
+
+        setupMediaButtonFallback(currentContext);
+        
+        // Check if background player is active and coordinate
+        try {
+            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
+            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
+            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
+            
+            if (handlerInstance != null) {
+                // Check if background player is active
+                java.lang.reflect.Method isActiveMethod = handlerClass.getMethod("isBackgroundPlayerActive");
+                Boolean isBackgroundActive = (Boolean) isActiveMethod.invoke(handlerInstance);
+                
+                if (isBackgroundActive != null && isBackgroundActive) {                       
+                    // Get background player info
+                    java.lang.reflect.Method getInfoMethod = handlerClass.getMethod("getCurrentBackgroundPlayerInfo");
+                    Object backgroundInfo = getInfoMethod.invoke(handlerInstance);
+                    
+                    if (backgroundInfo instanceof java.util.Map) {
+                        java.util.Map<String, Object> bgInfo = (java.util.Map<String, Object>) backgroundInfo;
+                        // Transfer background player to UI if they're playing the same content
+                        java.lang.reflect.Method transferMethod = handlerClass.getMethod("transferToUIPlayer");
+                        Object transferResult = transferMethod.invoke(handlerInstance);                            
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not coordinate with background player: " + e.getMessage());
+        }
+        
+        // DON'T set callback here - MediaBrowserService already has the callback set
+        // and it will delegate to us when needed via static methods or fallback to direct handling
+        
+        this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
+        JWPlayer currentJwPlayer = this.jwPlayer;
+        this.updatePlaylistItem(currentJwPlayer.getPlaylistItem());
+        this.updatePlayerState(currentJwPlayer.getState());
     }
 
     private void updatePlaybackState(JWPlayer player, int state) {
@@ -459,7 +475,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return resultRequestAudioFocus == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
     }
 
-
     private void handleAudioFocusChange(int focusChange) {
         long currentTime = System.currentTimeMillis();
         boolean currentlyPlaying = isCurrentlyPlaying();
@@ -599,13 +614,26 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     final void cleanup() {
+        if (this.mediaSessionStateProvider != null) {
+            // Clear active instance if this is the active one
+            if (activeInstance == this) {
+                activeInstance = null;
+            }
+        }
+
+        softCleanup();
+    }
+
+    private final void softCleanup() {
+        // Reset AA flag and release audio focus first
         resetAndroidAutoFlag();
         releaseAudioFocus();
 
         RNJWNotificationHelper notificationHelper;
 
-        if (this.mediaSessionStateProvider != null) {
-             // Unregister fallback receiver if present
+        // --- MediaSession soft close (no release) ---
+        if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
+            // Unregister fallback receiver if present
             if (mediaButtonFallbackReceiver != null) {
                 try {
                     context.unregisterReceiver(mediaButtonFallbackReceiver);
@@ -615,32 +643,54 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 mediaButtonFallbackReceiver = null;
             }
 
-            this.mediaSessionStateProvider.mediaSessionCompat.setActive(false);
-            this.serviceMediaApi = null;
-            
-            // Clear active instance if this is the active one
-            if (activeInstance == this) {
-                activeInstance = null;
+            try {
+                // 1) Publish a no‑playback state so controllers/AA drop Now Playing
+                PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
+                        .setState(PlaybackStateCompat.STATE_NONE, 0L, 0f)
+                        .setActions(0L);
+                this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(stateBuilder.build());
+            } catch (Exception ex) {
+                Log.w(TAG, "softCleanup: setPlaybackState failed " + ex.getMessage());
             }
 
             try {
-                this.mediaSessionStateProvider.mediaSessionCompat.setCallback(null);
-            } catch (Exception ignore) {}
-            this.mediaSessionStateProvider.mediaSessionCompat.release();
-            this.mediaSessionStateProvider = null;
+                // 2) Clear metadata/queue so no stale UI remains
+                this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(null);
+                try {
+                    this.mediaSessionStateProvider.mediaSessionCompat.setQueue(null);
+                } catch (Throwable ignore) { /* setQueue may be unsupported in some paths */ }
+            } catch (Exception ex) {
+                Log.w(TAG, "softCleanup: clearing metadata/queue failed " + ex.getMessage());
+            }
+
+            try {
+                // 3) Deactivate the session (keep it alive for reuse)
+                this.mediaSessionStateProvider.mediaSessionCompat.setActive(false);
+            } catch (Exception ex) {
+                Log.w(TAG, "softCleanup: setActive(false) failed " + ex.getMessage());
+            }
+
+            // IMPORTANT: Do NOT call release() here; keep the session object for future use
+            // this.serviceMediaApi can be cleared to avoid stale references
+            this.serviceMediaApi = null;
         }
 
+        // --- Player/notification cleanup ---
         if (this.jwPlayer != null) {
-            this.jwPlayer.removeListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
+            this.jwPlayer.removeListeners(this,
+                    new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
             (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
             if (this.albumArtLoadTask != null) {
                 this.albumArtLoadTask.cancel(true);
                 this.albumArtLoadTask = null;
             }
-
             this.jwPlayer = null;
+        } else {
+            // Even if jwPlayer is null, make sure the media notification is hidden
+            try {
+                (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
+            } catch (Throwable ignore) {}
         }
-
     }
 
     private static long extractResumePosition(Bundle extras) {
@@ -928,7 +978,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         PlayerState st = jwPlayer.getState();
 
         if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
-            Log.d(TAG, "Applying pending seek to " + pendingSeekMs + " ms (duration: " + duration + ", state: " + st + ")");
             performSeekTo(pendingSeekMs);
             pendingSeekApplied = true;
             pendingSeekMs = null;
@@ -1070,6 +1119,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * This handles both MediaBrowser logic (React Native notification) and JWPlayer logic (actual playback)
      */
     private void performMediaItemSelection(String mediaId, Bundle extras) {
+        initServiceMediaApi();
+        
         // Mark that this is from Android Auto
         isPlayingFromAndroidAuto = true;
 
@@ -1174,6 +1225,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 return true;
             } catch (Exception e) {
                 Log.e(TAG, "Error in static handleStop", e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    public static boolean handleDestroy() {
+        if (activeInstance != null) {
+            try {
+                activeInstance.softCleanup();
+                return true;
+            } catch (Exception e) {
+                Log.e(TAG, "Error in static handleDestroy", e);
                 return false;
             }
         }

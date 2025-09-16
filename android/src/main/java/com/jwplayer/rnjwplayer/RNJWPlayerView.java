@@ -362,8 +362,6 @@ public class RNJWPlayerView extends RelativeLayout implements
         return registry;
     }
 
-
-
     public void destroyPlayer() {
         if (mPlayer != null) {
             unRegisterReceiver();
@@ -377,6 +375,13 @@ public class RNJWPlayerView extends RelativeLayout implements
             // If this doesn't match your use case, using a single player object and load content
             // into it rather than creating a new player for every piece of content. 
             mPlayer.stop();
+
+            // Ensure MediaSession reflects a non-playing state when UI player is destroyed
+            try {
+                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.handleDestroy();
+            } catch (Throwable t) {
+                Log.w(TAG, "Failed to update MediaSession on destroy: " + t.getMessage());
+            }
 
             // send signal to JW SDK player is destroyed
             registry.setCurrentState(Lifecycle.State.DESTROYED);
@@ -2023,5 +2028,3 @@ public class RNJWPlayerView extends RelativeLayout implements
             .put("audiotracks_submenu", UiGroup.SETTINGS_AUDIOTRACKS_SUBMENU)
             .put("casting_menu", UiGroup.CASTING_MENU).build();
 }
-
-
