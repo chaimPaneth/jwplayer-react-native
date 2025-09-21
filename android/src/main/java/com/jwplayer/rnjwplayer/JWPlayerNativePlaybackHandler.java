@@ -24,6 +24,12 @@ import java.util.Timer;
 import java.util.TimerTask;
 import android.os.Handler;
 import android.os.Looper;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import java.net.URL;
+import java.io.InputStream;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 // JWPlayer imports for headless playback
 import com.jwplayer.pub.api.JWPlayer;
@@ -101,6 +107,13 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     // Position update timer
     private Timer positionUpdateTimer;
     private boolean isPlaying = false;
+    
+    // Autostart and resume flags
+    private int autostartAttempts = 0;
+    private boolean hasStartedPlayback = false; // first successful play marker
+    private boolean wasPlayingBeforeSeek = false; // used to resume after seek
+    private boolean autoStartEnabled = true; // can be toggled if needed
+    private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
     
     private JWPlayerNativePlaybackHandler(Context context) {
         this.context = context;
@@ -228,7 +241,31 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             mediaSessionHelper = new RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
             
             Log.d(TAG, "📱 JAVA: Background player creation completed successfully");
-            
+            // Artwork fetch gating (avoid duplicate network if metadata already has bitmap)
+            try {
+                // imageUrl already declared earlier in createBackgroundPlayer; reuse it here
+                if (imageUrl != null) {
+                    boolean needFetch = true;
+                    if (sharedMediaSession != null) {
+                        try {
+                            MediaMetadataCompat md = sharedMediaSession.getController().getMetadata();
+                            if (md != null && md.getBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART) != null) {
+                                needFetch = false;
+                                Log.d(TAG, "ARTWORK_DEBUG: existing bitmap present; skip fetch");
+                            }
+                        } catch (Exception metaEx) {
+                            Log.w(TAG, "ARTWORK_DEBUG: metadata inspection failed: " + metaEx.getMessage());
+                        }
+                    }
+                    if (needFetch) {
+                        scheduleAlbumArtFetch(imageUrl);
+                    } else {
+                        Log.d(TAG, "ARTWORK_DEBUG: Skipping artwork fetch (bitmap already present)");
+                    }
+                }
+            } catch (Exception artEx) {
+                Log.w(TAG, "ARTWORK_DEBUG: gating error: " + artEx.getMessage());
+            }
         } catch (Exception e) {
             Log.e(TAG, "Error creating background player", e);
             cleanupBackgroundPlayer();
@@ -302,9 +339,23 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     public void seekToPosition(long positionMs) {
         if (backgroundPlayer != null) {
             try {
+                boolean shouldResume = isPlaying || (autoStartEnabled && !hasStartedPlayback);
+                wasPlayingBeforeSeek = isPlaying;
                 double positionSeconds = positionMs / 1000.0;
                 backgroundPlayer.seek(positionSeconds);
-                Log.d(TAG, "Background player seeked to: " + positionSeconds + "s");
+                Log.d(TAG, "Background player seeked to: " + positionSeconds + "s (wasPlaying=" + wasPlayingBeforeSeek + " shouldResume=" + shouldResume + ")");
+                if (shouldResume) {
+                    mainHandler.postDelayed(() -> {
+                        if (backgroundPlayer != null && (wasPlayingBeforeSeek || (autoStartEnabled && !hasStartedPlayback))) {
+                            try {
+                                Log.d(TAG, "Attempting autoplay resume after seek");
+                                backgroundPlayer.play();
+                            } catch (Exception e) {
+                                Log.w(TAG, "Autoplay resume after seek failed: " + e.getMessage());
+                            }
+                        }
+                    }, 150);
+                }
             } catch (Exception e) {
                 Log.e(TAG, "Error seeking background player", e);
             }
@@ -455,18 +506,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             
             if (backgroundPlayer != null) {
                 Log.d(TAG, "📱 JAVA: Background player created successfully");
-                
-                // The JWPlayer should auto-start due to autostart=true in config
-                // But we can also explicitly call play() if needed
-                if (playbackNowAuthorized && hasAudioFocus) {
-                    Log.d(TAG, "📱 JAVA: Calling backgroundPlayer.play() explicitly");
-                    backgroundPlayer.play();
-                    Log.d(TAG, "📱 JAVA: backgroundPlayer.play() call completed");
-                    
-
-                    
-                } else {
-                    Log.d(TAG, "📱 JAVA: Waiting for authorization - playbackNowAuthorized: " + playbackNowAuthorized + ", hasAudioFocus: " + hasAudioFocus);
+                if (autoStartEnabled) {
+                    startAutostartChain();
                 }
             } else {
                 Log.e(TAG, "📱 JAVA: Failed to create background player");
@@ -886,8 +927,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         
         // RNJWMediaSessionHelper will handle MediaSession state updates
         isPlaying = true;
-        
-        // Start position updates for MediaSession slider
+        hasStartedPlayback = true; // mark first successful start
+        autostartAttempts = 0; // reset attempts
         startPositionUpdates();
     }
     
@@ -897,9 +938,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         
         // RNJWMediaSessionHelper will handle MediaSession state updates
         isPlaying = false;
-        
-        // Stop position updates when paused
-        stopPositionUpdates();
+        // keep position updates running for scrub accuracy
+        startPositionUpdates();
     }
     
     @Override
@@ -1081,5 +1121,60 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     @Override
     public Lifecycle getLifecycle() {
         return lifecycleRegistry;
+    }
+
+    private void scheduleAlbumArtFetch(String imageUrl) {
+        artworkExecutor.submit(() -> {
+            try {
+                Log.d(TAG, "ARTWORK_DEBUG: fetching album art " + imageUrl);
+                InputStream in = new URL(imageUrl).openStream();
+                Bitmap bmp = BitmapFactory.decodeStream(in);
+                if (bmp != null && sharedMediaSession != null) {
+                    mainHandler.post(() -> {
+                        try {
+                            MediaMetadataCompat current = sharedMediaSession.getController().getMetadata();
+                            MediaMetadataCompat.Builder builder = new MediaMetadataCompat.Builder(current);
+                            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bmp);
+                            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bmp);
+                            sharedMediaSession.setMetadata(builder.build());
+                            Log.d(TAG, "ARTWORK_DEBUG: album art applied to session");
+                        } catch (Exception e) {
+                            Log.w(TAG, "ARTWORK_DEBUG: failed applying bitmap: " + e.getMessage());
+                        }
+                    });
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "ARTWORK_DEBUG: fetch failed: " + e.getMessage());
+            }
+        });
+    }
+
+    private void attemptAutostart(String phase) {
+        if (!autoStartEnabled) return;
+        if (backgroundPlayer == null) return;
+        if (hasStartedPlayback) return; // already started
+        if (!(playbackNowAuthorized && hasAudioFocus)) {
+            Log.d(TAG, "\ud83d\udcf1 JAVA: Autostart phase " + phase + " skipped (not authorized yet)");
+            return;
+        }
+        autostartAttempts++;
+        try {
+            Log.d(TAG, "\ud83d\udcf1 JAVA: Autostart " + phase + " attempt #" + autostartAttempts);
+            backgroundPlayer.play();
+        } catch (Exception e) {
+            Log.w(TAG, "Autostart play() failed in phase " + phase + ": " + e.getMessage());
+        }
+    }
+
+    private void scheduleAutostartRetry(String nextPhase, long delayMs) {
+        if (!autoStartEnabled) return;
+        if (hasStartedPlayback) return;
+        mainHandler.postDelayed(() -> attemptAutostart(nextPhase), delayMs);
+    }
+
+    private void startAutostartChain() {
+        attemptAutostart("initial");
+        scheduleAutostartRetry("second", 400);
+        scheduleAutostartRetry("third", 1200);
     }
 }
