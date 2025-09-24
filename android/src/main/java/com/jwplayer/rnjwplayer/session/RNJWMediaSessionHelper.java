@@ -24,6 +24,8 @@ import android.support.v4.media.session.MediaControllerCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.util.Log;
 import android.view.KeyEvent;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
@@ -45,7 +47,6 @@ import com.jwplayer.pub.api.events.PlaylistItemEvent;
 import com.jwplayer.pub.api.events.listeners.AdvertisingEvents;
 import com.jwplayer.pub.api.events.listeners.VideoPlayerEvents;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
-import com.longtailvideo.jwplayer.o.f;
 import com.mediabrowser.MediaSessionSingleton;
 
 import org.json.JSONException;
@@ -55,7 +56,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static final String TAG = "RNJWMediaSessionHelper";
 
     private JWPlayer jwPlayer;
-    private f albumArtLoadTask;
     MediaSessionStateProvider mediaSessionStateProvider;
     private ServiceMediaApi serviceMediaApi;
     private final RNJWNotificationHelper rnjwNotificationHelper;
@@ -63,6 +63,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private final MediaServiceFactory mediaServiceFactory;
 
     private BroadcastReceiver mediaButtonFallbackReceiver;
+    private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
 
     // Audio focus management
     private AudioManager audioManager;
@@ -680,10 +681,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             this.jwPlayer.removeListeners(this,
                     new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
             (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
-            if (this.albumArtLoadTask != null) {
-                this.albumArtLoadTask.cancel(true);
-                this.albumArtLoadTask = null;
-            }
             this.jwPlayer = null;
         } else {
             // Even if jwPlayer is null, make sure the media notification is hidden
@@ -819,15 +816,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(builder.build());
         }
 
-        if (this.albumArtLoadTask != null) {
-            this.albumArtLoadTask.cancel(true);
-            this.albumArtLoadTask = null;
-        }
-
         if (playlistItem.getImage() != null && !playlistItem.getImage().isEmpty()) {
-            f.a albumArtCallback = this::updateAlbumArt;
-            this.albumArtLoadTask = new f(albumArtCallback);
-            this.albumArtLoadTask.execute(new String[]{playlistItem.getImage()});
+            this.updateAlbumArt(playlistItem.getImage());
         }
     }
 
@@ -946,14 +936,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
     }
 
-    void updateAlbumArt(Bitmap bitmap) {
-        if (this.mediaSessionStateProvider != null) {
-            MediaMetadataCompat mediaMetadataCompat;
-            MediaMetadataCompat.Builder builder;
-            (builder = (mediaMetadataCompat = this.mediaSessionStateProvider.mediaSessionCompat.getController().getMetadata()) == null ? new MediaMetadataCompat.Builder() : new MediaMetadataCompat.Builder(mediaMetadataCompat)).putBitmap("android.media.metadata.ART", bitmap);
-            MediaMetadataCompat metadataCompat = builder.build();
-            this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(metadataCompat);
-        }
+    void updateAlbumArt(String bitmapPath) {
+        artworkExecutor.submit(() -> {
+            if (this.mediaSessionStateProvider != null) {
+                MediaMetadataCompat mediaMetadataCompat;
+                MediaMetadataCompat.Builder builder = (mediaMetadataCompat = this.mediaSessionStateProvider.mediaSessionCompat.getController().getMetadata()) == null ? new MediaMetadataCompat.Builder() : new MediaMetadataCompat.Builder(mediaMetadataCompat);
+
+                builder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, bitmapPath);
+                builder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON_URI, bitmapPath); 
+
+                MediaMetadataCompat metadataCompat = builder.build();
+                this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(metadataCompat);
+            }
+        });
     }
 
     private long queryResumeViaReflection(String mediaId) {
