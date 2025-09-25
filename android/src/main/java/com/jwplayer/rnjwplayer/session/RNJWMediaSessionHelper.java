@@ -823,6 +823,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (playlistItem.getImage() != null && !playlistItem.getImage().isEmpty()) {
             this.updateAlbumArt(playlistItem.getImage());
         }
+
+        // Try to request audio focus when a new item is loaded
+        requestAudioFocusForPlayback(context);
     }
 
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {

@@ -158,6 +158,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             String playbackUrl = hlsUrl != null ? hlsUrl : s3Url;
             String title = (String) postData.get("title");
             String mediaId = (String) postData.get("mediaId");
+            int duration = postData.containsKey("duration") ? ((Double) postData.get("duration")).intValue() : 0;
             
             // Extract image/artwork URL
             String imageUrl = null;
@@ -179,6 +180,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     .file(playbackUrl)
                     .title(title != null ? title : "Unknown Title")
                     .mediaId(mediaId != null ? mediaId : "unknown");
+
+            // Add duration if available
+            if (duration > 0) {
+                playlistBuilder.duration(duration);
+            }
             
             // Add image if available
             if (imageUrl != null) {
