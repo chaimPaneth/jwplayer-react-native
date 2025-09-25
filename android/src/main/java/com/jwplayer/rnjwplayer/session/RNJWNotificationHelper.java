@@ -13,6 +13,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.Build.VERSION;
 import android.support.v4.media.MediaDescriptionCompat;
+import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 
 import androidx.core.app.NotificationCompat;
@@ -53,7 +54,25 @@ public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
     }
 
     final Notification showNotification(Context context, MediaSessionStateProvider stateProvider, ServiceMediaApi serviceMediaApi) {
-        MediaDescriptionCompat description = stateProvider.mediaSessionCompat.getController().getMetadata().getDescription();
+        // Safely extract description; metadata can be null during rapid transitions
+        MediaDescriptionCompat description = null;
+        try {
+            if (stateProvider != null && stateProvider.mediaSessionCompat != null && stateProvider.mediaSessionCompat.getController() != null) {
+                MediaMetadataCompat metadata = stateProvider.mediaSessionCompat.getController().getMetadata();
+                if (metadata != null) {
+                    description = metadata.getDescription();
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        if (description == null) {
+            // Build a placeholder to avoid crashes; values may be updated on next tick
+            MediaDescriptionCompat.Builder builder = new MediaDescriptionCompat.Builder();
+            builder.setTitle("Playing");
+            builder.setSubtitle("");
+            builder.setDescription("");
+            description = builder.build();
+        }
         String channelId = this.notificationChannelId;
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId);
         serviceMediaApi.addNotificationActions(context, builder);
