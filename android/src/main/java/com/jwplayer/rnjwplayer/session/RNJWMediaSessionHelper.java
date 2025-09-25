@@ -801,6 +801,10 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         builder.putString("android.media.metadata.MEDIA_ID", 
             playlistItem.getMediaId() != null ? playlistItem.getMediaId() : "");
 
+        if (playlistItem.getDuration() != null) {
+            builder.putLong("android.media.metadata.DURATION", (long)(playlistItem.getDuration() * 1000));
+        }
+
         if (currentItem != null) {
             builder.putString("android.media.metadata.ARTIST", 
                 currentItem.getDescription() != null ? currentItem.getDescription() : "");
