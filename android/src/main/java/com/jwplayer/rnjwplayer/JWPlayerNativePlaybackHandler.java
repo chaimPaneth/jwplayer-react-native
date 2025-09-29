@@ -78,7 +78,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPauseListener, 
         VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnCompleteListener,
         AudioManager.OnAudioFocusChangeListener, LifecycleOwner {
-    private static final String TAG = "JWPlayerNativePlayback";
+    private static final String TAG = "JWPlayerNativePlaybackHandler";
     private static JWPlayerNativePlaybackHandler instance;
     private final Context context;
     private final GlobalPlayingInfoManager playingInfoManager;
@@ -113,6 +113,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private boolean hasStartedPlayback = false; // first successful play marker
     private boolean wasPlayingBeforeSeek = false; // used to resume after seek
     private boolean autoStartEnabled = true; // can be toggled if needed
+    private boolean isPlayerReady = false; // becomes true in onReady
     private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
     
     private JWPlayerNativePlaybackHandler(Context context) {
@@ -145,7 +146,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     private void createBackgroundPlayer(Map<String, Object> postData) {
         try {
-            // Use PlaybackManager to ensure no other player is active.
+            // If a UI player is currently active, do not create a headless/background player
+            if (PlaybackManager.getInstance().isUIActive()) {
+                return;
+            }
+            // Ensure no other player is active and wait for cleanup to finish
             PlaybackManager.getInstance().stopAndCleanupCurrentPlayer();
 
             if (backgroundPlayer != null) {
@@ -159,7 +164,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             String title = (String) postData.get("title");
             String mediaId = (String) postData.get("mediaId");
             int duration = postData.containsKey("duration") ? ((Double) postData.get("duration")).intValue() : 0;
-            
+            int startTime = postData.containsKey("startTime") ? ((Double) postData.get("startTime")).intValue() : 0;
+            if (startTime == 0) {
+                startTime = postData.containsKey("timepoint") ? ((Double) postData.get("timepoint")).intValue() : 0;
+            }
+
             // Extract image/artwork URL
             String imageUrl = null;
             if (postData.containsKey("seriesImage")) {
@@ -184,6 +193,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             // Add duration if available
             if (duration > 0) {
                 playlistBuilder.duration(duration);
+            }
+
+            // Add start time if available
+            if (startTime > 0) {
+                playlistBuilder.startTime(startTime);
             }
             
             // Add image if available
@@ -217,6 +231,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             
             // Get the actual JWPlayer from the view (pass this as LifecycleOwner)
             backgroundPlayer = backgroundPlayerView.getPlayer(this);
+
+            // Reset readiness flags for fresh player
+            isPlayerReady = false;
+            hasStartedPlayback = false;
             
             // Register this new player as the active one
             PlaybackManager.getInstance().setActivePlayer(backgroundPlayer, this);
@@ -408,15 +426,23 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             Log.d(TAG, "Transferring background player to UI player");
             // Stop background player but don't clean up session
             try {
+                // Get current position before stopping
+                long currentPositionMs = 0;
+                try {
+                    currentPositionMs = (long)(backgroundPlayer.getPosition() * 1000); // Convert to milliseconds
+                } catch (Exception e) {
+                    currentPositionMs = 0;
+                }
+                
                 backgroundPlayer.pause();
                 backgroundPlayer.stop();
                 backgroundPlayer = null;
                 isPlaying = false;
                 
-                // Update session state to indicate transfer
+                // Update session state to indicate transfer with current position
                 if (sharedMediaSession != null) {
                     sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
-                        .setState(PlaybackStateCompat.STATE_PAUSED, 0, 1.0f)
+                        .setState(PlaybackStateCompat.STATE_PAUSED, currentPositionMs, 1.0f)
                         .setActions(PlaybackStateCompat.ACTION_PLAY | 
                                    PlaybackStateCompat.ACTION_PAUSE | 
                                    PlaybackStateCompat.ACTION_STOP |
@@ -436,7 +462,6 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     public void handleHeadlessMediaSelection(String mediaId, String title, String subtitle, 
                                            String icon, Map<String, Object> extras) {
-        
         // Log current state
         if (playingInfoManager.hasPendingMedia()) {
             Map<String, Object> currentInfo = playingInfoManager.getCurrentPlayingInfo();
@@ -444,7 +469,69 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         }
         
         try {
-            // Use PlaybackManager to stop any active player (UI or headless)
+            // If UI is already active, command the UI player to load this media instead of creating headless
+            if (PlaybackManager.getInstance().isUIActive()) {
+                // Note: MediaBrowserService already emits onMediaItemSelected, so we don't need to emit it again here
+
+                // If we have the post payload, also command the current UI JWPlayer directly for immediate response
+                final String postJsonForUi = extras != null ? (String) extras.get("info") : null;
+                try {
+                    final JWPlayer uiPlayer = PlaybackManager.getInstance().getActivePlayerIfUI();
+                    if (uiPlayer != null && postJsonForUi != null) {
+                        Type t = new TypeToken<Map<String, Object>>(){}.getType();
+                        final Map<String, Object> post = gson.fromJson(postJsonForUi, t);
+                        final String s3Url = (String) post.get("s3Url");
+                        final String hlsUrl = (String) post.get("hls_url");
+                        final String playbackUrl = hlsUrl != null ? hlsUrl : s3Url;
+                        final int duration = post.containsKey("duration") ? ((Double) post.get("duration")).intValue() : 0;
+
+                        // Derive artwork if available (Cloudinary pattern used elsewhere)
+                        String imageUrl = null;
+                        if (post.containsKey("seriesImage")) {
+                            Object si = post.get("seriesImage");
+                            if (si instanceof String && ((String) si).length() > 0) {
+                                imageUrl = "https://res.cloudinary.com/ouinternal/image/upload/c_scale,f_auto,q_auto,w_275/" + si + ".jpeg";
+                            }
+                        }
+
+                        if (playbackUrl != null) {
+                            final String finalImageUrl = imageUrl;
+                            // Update MediaSession metadata immediately to avoid 0-duration flashes
+                            updateMediaSessionMetadata(title, subtitle, imageUrl, post);
+
+                            // Ensure player calls are made on the main thread
+                            mainHandler.post(() -> {
+                                try {
+                                    PlaylistItem.Builder builder = new PlaylistItem.Builder()
+                                            .file(playbackUrl)
+                                            .title(title != null ? title : "Unknown Title 1")
+                                            .mediaId(mediaId != null ? mediaId : "unknown");
+                                    if (finalImageUrl != null) builder.image(finalImageUrl);
+                                    
+                                    if (duration > 0) builder.duration(duration);
+
+                                    PlaylistItem item = builder.build();
+
+                                    PlayerConfig cfg = new PlayerConfig.Builder()
+                                            .playlist(java.util.Collections.singletonList(item))
+                                            .autostart(true)
+                                            .build();
+                                    uiPlayer.setup(cfg);
+                                    // Explicitly start playback for immediate response from AA (in case autostart is gated)
+                                    try { uiPlayer.play(); } catch (Exception ignored) {}
+                                } catch (Exception e) {
+                                    Log.w(TAG, "UI player load failed: " + e.getMessage());
+                                }
+                            });
+                        }
+                    }
+                } catch (Exception ex) {
+                    Log.w(TAG, "Failed to instruct UI player to load selection: " + ex.getMessage());
+                }
+                return;
+            }
+            
+            // Use PlaybackManager to stop any active player (UI or headless) and wait for idle
             PlaybackManager.getInstance().stopAndCleanupCurrentPlayer();
             
             // Emit stop event to React Native to stop any UI players
@@ -471,9 +558,6 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 
                 // Update MediaSession metadata immediately
                 updateMediaSessionMetadata(title, subtitle, icon, post);
-                
-                // Emit event to React Native for subsequent selections
-                emitMediaSelectionToReactNative(mediaId, title, subtitle, icon, extras);
                 
                 // Attempt to create and start background playback
                 if (s3Url != null || hlsUrl != null) {
@@ -1006,23 +1090,24 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             // Update the MediaSession with new metadata
             sharedMediaSession.setMetadata(metadataBuilder.build());
             
-            // Set initial playback state with duration
-            if (post != null && post.containsKey("duration")) {
-                Object durationObj = post.get("duration");
-                if (durationObj instanceof Number) {
-                    long durationMs = (long) (((Number) durationObj).doubleValue() * 1000);
-                    sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
-                        .setState(PlaybackStateCompat.STATE_STOPPED, 0, 1.0f)
-                        .setActions(PlaybackStateCompat.ACTION_PLAY | 
-                                   PlaybackStateCompat.ACTION_PAUSE | 
-                                   PlaybackStateCompat.ACTION_STOP |
-                                   PlaybackStateCompat.ACTION_SEEK_TO |
-                                   PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                                   PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
-                        .build());
+            // Set initial playback state with position from timepoint
+            long positionMs = 0;
+            if (post != null && post.containsKey("timepoint")) {
+                Object timepointObj = post.get("timepoint");
+                if (timepointObj instanceof Number) {
+                    positionMs = (long) (((Number) timepointObj).doubleValue() * 1000); // Convert seconds to milliseconds
                 }
             }
             
+            sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+                .setState(PlaybackStateCompat.STATE_STOPPED, positionMs, 1.0f)
+                .setActions(PlaybackStateCompat.ACTION_PLAY | 
+                           PlaybackStateCompat.ACTION_PAUSE | 
+                           PlaybackStateCompat.ACTION_STOP |
+                           PlaybackStateCompat.ACTION_SEEK_TO |
+                           PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
+                           PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
+                .build());
         } catch (Exception e) {
             Log.e(TAG, "Error updating MediaSession metadata", e);
         }
@@ -1080,47 +1165,6 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         }
         
         return reactContext;
-    }
-    
-    /**
-     * Emit media selection event to React Native
-     */
-    private void emitMediaSelectionToReactNative(String mediaId, String title, String subtitle, String icon, Map<String, Object> extras) {
-        try {
-            ReactContext reactContext = getReactContext();
-            
-            if (reactContext != null) {
-                WritableMap eventData = Arguments.createMap();
-                eventData.putString("id", mediaId);
-                eventData.putString("title", title);
-                eventData.putString("subTitle", subtitle);
-                eventData.putString("icon", icon);
-                eventData.putString("playableOrBrowsable", "PLAYABLE");
-                
-                // Add extras if available
-                if (extras != null && !extras.isEmpty()) {
-                    WritableMap extrasMap = Arguments.createMap();
-                    for (Map.Entry<String, Object> entry : extras.entrySet()) {
-                        Object value = entry.getValue();
-                        if (value instanceof String) {
-                            extrasMap.putString(entry.getKey(), (String) value);
-                        } else if (value instanceof Integer) {
-                            extrasMap.putInt(entry.getKey(), (Integer) value);
-                        } else if (value instanceof Boolean) {
-                            extrasMap.putBoolean(entry.getKey(), (Boolean) value);
-                        } else if (value instanceof Double) {
-                            extrasMap.putDouble(entry.getKey(), (Double) value);
-                        }
-                    }
-                    eventData.putMap("extras", extrasMap);
-                }
-                
-                reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                    .emit("onMediaItemSelected", eventData);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error emitting media selection event to React Native", e);
-        }
     }
     
     // LifecycleOwner implementation for JWPlayer
