@@ -844,8 +844,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onError(ErrorEvent errorEvent) {
-        this.updatePlayerState(PlayerState.ERROR);
-        this.mediaSessionStateProvider.mediaSessionCompat.release();
+        try {
+            this.updatePlayerState(PlayerState.ERROR);
+            // Instead of releasing the session (which causes Android Auto to lose root and show only Exit),
+            // keep it inactive but alive so we can recover or replay without user leaving AA.
+            if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
+                try {
+                    this.mediaSessionStateProvider.mediaSessionCompat.setActive(false); // mark inactive
+                } catch (Exception ignore) {}
+            }
+        } catch (Exception ex) {
+            Log.w(TAG, "onError handling failed: " + ex.getMessage());
+        }
     }
 
     public void onAdComplete(AdCompleteEvent adCompleteEvent) {
