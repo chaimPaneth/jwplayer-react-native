@@ -1131,6 +1131,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * This handles both MediaBrowser logic (React Native notification) and JWPlayer logic (actual playback)
      */
     private void performMediaItemSelection(String mediaId, Bundle extras) {
+        captureAndStoreSeekPosition();
+
+        try {
+            Thread.sleep(500); // 0.5 seconds
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            Log.w(TAG, "Delay interrupted during handleDestroy");
+        }
+
         initServiceMediaApi();
         
         // Mark that this is from Android Auto
