@@ -2,6 +2,7 @@ package com.jwplayer.rnjwplayer;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
@@ -25,6 +26,8 @@ import com.jwplayer.pub.api.configuration.PlayerConfig;
 import com.jwplayer.pub.api.media.adaptive.QualityLevel;
 import com.jwplayer.pub.api.media.audio.AudioTrack;
 import java.util.List;
+
+import android.view.View;
 
 public class RNJWPlayerModule extends ReactContextBaseJavaModule {
 
@@ -50,12 +53,24 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         } else {
             uiManagerType = UIManagerType.DEFAULT;
         }
-        UIManager uiManager = UIManagerHelper.getUIManager(mReactContext, uiManagerType);
-        if (uiManager != null) {
-            return (RNJWPlayerView) uiManager.resolveView(reactTag);
-        } else {
+        try {
+            UIManager uiManager = UIManagerHelper.getUIManager(mReactContext, uiManagerType);
+            if (uiManager != null) {
+                View view = uiManager.resolveView(reactTag);
+                if (view instanceof RNJWPlayerView) {
+                    return (RNJWPlayerView) view;
+                }
+            } else {
+                return null;
+            }
+        } catch (IllegalViewOperationException e) {
+            Log.w(TAG, "View with tag " + reactTag + " doesn't exist: " + e.getMessage());
+            return null;
+        } catch (Exception e) {
+            Log.w(TAG, "Error getting player view: " + e.getMessage());
             return null;
         }
+        return null;
     }
 
     @ReactMethod
