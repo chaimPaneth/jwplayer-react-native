@@ -64,7 +64,17 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 return null;
             }
         } catch (IllegalViewOperationException e) {
-            Log.w(TAG, "View with tag " + reactTag + " doesn't exist: " + e.getMessage());
+            Log.e(TAG, "View with tag " + reactTag + " doesn't exist: " + e.getMessage());
+            Log.w(TAG, "‼️ Picture-in-Picture (PiP) may not be enabled in the host app. To use PiP, add these *activity attributes* (not permissions) to your **main <activity>** in AndroidManifest.xml:\n" +
+                    "  android:supportsPictureInPicture=\"true\"\n" +
+                    "  android:resizeableActivity=\"true\"\n" +
+                    "  android:configChanges=\"orientation|screenSize|smallestScreenSize|screenLayout\"\n" +
+                    "Example:\n" +
+                    "  <activity\n" +
+                    "      android:name=\".MainActivity\"\n" +
+                    "      android:supportsPictureInPicture=\"true\"\n" +
+                    "      android:resizeableActivity=\"true\"\n" +
+                    "      android:configChanges=\"orientation|screenSize|smallestScreenSize|screenLayout\" />");
             return null;
         } catch (Exception e) {
             Log.w(TAG, "Error getting player view: " + e.getMessage());
