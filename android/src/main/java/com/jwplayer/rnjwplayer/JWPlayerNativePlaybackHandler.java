@@ -45,7 +45,6 @@ import com.jwplayer.pub.api.license.LicenseUtil;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 import com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper;
 import com.jwplayer.rnjwplayer.session.RNJWNotificationHelper;
-import com.jwplayer.rnjwplayer.utils.HandoffPlaybackState;
 import com.jwplayer.rnjwplayer.utils.JWLog;
 
 // For creating minimal player view
@@ -369,14 +368,6 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
                             java.lang.reflect.Method reportSeek = mediaBrowserServiceClass.getMethod("updateSeekPosition", String.class, long.class);
                             reportSeek.invoke(null, externalMediaId, lastMs);
-
-                            if (backgroundPlayer != null) {
-                                PlayerState playerState = backgroundPlayer.getState();
-                            
-                                HandoffPlaybackState.set(externalMediaId, playerState == PlayerState.PLAYING, lastMs);
-                            } else {
-                                JWLog.w(TAG, "Background player is null; assuming not playing for HandoffPlaybackState");
-                            }
                             
                             JWLog.d(TAG, "Persisted last headless position: " + lastMs + "ms for mediaId=" + externalMediaId);
                         }
