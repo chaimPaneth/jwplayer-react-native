@@ -2,12 +2,12 @@ package com.jwplayer.rnjwplayer;
 
 import android.content.SharedPreferences;
 import android.content.Context;
-import android.util.Log;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import java.lang.reflect.Type;
 import java.util.HashMap;
 import java.util.Map;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 
 /**
  * Global manager for storing and retrieving current playing media info
@@ -31,6 +31,7 @@ public class GlobalPlayingInfoManager {
     }
     
     public static synchronized GlobalPlayingInfoManager getInstance(Context context) {
+        JWLog.d(TAG, "getInstance(context=" + context + ")");
         if (instance == null) {
             instance = new GlobalPlayingInfoManager(context);
         }
@@ -43,6 +44,7 @@ public class GlobalPlayingInfoManager {
     public void setCurrentPlayingInfo(String mediaId, String title, String subtitle, 
                                      String icon, Map<String, Object> extras) {
         try {
+            JWLog.d(TAG, "setCurrentPlayingInfo(mediaId=" + JWLog.safe(mediaId) + ", title=" + JWLog.safe(title) + ")");
             Map<String, Object> playingInfo = new HashMap<>();
             playingInfo.put("mediaId", mediaId);
             playingInfo.put("title", title);
@@ -57,9 +59,9 @@ public class GlobalPlayingInfoManager {
                 .putLong(KEY_TIMESTAMP, System.currentTimeMillis())
                 .apply();
                 
-            Log.d(TAG, "Stored playing info: " + mediaId);
+            JWLog.d(TAG, "Stored playing info: " + mediaId);
         } catch (Exception e) {
-            Log.e(TAG, "Error storing playing info", e);
+            JWLog.e(TAG, "Error storing playing info", e);
         }
     }
     
@@ -68,6 +70,7 @@ public class GlobalPlayingInfoManager {
      */
     public Map<String, Object> getCurrentPlayingInfo() {
         try {
+            JWLog.d(TAG, "getCurrentPlayingInfo()");
             String json = prefs.getString(KEY_CURRENT_PLAYING, null);
             if (json != null) {
                 Type type = new TypeToken<Map<String, Object>>(){}.getType();
@@ -75,7 +78,7 @@ public class GlobalPlayingInfoManager {
                 return playingInfo;
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error retrieving playing info", e);
+            JWLog.e(TAG, "Error retrieving playing info", e);
         }
         return null;
     }
@@ -84,6 +87,7 @@ public class GlobalPlayingInfoManager {
      * Check if there's pending media from headless mode
      */
     public boolean hasPendingMedia() {
+        JWLog.d(TAG, "hasPendingMedia()");
         String json = prefs.getString(KEY_CURRENT_PLAYING, null);
         boolean isPlaying = prefs.getBoolean(KEY_IS_PLAYING, false);
         long timestamp = prefs.getLong(KEY_TIMESTAMP, 0);
@@ -99,17 +103,19 @@ public class GlobalPlayingInfoManager {
      * Clear playing info when media is handled
      */
     public void clearPlayingInfo() {
+        JWLog.d(TAG, "clearPlayingInfo()");
         prefs.edit()
             .remove(KEY_CURRENT_PLAYING)
             .putBoolean(KEY_IS_PLAYING, false)
             .apply();
-        Log.d(TAG, "Cleared playing info");
+        JWLog.d(TAG, "Cleared playing info");
     }
     
     /**
      * Update playback position
      */
     public void updatePosition(long position) {
+        JWLog.d(TAG, "updatePosition(position=" + position + ")");
         prefs.edit().putLong(KEY_POSITION, position).apply();
     }
     
@@ -117,6 +123,7 @@ public class GlobalPlayingInfoManager {
      * Get last playback position
      */
     public long getPosition() {
+        JWLog.d(TAG, "getPosition()");
         return prefs.getLong(KEY_POSITION, 0);
     }
 }

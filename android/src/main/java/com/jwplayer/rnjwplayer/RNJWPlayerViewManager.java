@@ -11,6 +11,7 @@ import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.annotations.ReactProp;
 import com.mediabrowser.MediaSessionSingleton;
 import android.support.v4.media.session.MediaSessionCompat;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 
 import java.util.Map;
 
@@ -27,34 +28,41 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
 
   @Override
   public String getName() {
+    JWLog.d(TAG, "getName()");
     return REACT_CLASS;
   }
 
   public RNJWPlayerViewManager(ReactApplicationContext context) {
+    JWLog.d(TAG, "<init>(context=" + context + ")");
     mAppContext = context;
     nativePlaybackHandler = JWPlayerNativePlaybackHandler.getInstance(context);
   }
 
   @Override
   public RNJWPlayerView createViewInstance(ThemedReactContext context) {
+    JWLog.d(TAG, "createViewInstance(context=" + context + ")");
     return new RNJWPlayerView(context, mAppContext);
   }
 
   @ReactProp(name = "config")
   public void setConfig(RNJWPlayerView view, ReadableMap prop) {
+    JWLog.d(TAG, "setConfig(view=" + JWLog.id(view) + ", hasProp=" + (prop != null) + ")");
     view.setConfig(prop);
   }
 
   @ReactProp(name = "controls")
   public void setControls(RNJWPlayerView view, Boolean controls) {
+    JWLog.d(TAG, "setControls(view=" + JWLog.id(view) + ", controls=" + controls + ")");
     if (view == null || view.mPlayerView == null) {
+      JWLog.w(TAG, "setControls skipped: view or mPlayerView is null");
       return;
     }
     view.mPlayerView.getPlayer().setControls(controls);
   }
 
   public Map getExportedCustomBubblingEventTypeConstants() {
-    return MapBuilder.builder()
+    JWLog.d(TAG, "getExportedCustomBubblingEventTypeConstants()");
+    Map map = MapBuilder.builder()
             .put(
                     "topPlayerError",
                     MapBuilder.of(
@@ -185,10 +193,15 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
                             "phasedRegistrationNames",
                             MapBuilder.of("bubbled", "onBeforeNextPlaylistItem")))
             .build();
+    try {
+        JWLog.d(TAG, "exported events count=" + (map != null ? map.size() : -1));
+    } catch (Throwable ignored) {}
+    return map;
   }
 
   @Override
   public void onDropViewInstance(@Nonnull RNJWPlayerView view) {
+    JWLog.d(TAG, "onDropViewInstance(view=" + JWLog.id(view) + ")");
     view.destroyPlayer();
     super.onDropViewInstance(view);
     view = null;
@@ -200,9 +213,12 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
   @ReactMethod
   public void getPendingMediaInfo(Promise promise) {
     try {
+      JWLog.d(TAG, "getPendingMediaInfo()");
       WritableMap pendingMedia = nativePlaybackHandler.getPendingMediaInfo();
+      JWLog.d(TAG, "getPendingMediaInfo -> hasPending=" + (pendingMedia != null));
       promise.resolve(pendingMedia);
     } catch (Exception e) {
+      JWLog.e(TAG, "getPendingMediaInfo error", e);
       promise.reject("GET_PENDING_MEDIA_ERROR", "Failed to get pending media info", e);
     }
   }
@@ -213,9 +229,12 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
   @ReactMethod
   public void clearPendingMedia(Promise promise) {
     try {
+      JWLog.d(TAG, "clearPendingMedia()");
       nativePlaybackHandler.clearPendingMedia();
+      JWLog.d(TAG, "clearPendingMedia -> true");
       promise.resolve(true);
     } catch (Exception e) {
+      JWLog.e(TAG, "clearPendingMedia error", e);
       promise.reject("CLEAR_PENDING_MEDIA_ERROR", "Failed to clear pending media", e);
     }
   }
@@ -225,6 +244,7 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
    */
   public void handleHeadlessMediaSelection(String mediaId, String title, String subtitle, 
                                          String icon, Map<String, Object> extras) {
+    JWLog.d(TAG, "handleHeadlessMediaSelection(mediaId=" + JWLog.safe(mediaId) + ", title=" + JWLog.safe(title) + ")");
     nativePlaybackHandler.handleHeadlessMediaSelection(mediaId, title, subtitle, icon, extras);
   }
 }

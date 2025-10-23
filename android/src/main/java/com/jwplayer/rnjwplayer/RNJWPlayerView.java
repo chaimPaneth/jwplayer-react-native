@@ -19,7 +19,6 @@ import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -124,6 +123,7 @@ import com.jwplayer.pub.api.license.LicenseUtil;
 import com.jwplayer.pub.api.media.captions.Caption;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
 import com.jwplayer.rnjwplayer.session.RNJWMediaServiceController;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 import com.jwplayer.ui.views.CueMarkerSeekbar;
 
 import org.json.JSONObject;
@@ -292,7 +292,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         ActivityManager manager = (ActivityManager) mAppContext.getSystemService(Context.ACTIVITY_SERVICE);
         for (ActivityManager.RunningServiceInfo service : manager.getRunningServices(Integer.MAX_VALUE)) {
             if (MediaService.class.getName().equals(service.service.getClassName())) {
-                Log.w(TAG, "MediaService is already running with another player loaded. To avoid crashing, this player, "
+                JWLog.w(TAG, "MediaService is already running with another player loaded. To avoid crashing, this player, "
                         + mPlayerView.getTag() + "  will not be loaded into the background service.");
                 return true;
             }
@@ -319,6 +319,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         mRootView = mActivity.findViewById(android.R.id.content);
 
         getReactContext().addLifecycleEventListener(this);
+
+        // Constructor entry log
+        JWLog.d(TAG, "RNJWPlayerView() constructed. activity=" + JWLog.id(mActivity));
     }
 
     private LifecycleObserver lifecycleObserver = new LifecycleEventObserver() {
@@ -328,6 +331,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 return; // no op: handled elsewhere
             }
             registry.setCurrentState(event.getTargetState());
+            JWLog.d(TAG, "lifecycle.onStateChanged targetState=" + event.getTargetState());
         }
     };
 
@@ -363,6 +367,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     public void destroyPlayer() {
+        JWLog.d(TAG, "destroyPlayer() mPlayer=" + JWLog.id(mPlayer));
         if (mPlayer != null) {
             unRegisterReceiver();
 
@@ -380,7 +385,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             try {
                 com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.handleDestroy();
             } catch (Throwable t) {
-                Log.w(TAG, "Failed to update MediaSession on destroy: " + t.getMessage());
+                JWLog.w(TAG, "Failed to update MediaSession on destroy: " + t.getMessage());
             }
 
             // send signal to JW SDK player is destroyed
@@ -467,6 +472,8 @@ public class RNJWPlayerView extends RelativeLayout implements
             audioManager = null;
 
             doUnbindService();
+        } else {
+            JWLog.d(TAG, "destroyPlayer() skipped: mPlayer is null");
         }
     }
 
@@ -475,6 +482,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * Similar to destroyPlayer() but for background players to prevent conflicts
      */
     private void destroyBackgroundPlayer() {
+        JWLog.d(TAG, "destroyBackgroundPlayer() attempting to clean any background player");
         // THIS METHOD IS DEPRECATED AND REPLACED BY PlaybackManager
         // Kept for reference during transition, should be removed later.
         try {
@@ -488,7 +496,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 Boolean isActive = (Boolean) isActiveMethod.invoke(handlerInstance);
                 
                 if (isActive != null && isActive) {
-                    android.util.Log.d("RNJWPlayerView", "Found active background player, destroying it to prevent conflicts");
+                    JWLog.d(TAG, "Found active background player, destroying it to prevent conflicts");
                     
                     // Get background player info before destroying for logging
                     try {
@@ -496,7 +504,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         Object backgroundInfo = getInfoMethod.invoke(handlerInstance);
                         if (backgroundInfo instanceof java.util.Map) {
                             java.util.Map<String, Object> bgInfo = (java.util.Map<String, Object>) backgroundInfo;
-                            android.util.Log.d("RNJWPlayerView", "Destroying background player playing: " + bgInfo.get("title"));
+                            JWLog.d(TAG, "Destroying background player playing: " + bgInfo.get("title"));
                         }
                     } catch (Exception infoError) {
                         // Ignore info retrieval errors
@@ -506,18 +514,19 @@ public class RNJWPlayerView extends RelativeLayout implements
                     java.lang.reflect.Method stopMethod = handlerClass.getMethod("stopAndCleanup");
                     stopMethod.invoke(handlerInstance);
                     
-                    android.util.Log.d("RNJWPlayerView", "Successfully destroyed background player to prevent dual playback");
+                    JWLog.d(TAG, "Successfully destroyed background player to prevent dual playback");
                 } else {
-                    android.util.Log.d("RNJWPlayerView", "No active background player found, proceeding with UI player setup");
+                    JWLog.d(TAG, "No active background player found, proceeding with UI player setup");
                 }
             }
         } catch (Exception e) {
-            android.util.Log.w("RNJWPlayerView", "Could not check/destroy background player: " + e.getMessage());
+            JWLog.w(TAG, "Could not check/destroy background player: " + e.getMessage());
             // Continue with UI player setup even if background player check fails
         }
     }
 
     public void setupPlayerView(Boolean backgroundAudioEnabled, Boolean playlistItemCallbackEnabled) {
+        JWLog.d(TAG, "setupPlayerView(backgroundAudioEnabled=" + backgroundAudioEnabled + ", playlistItemCallbackEnabled=" + playlistItemCallbackEnabled + ")");
         if (mPlayer != null) {
 
             mPlayer.addListeners(this,
@@ -591,6 +600,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     public void resolveNextPlaylistItem(ReadableMap playlistItem) {
+        JWLog.d(TAG, "resolveNextPlaylistItem(playlistItem=" + JWLog.safe(playlistItem) + ") promisePending=" + (itemUpdatePromise != null));
         if (itemUpdatePromise == null) {
             return;
         }
@@ -617,6 +627,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * @return {@link ExtensibleFullscreenHandler}
      */
     private ExtensibleFullscreenHandler createModalFullscreenHandler() {
+        JWLog.d(TAG, "createModalFullscreenHandler()");
         DeviceOrientationDelegate delegate = getDeviceOrientationDelegate();
         FullscreenDialog dialog = new FullscreenDialog(
                 mActivity,
@@ -639,6 +650,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         ) {
             @Override
             public void onFullscreenRequested() {
+                JWLog.d(TAG, "ModalFullscreenHandler.onFullscreenRequested()");
                 // if landscape is priorty we have to turn off full-screen portrait before allowing
                 // the default call for full-screen
                 mPlayer.allowFullscreenPortrait(!landscapeOnFullScreen);
@@ -660,6 +672,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
             @Override
             public void onFullscreenExitRequested() {
+                JWLog.d(TAG, "ModalFullscreenHandler.onFullscreenExitRequested()");
                 super.onFullscreenExitRequested();
 
                 WritableMap eventExitFullscreen = Arguments.createMap();
@@ -678,6 +691,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * @return Default {@link DeviceOrientationDelegate}
      */
     private DeviceOrientationDelegate getDeviceOrientationDelegate() {
+        JWLog.d(TAG, "getDeviceOrientationDelegate()");
         DeviceOrientationDelegate delegate = new DeviceOrientationDelegate(
                 mActivity,
                 mActivity.getLifecycle(),
@@ -714,6 +728,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onBeforeNextPlaylistItem(PlaylistItemDecision playlistItemDecision, PlaylistItem nextItem, int indexOfNextItem) {
+        JWLog.d(TAG, "onBeforeNextPlaylistItem(index=" + indexOfNextItem + ", nextItem=" + JWLog.safe(nextItem) + ")");
         WritableMap event = Arguments.createMap();
         Gson gson = new Gson();
         event.putString("message", "onBeforeNextPlaylistItem");
@@ -730,6 +745,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         @Override
         public void onFullscreenRequested() {
+            JWLog.d(TAG, "fullscreenHandler.onFullscreenRequested()");
             mDecorView = mActivity.getWindow().getDecorView();
 
             // Hide system ui
@@ -772,6 +788,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         @Override
         public void onFullscreenExitRequested() {
+            JWLog.d(TAG, "fullscreenHandler.onFullscreenExitRequested()");
             mDecorView.setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_VISIBLE // clear the hide system flags
             );
@@ -838,6 +855,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         @Override
         public void onReceive(Context context, Intent intent) {
+            JWLog.d(TAG, "PipHandlerReceiver.onReceive(intent=" + JWLog.intentInfo(intent) + ")");
             if (intent == null) {
                 return;
             }
@@ -901,6 +919,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void registerReceiver() {
+        JWLog.d(TAG, "registerReceiver()");
         mReceiver = new PipHandlerReceiver();
         IntentFilter intentFilter = new IntentFilter("onPictureInPictureModeChanged");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -916,6 +935,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void unRegisterReceiver() {
+        JWLog.d(TAG, "unRegisterReceiver()");
         if (mReceiver != null) {
             mActivity.unregisterReceiver(mReceiver);
             mReceiver = null;
@@ -924,6 +944,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     public void setConfig(ReadableMap prop) {
+        JWLog.d(TAG, "setConfig(propKeys=" + (prop != null ? prop.toHashMap().keySet() : null) + ")");
         if (mConfig == null || !mConfig.equals(prop)) {
             if (mConfig != null && isOnlyDiff(prop, "playlist") && mPlayer != null) { // still safe check, even with JW
                 // JSON change
@@ -951,7 +972,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 if (prop.hasKey("license")) {
                     new LicenseUtil().setLicenseKey(getReactContext(), prop.getString("license"));
                 } else {
-                    Log.e(TAG, "JW SDK license not set");
+                    JWLog.e(TAG, "JW SDK license not set");
                 }
 
                 // The entire config is different (other than the "playlist" key)
@@ -965,6 +986,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     public boolean isOnlyDiff(ReadableMap prop, String keyName) {
+        JWLog.d(TAG, "isOnlyDiff(keyName=" + keyName + ")");
         // Convert ReadableMap to HashMap
         Map<String, Object> mConfigMap = mConfig.toHashMap();
         Map<String, Object> propMap = prop.toHashMap();
@@ -992,11 +1014,13 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private boolean playlistNotTheSame(ReadableMap prop) {
+        JWLog.d(TAG, "playlistNotTheSame()" );
         return prop.hasKey("playlist") && mPlaylistProp != prop.getArray("playlist") && !Arrays
                 .deepEquals(new ReadableArray[]{mPlaylistProp}, new ReadableArray[]{prop.getArray("playlist")});
     }
 
     private void setupPlayer(ReadableMap prop) {
+        JWLog.d(TAG, "setupPlayer(propKeys=" + (prop != null ? prop.toHashMap().keySet() : null) + ")");
         // Legacy
         PlayerConfig.Builder configBuilder = new PlayerConfig.Builder();
 
@@ -1011,7 +1035,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 jwConfig = JsonHelper.parseConfigJson(obj);
                 isJwConfig = true;
             } catch (Exception ex) {
-                Log.e("RNJWPlayerView", ex.toString());
+                JWLog.e(TAG, ex.toString());
                 isJwConfig = false; // not a valid jw config. Try to setup in legacy
             }
         }
@@ -1257,6 +1281,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * Get the context to use for MediaSession operations
      */
     private Context getMediaSessionContext() {
+        JWLog.d(TAG, "getMediaSessionContext()");
         return getNonBuggyContext(getReactContext(), getAppContext());
     }
     
@@ -1264,6 +1289,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * Check if MediaSession already exists (from MediaBrowserService)
      */
     private boolean hasExistingMediaSession() {
+        JWLog.d(TAG, "hasExistingMediaSession() check via reflection");
         try {
             Class<?> singletonClass = Class.forName("com.mediabrowser.MediaSessionSingleton");
             java.lang.reflect.Method getInstanceMethod = singletonClass.getMethod("getInstance", Context.class);
@@ -1275,48 +1301,33 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void setupMediaSessionHelper() {
-        if (backgroundAudioEnabled) {
-            // The check for an existing player is now handled by the PlaybackManager
-            // at the beginning of setupPlayer(). The destroyBackgroundPlayer() call here
-            // is no longer needed.
-            
-            Context context = getMediaSessionContext();
-            ServiceMediaApi serviceMediaApi = new ServiceMediaApi(mPlayer);
-            com.jwplayer.rnjwplayer.session.RNJWNotificationHelper notificationHelper = new com.jwplayer.rnjwplayer.session.RNJWNotificationHelper.Builder(context, (NotificationManager) mActivity.getSystemService(Context.NOTIFICATION_SERVICE)).build();
-            
-            // Check if MediaSession already exists (from MediaBrowserService)
-            // If it exists, use it; if not, create new one
-            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper rNJWMediaSessionHelper;
-            try {
-                if (hasExistingMediaSession()) {
-                    // Use existing session - don't take audio focus since MediaBrowserService manages it
-                    rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
-                    android.util.Log.d("RNJWPlayerView", "Using existing MediaSession from MediaBrowserService");
-                } else {
-                    // Create new session and request audio focus
-                    rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
-                    // Request audio focus since we're creating a new session
-                    requestAudioFocus();
-                    android.util.Log.d("RNJWPlayerView", "Created new MediaSession");
-                }
-            } catch (Exception e) {
-                // Fallback to creating new session
-                rNJWMediaSessionHelper = new com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
-                requestAudioFocus();
-                android.util.Log.d("RNJWPlayerView", "Created new MediaSession (fallback)");
-            }
-            
-            mMediaServiceController = new RNJWMediaServiceController.Builder(mActivity, mPlayer)
-                    .serviceMediaApi(serviceMediaApi)
-                    .mediaSessionHelper(rNJWMediaSessionHelper)
-                    .notificationHelper(notificationHelper)
-                    .build();
+        JWLog.d(TAG, "setupMediaSessionHelper(backgroundAudioEnabled=" + backgroundAudioEnabled + ")");
+        if (!backgroundAudioEnabled) {
+            return;
         }
+
+        // Prepare dependencies
+        Context context = getMediaSessionContext();
+        ServiceMediaApi serviceMediaApi = new ServiceMediaApi(mPlayer);
+        com.jwplayer.rnjwplayer.session.RNJWNotificationHelper notificationHelper =
+                new com.jwplayer.rnjwplayer.session.RNJWNotificationHelper.Builder(
+                        context,
+                        (NotificationManager) mActivity.getSystemService(Context.NOTIFICATION_SERVICE)
+                ).build();
+
+        // Single-source-of-truth: let the Builder own RNJWMediaSessionHelper creation.
+        // Do NOT instantiate RNJWMediaSessionHelper here.
+        JWLog.d(TAG, "Setting up MediaServiceController (Builder will create MediaSessionHelper)");
+        mMediaServiceController = new RNJWMediaServiceController.Builder(mActivity, mPlayer)
+                .serviceMediaApi(serviceMediaApi)
+                .notificationHelper(notificationHelper)
+                .build();
     }
 
     // Audio Focus
 
     public void requestAudioFocus() {
+        JWLog.d(TAG, "requestAudioFocus() apiLevel=" + Build.VERSION.SDK_INT + ", hasAudioFocus=" + hasAudioFocus);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (hasAudioFocus) {
                 return;
@@ -1335,6 +1346,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         .build();
 
                 int res = audioManager.requestAudioFocus(focusRequest);
+                JWLog.d(TAG, "requestAudioFocus result=" + res);
                 synchronized (focusLock) {
                     if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
                         playbackNowAuthorized = false;
@@ -1360,6 +1372,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         // Request permanent focus.
                         AudioManager.AUDIOFOCUS_GAIN);
             }
+            JWLog.d(TAG, "requestAudioFocus (legacy) result=" + result);
             if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 hasAudioFocus = true;
             }
@@ -1368,6 +1381,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
 
     public void lowerApiOnAudioFocus(int focusChange) {
+        JWLog.d(TAG, "lowerApiOnAudioFocus(focusChange=" + focusChange + ")");
         if (mPlayer != null) {
             int initVolume = mPlayer.getVolume();
 
@@ -1399,6 +1413,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     public void onAudioFocusChange(int focusChange) {
+        JWLog.d(TAG, "onAudioFocusChange(focusChange=" + focusChange + ")");
         if (mPlayer != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 int initVolume = mPlayer.getVolume();
@@ -1444,12 +1459,14 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void setVolume(int volume) {
+        JWLog.d(TAG, "setVolume(volume=" + volume + ") mute=" + mPlayer.getMute());
         if (!mPlayer.getMute()) {
             mPlayer.setVolume(volume);
         }
     }
 
     private void updateWakeLock(boolean enable) {
+        JWLog.d(TAG, "updateWakeLock(enable=" + enable + ", isInBackground=" + isInBackground + ")");
         if (mWindow != null) {
             if (enable && !isInBackground) {
                 mWindow.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -1463,6 +1480,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdLoaded(AdLoadedEvent adLoadedEvent) {
+        JWLog.d(TAG, "onAdLoaded(client=" + Util.getAdEventClientValue(adLoadedEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adLoadedEvent));
@@ -1471,6 +1489,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdLoadedXml(AdLoadedXmlEvent adLoadedXmlEvent) {
+        JWLog.d(TAG, "onAdLoadedXml(client=" + Util.getAdEventClientValue(adLoadedXmlEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adLoadedXmlEvent));
@@ -1479,6 +1498,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdPause(AdPauseEvent adPauseEvent) {
+        JWLog.d(TAG, "onAdPause(reason=" + adPauseEvent.getAdPauseReason() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putString("reason", adPauseEvent.getAdPauseReason().toString());
@@ -1489,6 +1509,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdPlay(AdPlayEvent adPlayEvent) {
+        JWLog.d(TAG, "onAdPlay(reason=" + adPlayEvent.getAdPlayReason() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putString("reason", adPlayEvent.getAdPlayReason().toString());
@@ -1499,6 +1520,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdBreakEnd(AdBreakEndEvent adBreakEndEvent) {
+        JWLog.d(TAG, "onAdBreakEnd(client=" + Util.getAdEventClientValue(adBreakEndEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adBreakEndEvent));
@@ -1508,6 +1530,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdBreakStart(AdBreakStartEvent adBreakStartEvent) {
+        JWLog.d(TAG, "onAdBreakStart(client=" + Util.getAdEventClientValue(adBreakStartEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adBreakStartEvent));
@@ -1517,6 +1540,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdBreakIgnored(AdBreakIgnoredEvent adBreakIgnoredEvent) {
+        JWLog.d(TAG, "onAdBreakIgnored(client=" + Util.getAdEventClientValue(adBreakIgnoredEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adBreakIgnoredEvent));
@@ -1526,6 +1550,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdClick(AdClickEvent adClickEvent) {
+        JWLog.d(TAG, "onAdClick(client=" + Util.getAdEventClientValue(adClickEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adClickEvent));
@@ -1535,6 +1560,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdCompanions(AdCompanionsEvent adCompanionsEvent) {
+        JWLog.d(TAG, "onAdCompanions(client=" + Util.getAdEventClientValue(adCompanionsEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adCompanionsEvent));
@@ -1544,6 +1570,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdComplete(AdCompleteEvent adCompleteEvent) {
+        JWLog.d(TAG, "onAdComplete(client=" + Util.getAdEventClientValue(adCompleteEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adCompleteEvent));
@@ -1553,6 +1580,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdError(AdErrorEvent adErrorEvent) {
+        JWLog.d(TAG, "onAdError(code=" + adErrorEvent.getCode() + ", adErrorCode=" + adErrorEvent.getAdErrorCode() + ", message=" + adErrorEvent.getMessage() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlayerAdError");
         event.putInt("code", adErrorEvent.getCode());
@@ -1563,6 +1591,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdWarning(AdWarningEvent adWarningEvent) {
+        JWLog.d(TAG, "onAdWarning(code=" + adWarningEvent.getCode() + ", adErrorCode=" + adWarningEvent.getAdErrorCode() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlayerAdWarning");
         event.putInt("code", adWarningEvent.getCode());
@@ -1573,6 +1602,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdImpression(AdImpressionEvent adImpressionEvent) {
+        JWLog.d(TAG, "onAdImpression(client=" + Util.getAdEventClientValue(adImpressionEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adImpressionEvent));
@@ -1582,6 +1612,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdMeta(AdMetaEvent adMetaEvent) {
+        JWLog.d(TAG, "onAdMeta(client=" + Util.getAdEventClientValue(adMetaEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adMetaEvent));
@@ -1591,6 +1622,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdRequest(AdRequestEvent adRequestEvent) {
+        JWLog.d(TAG, "onAdRequest(client=" + Util.getAdEventClientValue(adRequestEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adRequestEvent));
@@ -1600,6 +1632,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdSchedule(AdScheduleEvent adScheduleEvent) {
+        JWLog.d(TAG, "onAdSchedule(client=" + Util.getAdEventClientValue(adScheduleEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adScheduleEvent));
@@ -1609,6 +1642,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdSkipped(AdSkippedEvent adSkippedEvent) {
+        JWLog.d(TAG, "onAdSkipped(client=" + Util.getAdEventClientValue(adSkippedEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adSkippedEvent));
@@ -1618,6 +1652,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdStarted(AdStartedEvent adStartedEvent) {
+        JWLog.d(TAG, "onAdStarted(client=" + Util.getAdEventClientValue(adStartedEvent) + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adStartedEvent));
@@ -1627,6 +1662,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdTime(AdTimeEvent adTimeEvent) {
+        JWLog.d(TAG, "onAdTime(position=" + adTimeEvent.getPosition() + ", duration=" + adTimeEvent.getDuration() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdTime");
         event.putDouble("position", adTimeEvent.getPosition());
@@ -1636,11 +1672,13 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAdViewableImpression(AdViewableImpressionEvent adViewableImpressionEvent) {
+        JWLog.d(TAG, "onAdViewableImpression()");
         // send everything?
     }
 
     @Override
     public void onBeforeComplete(BeforeCompleteEvent beforeCompleteEvent) {
+        JWLog.d(TAG, "onBeforeComplete()");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onBeforeComplete");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topBeforeComplete", event);
@@ -1650,6 +1688,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onBeforePlay(BeforePlayEvent beforePlayEvent) {
+        JWLog.d(TAG, "onBeforePlay()");
         // Ideally done in onFirstFrame instead
         // if (backgroundAudioEnabled) {
         //     doBindService();
@@ -1664,6 +1703,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAudioTracks(AudioTracksEvent audioTracksEvent) {
+        JWLog.d(TAG, "onAudioTracks() count=" + (audioTracksEvent.getAudioTracks() != null ? audioTracksEvent.getAudioTracks().size() : 0));
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAudioTracks");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topAudioTracks", event);
@@ -1671,6 +1711,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onAudioTrackChanged(AudioTrackChangedEvent audioTrackChangedEvent) {
+        JWLog.d(TAG, "onAudioTrackChanged(index=" + audioTrackChangedEvent.getCurrentTrack() + ")");
 
     }
 
@@ -1678,6 +1719,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onCaptionsChanged(CaptionsChangedEvent captionsChangedEvent) {
+        JWLog.d(TAG, "onCaptionsChanged(index=" + captionsChangedEvent.getCurrentTrack() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onCaptionsChanged");
         event.putInt("index", captionsChangedEvent.getCurrentTrack());
@@ -1686,6 +1728,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onCaptionsList(CaptionsListEvent captionsListEvent) {
+        JWLog.d(TAG, "onCaptionsList(count=" + (captionsListEvent.getCaptions() != null ? captionsListEvent.getCaptions().size() : 0) + ")");
         WritableMap event = Arguments.createMap();
         List<Caption> captionTrackList = captionsListEvent.getCaptions();
         WritableArray captionTracks = Arguments.createArray();
@@ -1710,6 +1753,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onBuffer(BufferEvent bufferEvent) {
+        JWLog.d(TAG, "onBuffer()");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onBuffer");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topBuffer", event);
@@ -1719,6 +1763,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onComplete(CompleteEvent completeEvent) {
+        JWLog.d(TAG, "onComplete()");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onComplete");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topComplete", event);
@@ -1728,6 +1773,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onControlBarVisibilityChanged(ControlBarVisibilityEvent controlBarVisibilityEvent) {
+        JWLog.d(TAG, "onControlBarVisibilityChanged(visible=" + controlBarVisibilityEvent.isVisible() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onControlBarVisible");
         event.putBoolean("visible", controlBarVisibilityEvent.isVisible());
@@ -1738,16 +1784,19 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onControls(ControlsEvent controlsEvent) {
+        JWLog.d(TAG, "onControls()");
 
     }
 
     @Override
     public void onDisplayClick(DisplayClickEvent displayClickEvent) {
+        JWLog.d(TAG, "onDisplayClick()");
 
     }
 
     @Override
     public void onError(ErrorEvent errorEvent) {
+        JWLog.d(TAG, "onError(code=" + errorEvent.getErrorCode() + ", message=" + errorEvent.getMessage() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onError");
         Exception ex = errorEvent.getException();
@@ -1763,6 +1812,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onFirstFrame(FirstFrameEvent firstFrameEvent) {
+        JWLog.d(TAG, "onFirstFrame(loadTime=" + firstFrameEvent.getLoadTime() + ")");
         if (backgroundAudioEnabled) {
             doBindService();
             // Only request audio focus if we're creating a new session
@@ -1781,6 +1831,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onFullscreen(FullscreenEvent fullscreenEvent) {
+        JWLog.d(TAG, "onFullscreen(fullscreen=" + fullscreenEvent.getFullscreen() + ")");
         if (fullscreenEvent.getFullscreen()) {
             if (mPlayerView != null) {
                 mPlayerView.requestFocus();
@@ -1804,11 +1855,13 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onIdle(IdleEvent idleEvent) {
+        JWLog.d(TAG, "onIdle()");
 
     }
 
     @Override
     public void onPause(PauseEvent pauseEvent) {
+        JWLog.d(TAG, "onPause()", true);
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPause");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPause", event);
@@ -1822,6 +1875,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onPlay(PlayEvent playEvent) {
+        JWLog.d(TAG, "onPlay()");
         // Ideally done in onFirstFrame instead
         // if (backgroundAudioEnabled) {
         //     doBindService();
@@ -1840,6 +1894,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
+        JWLog.d(TAG, "onPlaylistComplete()");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlaylistComplete");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPlaylistComplete", event);
@@ -1849,6 +1904,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
+        JWLog.d(TAG, "onPlaylistItem(index=" + playlistItemEvent.getIndex() + ")");
         // Ideally done in onFirstFrame instead
         // if (backgroundAudioEnabled) {
         //     doBindService();
@@ -1861,17 +1917,20 @@ public class RNJWPlayerView extends RelativeLayout implements
         event.putInt("index", playlistItemEvent.getIndex());
         Gson gson = new Gson();
         String json = gson.toJson(playlistItemEvent.getPlaylistItem());
+        JWLog.d(TAG, "PlaylistItem JSON: " + json);
         event.putString("playlistItem", json);
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPlaylistItem", event);
     }
 
     @Override
     public void onPlaylist(PlaylistEvent playlistEvent) {
+        JWLog.d(TAG, "onPlaylist()");
 
     }
 
     @Override
     public void onReady(ReadyEvent readyEvent) {
+        JWLog.d(TAG, "onReady()");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlayerReady");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topOnPlayerReady", event);
@@ -1881,6 +1940,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onSeek(SeekEvent seekEvent) {
+        JWLog.d(TAG, "onSeek(position=" + seekEvent.getPosition() + ", offset=" + seekEvent.getOffset() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onSeek");
         event.putDouble("position", seekEvent.getPosition());
@@ -1890,6 +1950,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onSeeked(SeekedEvent seekedEvent) {
+        JWLog.d(TAG, "onSeeked(position=" + seekedEvent.getPosition() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onSeeked");
         event.putDouble("position", seekedEvent.getPosition());
@@ -1898,6 +1959,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onPlaybackRateChanged(PlaybackRateChangedEvent playbackRateChangedEvent) {
+        JWLog.d(TAG, "onPlaybackRateChanged(rate=" + playbackRateChangedEvent.getPlaybackRate() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onRateChanged");
         event.putDouble("rate", playbackRateChangedEvent.getPlaybackRate());
@@ -1906,6 +1968,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onSetupError(SetupErrorEvent setupErrorEvent) {
+        JWLog.d(TAG, "onSetupError(code=" + setupErrorEvent.getCode() + ", message=" + setupErrorEvent.getMessage() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onSetupError");
         event.putString("errorMessage", setupErrorEvent.getMessage());
@@ -1917,6 +1980,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onTime(TimeEvent timeEvent) {
+        // JWLog.d(TAG, "onTime(position=" + timeEvent.getPosition() + ", duration=" + timeEvent.getDuration() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onTime");
         event.putDouble("position", timeEvent.getPosition());
@@ -1926,6 +1990,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onMeta(MetaEvent metaEvent) {
+        JWLog.d(TAG, "onMeta()");
 
     }
 
@@ -1933,11 +1998,13 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onPipClose(PipCloseEvent pipCloseEvent) {
+        JWLog.d(TAG, "onPipClose()");
 
     }
 
     @Override
     public void onPipOpen(PipOpenEvent pipOpenEvent) {
+        JWLog.d(TAG, "onPipOpen()");
 
     }
 
@@ -1951,11 +2018,13 @@ public class RNJWPlayerView extends RelativeLayout implements
      * @return true if casting
      */
     public boolean getIsCastActive() {
+        JWLog.d(TAG, "getIsCastActive() -> " + mIsCastActive);
         return mIsCastActive;
     }
 
     @Override
     public void onCast(CastEvent castEvent) {
+        JWLog.d(TAG, "onCast(device=" + castEvent.getDeviceName() + ", active=" + castEvent.isActive() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onCasting");
         event.putString("device", castEvent.getDeviceName());
@@ -1987,23 +2056,42 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onHostResume() {
+        JWLog.d(TAG, "onHostResume()");
         sessionDepth++;
         if (sessionDepth == 1) {
             isInBackground = false;
+        }
+
+        JWLog.d(TAG, "onHostResume() sessionDepth=" + sessionDepth + ", isInBackground=" + isInBackground);
+        // Notify playback routing that UI is foregrounded again
+        try {
+            PlaybackManager.getInstance().setUiInBackground(false);
+        } catch (Throwable t) {
+            JWLog.w(TAG, "Failed to notify PlaybackManager of foreground: " + t.getMessage());
         }
     }
 
     @Override
     public void onHostPause() {
+        JWLog.d(TAG, "onHostPause()");
         if (sessionDepth > 0)
             sessionDepth--;
         if (sessionDepth == 0) {
             isInBackground = true;
         }
+
+        JWLog.d(TAG, "onHostPause() sessionDepth=" + sessionDepth + ", isInBackground=" + isInBackground);
+        // Notify playback routing that UI is backgrounded
+        try {
+            PlaybackManager.getInstance().setUiInBackground(true);
+        } catch (Throwable t) {
+            JWLog.w(TAG, "Failed to notify PlaybackManager of background: " + t.getMessage());
+        }
     }
 
     @Override
     public void onHostDestroy() {
+        JWLog.d(TAG, "onHostDestroy()");
         this.destroyPlayer();
     }
 

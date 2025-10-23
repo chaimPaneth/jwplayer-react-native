@@ -1,9 +1,9 @@
 package com.jwplayer.rnjwplayer;
 
 import android.content.Context;
-import android.util.Log;
 
 import com.jwplayer.pub.api.JWPlayer;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 
 import java.lang.reflect.Method;
 
@@ -13,12 +13,15 @@ public class PlaybackManager {
     private JWPlayer mActivePlayer;
     private final Object mutex = new Object();
     private boolean isTransitioning = false;
+    // Track whether the UI player (RNJWPlayerView) is in background
+    private volatile boolean uiInBackground = false;
 
     private static final String TAG = "PlaybackManager";
 
     private PlaybackManager() {}
 
     public static synchronized PlaybackManager getInstance() {
+        // JWLog.d(TAG, "getInstance()"); // IGNORE
         if (instance == null) {
             instance = new PlaybackManager();
         }
@@ -26,28 +29,34 @@ public class PlaybackManager {
     }
 
     public void setActivePlayer(JWPlayer player, Object handler) {
-        Log.d(TAG, "Setting active player. Handler: " + (handler != null ? handler.getClass().getSimpleName() : "null"));
+        JWLog.d(TAG, "setActivePlayer(player=" + JWLog.id(player) + ", handler=" + (handler != null ? handler.getClass().getSimpleName() : "null") + ")");
         // Ensure any existing player is fully stopped and we are idle before setting a new one
         stopAndCleanupCurrentPlayer();
         synchronized (mutex) {
             this.mActivePlayer = player;
             this.mActivePlayerHandler = handler;
+            // Reset UI background flag when a new handler is set; RNJWPlayerView will update it via lifecycle callbacks
+            if (!(handler instanceof RNJWPlayerView)) {
+                uiInBackground = false;
+            }
         }
     }
 
     public void clearPlayer(Object handler) {
+        JWLog.d(TAG, "clearPlayer(handler=" + (handler != null ? handler.getClass().getSimpleName() : "null") + ")");
         synchronized (mutex) {
             if (this.mActivePlayerHandler == handler) {
-                Log.d(TAG, "Clearing active player for handler: " + handler.getClass().getSimpleName());
+                JWLog.d(TAG, "Clearing active player for handler: " + handler.getClass().getSimpleName());
                 this.mActivePlayer = null;
                 this.mActivePlayerHandler = null;
             } else {
-                Log.w(TAG, "A non-active handler tried to clear the player. Ignoring.");
+                JWLog.w(TAG, "A non-active handler tried to clear the player. Ignoring.");
             }
         }
     }
 
     public void stopAndCleanupCurrentPlayer() {
+        JWLog.d(TAG, "stopAndCleanupCurrentPlayer()");
         Object handlerToCleanup = null;
         synchronized (mutex) {
             if (mActivePlayerHandler != null) {
@@ -56,8 +65,9 @@ public class PlaybackManager {
                 handlerToCleanup = mActivePlayerHandler;
                 mActivePlayer = null;
                 mActivePlayerHandler = null;
+                uiInBackground = false;
             } else {
-                Log.d(TAG, "No active player to clean up.");
+                JWLog.d(TAG, "No active player to clean up.");
             }
         }
 
@@ -70,13 +80,13 @@ public class PlaybackManager {
                 } else if (handlerToCleanup instanceof RNJWPlayerView) {
                     cleanupMethod = handlerToCleanup.getClass().getMethod("destroyPlayer");
                 } else {
-                    Log.e(TAG, "Unknown handler type, cannot clean up: " + handlerToCleanup.getClass().getName());
+                    JWLog.e(TAG, "Unknown handler type, cannot clean up: " + handlerToCleanup.getClass().getName());
                     return;
                 }
                 cleanupMethod.invoke(handlerToCleanup);
-                Log.d(TAG, "Cleanup method invoked successfully.");
+                JWLog.d(TAG, "Cleanup method invoked successfully.");
             } catch (Exception e) {
-                Log.e(TAG, "Error trying to stop and cleanup the active player", e);
+                JWLog.e(TAG, "Error trying to stop and cleanup the active player", e);
             } finally {
                 synchronized (mutex) {
                     isTransitioning = false;
@@ -91,6 +101,7 @@ public class PlaybackManager {
      * or until the timeout elapses.
      */
     public void waitForIdle(long timeoutMs) {
+        JWLog.d(TAG, "waitForIdle(timeoutMs=" + timeoutMs + ")");
         long deadline = System.currentTimeMillis() + Math.max(0, timeoutMs);
         synchronized (mutex) {
             while (isTransitioning) {
@@ -110,7 +121,9 @@ public class PlaybackManager {
      */
     public boolean isUIActive() {
         synchronized (mutex) {
-            return mActivePlayerHandler instanceof RNJWPlayerView;
+            boolean active = mActivePlayerHandler instanceof RNJWPlayerView && !uiInBackground;
+            // JWLog.d(TAG, "isUIActive() -> " + active + " (uiInBackground=" + uiInBackground + ")");
+            return active;
         }
     }
 
@@ -118,6 +131,7 @@ public class PlaybackManager {
      * Returns true if any player is currently registered as active.
      */
     public boolean hasActivePlayer() {
+        // JWLog.d(TAG, "hasActivePlayer() -> " + (mActivePlayer != null));
         synchronized (mutex) {
             return mActivePlayer != null;
         }
@@ -127,6 +141,7 @@ public class PlaybackManager {
      * For logging/debugging: name of the current active handler class, or "none".
      */
     public String getActiveHandlerName() {
+        JWLog.d(TAG, "getActiveHandlerName()");
         synchronized (mutex) {
             return mActivePlayerHandler != null ? mActivePlayerHandler.getClass().getSimpleName() : "none";
         }
@@ -137,11 +152,21 @@ public class PlaybackManager {
      * Otherwise returns null.
      */
     public JWPlayer getActivePlayerIfUI() {
+        JWLog.d(TAG, "getActivePlayerIfUI()");
         synchronized (mutex) {
-            if (mActivePlayerHandler instanceof RNJWPlayerView) {
+            if (mActivePlayerHandler instanceof RNJWPlayerView && !uiInBackground) {
                 return mActivePlayer;
             }
             return null;
         }
+    }
+
+    /**
+     * Notify the manager that the UI player's host (activity) went background/foreground.
+     * When in background, the UI player should not be considered active for routing.
+     */
+    public void setUiInBackground(boolean inBackground) {
+        this.uiInBackground = inBackground;
+        JWLog.d(TAG, "setUiInBackground(" + inBackground + ")");
     }
 }

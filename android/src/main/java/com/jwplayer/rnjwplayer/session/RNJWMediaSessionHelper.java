@@ -22,7 +22,6 @@ import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.MediaControllerCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
-import android.util.Log;
 import android.view.KeyEvent;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -48,6 +47,7 @@ import com.jwplayer.pub.api.events.listeners.AdvertisingEvents;
 import com.jwplayer.pub.api.events.listeners.VideoPlayerEvents;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
 import com.mediabrowser.MediaSessionSingleton;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -88,41 +88,49 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
         @Override
         public void onPlay() {
+            JWLog.d(TAG, "mediaSessionCallback.onPlay()");
             performPlay();
         }
 
         @Override
         public void onPause() {
+            JWLog.d(TAG, "mediaSessionCallback.onPause()", true);
             performPause();
         }
 
         @Override
         public void onStop() {
+            JWLog.d(TAG, "mediaSessionCallback.onStop()");
             performStop();
         }
 
         @Override
         public void onSeekTo(long position) {
+            JWLog.d(TAG, "mediaSessionCallback.onSeekTo(positionMs=" + position + ")");            
             performSeekTo(position);            
         }
 
         @Override
         public void onSkipToNext() {
+            JWLog.d(TAG, "mediaSessionCallback.onSkipToNext()");
             performSkipToNext();
         }
 
         @Override
         public void onSkipToPrevious() {
+            JWLog.d(TAG, "mediaSessionCallback.onSkipToPrevious()");
             performSkipToPrevious();
         }
 
         @Override
         public void onPlayFromMediaId(String mediaId, Bundle extras) {
+            JWLog.d(TAG, "mediaSessionCallback.onPlayFromMediaId(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ")");
             performMediaItemSelection(mediaId, extras);
         }
 
         @Override
         public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+            JWLog.d(TAG, "mediaSessionCallback.onMediaButtonEvent(intent=" + JWLog.intentInfo(mediaButtonIntent) + ")");
             // Let existing fallback also run; just return super after we optionally process
             try {
                 if (mediaButtonIntent != null && Intent.ACTION_MEDIA_BUTTON.equals(mediaButtonIntent.getAction())) {
@@ -170,7 +178,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     }
                 }
             } catch (Exception ex) {
-                Log.w(TAG, "mediaSessionCallback onMediaButtonEvent error: " + ex.getMessage());
+                JWLog.w(TAG, "mediaSessionCallback onMediaButtonEvent error: " + ex.getMessage());
             }
             return super.onMediaButtonEvent(mediaButtonIntent);
         }
@@ -181,6 +189,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * and forward it to MediaBrowserService.
      */
     private void captureAndStoreSeekPosition() {
+        JWLog.d(TAG, "captureAndStoreSeekPosition()");
         long positionMs = 0L;
         try {
             if (jwPlayer != null) {
@@ -197,19 +206,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void storeSeekPosition(long position) {
+        JWLog.d(TAG, "storeSeekPosition(externalMediaId=" + externalMediaId + ", positionMs=" + position + ")");
         if (externalMediaId == null) {
-            Log.d(TAG, "storeSeekPosition: externalMediaId is null");
+            JWLog.d(TAG, "storeSeekPosition: externalMediaId is null");
             return;
         }
         
         try {
-            Class<?> mbs = Class.forName("com.mediabrowser.MediaBrowserService");
+            Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method reportSeek =
-                    mbs.getMethod("updateSeekPosition", String.class, long.class);
+                    mediaBrowserServiceClass.getMethod("updateSeekPosition", String.class, long.class);
             reportSeek.invoke(null, externalMediaId, position); // position in ms
         } catch (Exception ignore) {
             // Safe to ignore; just don't break the seek
-            Log.w(TAG, "Could not report seek to React Native: " + ignore.getMessage());
+            JWLog.w(TAG, "Could not report seek to React Native: " + ignore.getMessage());
         }
     }
 
@@ -218,6 +228,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private RNJWMediaSessionHelper(Context context, RNJWNotificationHelper notificationHelper, ServiceMediaApi serviceMediaApi, MediaServiceFactory bgaFactory) {
+        JWLog.d(TAG, "<init>-internal(context=" + JWLog.id(context) + ", notificationHelper=" + JWLog.id(notificationHelper) + ", serviceMediaApi=" + JWLog.id(serviceMediaApi) + ", mediaServiceFactory=" + JWLog.id(bgaFactory) + ")");
         this.context = context;
         this.rnjwNotificationHelper = notificationHelper;
         this.mediaServiceFactory = bgaFactory;
@@ -229,6 +240,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     final void setupServiceMediaApi(ServiceMediaApi serviceMediaApi) {
+        JWLog.d(TAG, "setupServiceMediaApi(serviceMediaApi=" + JWLog.id(serviceMediaApi) + ")");
         this.cleanup();
         if (serviceMediaApi != null) {
             this.serviceMediaApi = serviceMediaApi;
@@ -238,15 +250,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void initServiceMediaApi() {
-        Log.d(TAG, "initServiceMediaApi");
+        JWLog.d(TAG, "initServiceMediaApi()");
 
         if (activeInstance != this) {
-            Log.w(TAG, "initServiceMediaApi: This instance is not active; skipping initialization");
+            JWLog.w(TAG, "initServiceMediaApi: This instance is not active; skipping initialization");
             return;
         }
 
         if (this.mediaSessionStateProvider != null) {
-            Log.w(TAG, "initServiceMediaApi: MediaSession already initialized");
+            JWLog.w(TAG, "initServiceMediaApi: MediaSession already initialized");
             return;
         }
 
@@ -262,7 +274,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 this.mediaSessionStateProvider.mediaSessionCompat.setCallback(mediaSessionCallback);
             }
         } catch (Exception cbEx) {
-            Log.w(TAG, "Failed to set MediaSession callback: " + cbEx.getMessage());
+            JWLog.w(TAG, "Failed to set MediaSession callback: " + cbEx.getMessage());
         }
 
         setupMediaButtonFallback(currentContext);
@@ -292,7 +304,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 }
             }
         } catch (Exception e) {
-            Log.w(TAG, "Could not coordinate with background player: " + e.getMessage());
+            JWLog.w(TAG, "Could not coordinate with background player: " + e.getMessage());
         }
         
         // DON'T set callback here - MediaBrowserService already has the callback set
@@ -305,10 +317,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void updatePlaybackState(JWPlayer player, int state) {
+        JWLog.d(TAG, "updatePlaybackState(player=" + JWLog.id(player) + ", state=" + state + ")");
         updatePlaybackState(player, state, null);
     }
 
     private void updatePlaybackState(JWPlayer player, int state, Long overridePositionMs) {
+        JWLog.d(TAG, "updatePlaybackState(player=" + JWLog.id(player) + ", state=" + state + ", overridePositionMs=" + (overridePositionMs == null ? "null" : overridePositionMs) + ")");
         if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null || player == null) {
             return;
         }
@@ -337,7 +351,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 long caps = this.serviceMediaApi.getNotificationCapabilities();
                 actions |= caps;
             } catch (Exception ex) {
-                Log.w(TAG, "updatePlaybackState: capabilities read failed " + ex.getMessage());
+                JWLog.w(TAG, "updatePlaybackState: capabilities read failed " + ex.getMessage());
             }
         }
 
@@ -351,16 +365,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(builder.build());
             this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
         } catch (Exception ex) {
-            Log.w(TAG, "updatePlaybackState: set failed " + ex.getMessage());
+            JWLog.w(TAG, "updatePlaybackState: set failed " + ex.getMessage());
         }
     }
 
     private void setupMediaButtonFallback(Context ctx) {
+        JWLog.d(TAG, "setupMediaButtonFallback(ctx=" + JWLog.id(ctx) + ")");
         if (mediaButtonFallbackReceiver != null) return;
 
         mediaButtonFallbackReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
+                JWLog.d(TAG, "mediaButtonFallbackReceiver.onReceive(intent=" + JWLog.intentInfo(intent) + ")");
                 if (!Intent.ACTION_MEDIA_BUTTON.equals(intent.getAction())) return;
                 
                 KeyEvent keyEvent = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
@@ -396,7 +412,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                         updatePlaybackState(jwPlayer, playerState);
                     }
                 } catch (Exception ex) {
-                    Log.w(TAG, "Fallback media button handling error " + ex.getMessage());
+                    JWLog.w(TAG, "Fallback media button handling error " + ex.getMessage());
                 }
             }
         };
@@ -408,12 +424,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     intentFilter,
                     ContextCompat.RECEIVER_EXPORTED);
         } catch (Exception ex) {
-            Log.w(TAG, "setupMediaButtonFallback: register failed " + ex.getMessage());
+            JWLog.w(TAG, "setupMediaButtonFallback: register failed " + ex.getMessage());
         }
     }
 
     // Audio focus management
     private boolean requestAudioFocusForPlayback(Context ctx) {
+        JWLog.d(TAG, "requestAudioFocusForPlayback(ctx=" + JWLog.id(ctx) + ", isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ", currentlyHasFocus=" + currentlyHasFocus + ")");
         // If this is from Android Auto, let Android Auto handle audio focus
         if (isPlayingFromAndroidAuto) {
             currentlyHasFocus = true; // Assume we have focus
@@ -431,7 +448,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             audioManager = (android.media.AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
         }
         if (audioManager == null) {
-            Log.w(TAG, "AudioManager unavailable - cannot request focus");
+            JWLog.w(TAG, "AudioManager unavailable - cannot request focus");
             return false;
         }
 
@@ -441,6 +458,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             if (audioFocusRequest == null) {
                 audioFocusRequest = new android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN)
                     .setOnAudioFocusChangeListener(fc -> {
+                        JWLog.d(TAG, "AudioFocusRequest onAudioFocusChange(focusChange=" + fc + ")", true);
                         handleAudioFocusChange(fc);
                     })
                     .setAudioAttributes(new android.media.AudioAttributes.Builder()
@@ -455,6 +473,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // Legacy focus request for pre-26
             if (legacyFocusChangeListener == null) {
                 legacyFocusChangeListener = fc -> {
+                    JWLog.d(TAG, "Legacy onAudioFocusChange(focusChange=" + fc + ")", true);
                     handleAudioFocusChange(fc);
                 };
             }
@@ -471,18 +490,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
         
         if (resultRequestAudioFocus != android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-            Log.w(TAG, "Audio focus request denied: " + resultRequestAudioFocus);
+            JWLog.w(TAG, "Audio focus request denied: " + resultRequestAudioFocus);
         }
         return resultRequestAudioFocus == android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
     }
 
     private void handleAudioFocusChange(int focusChange) {
+        JWLog.d(TAG, "handleAudioFocusChange(focusChange=" + focusChange + ")");
         long currentTime = System.currentTimeMillis();
         boolean currentlyPlaying = isCurrentlyPlaying();
         long timeSinceLastRequest = currentTime - lastFocusRequestTime;
 
         switch (focusChange) {
             case android.media.AudioManager.AUDIOFOCUS_GAIN:
+                JWLog.d(TAG, "AUDIOFOCUS_GAIN received");
                 currentlyHasFocus = true;
                 if (wasPlayingBeforeFocusLoss) {
                     wasPlayingBeforeFocusLoss = false;
@@ -496,46 +517,51 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                             jwPlayer.play();
                         }
                     } catch (Exception ignore) {
-                        Log.w(TAG, "Error resuming after focus gain: " + ignore.getMessage());
+                        JWLog.w(TAG, "Error resuming after focus gain: " + ignore.getMessage());
                     }
                 }
                 break;
                 
             case android.media.AudioManager.AUDIOFOCUS_LOSS:
+                JWLog.d(TAG, "AUDIOFOCUS_LOSS received");
                 // Ignore focus loss if it happens too soon after requesting focus
                 currentlyHasFocus = false;
                 if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
                     return;
                 }
                 
-                if (isCurrentlyPlaying()) {
+                if (currentlyPlaying) {
                     wasPlayingBeforeFocusLoss = true;
                     pausePlayback();
                 }
                 break;
                 
             case android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT received");
                 currentlyHasFocus = false;
                 // Also ignore transient loss if too soon
                 if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
                     return;
                 }
                 
-                if (isCurrentlyPlaying()) {
+                if (currentlyPlaying) {
                     wasPlayingBeforeFocusLoss = true;
                     pausePlayback();
                 }
                 break;
                 
             case android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK received");
                 break;
                 
             default:
+                JWLog.d(TAG, "Unknown audio focus change: " + focusChange);
                 break;
         }
     }
 
     private boolean isCurrentlyPlaying() {
+        JWLog.v(TAG, "isCurrentlyPlaying() called");
         try {
             if (jwPlayer != null) {
                 return jwPlayer.getState() == PlayerState.PLAYING;
@@ -551,11 +577,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void pausePlayback() {
-        Log.d(TAG, "Pausing playback due to audio focus loss");        
+        JWLog.d(TAG, "pausePlayback() - Pausing playback due to audio focus loss", true);        
 
         // Don't pause during any seek operation
         if (isAnySeekInProgress()) {
-            Log.d(TAG, "Seek in progress - skipping pause");
+            JWLog.d(TAG, "Seek in progress - skipping pause");
             return;
         }
         
@@ -569,11 +595,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 jwPlayer.pause();
             }
         } catch (Exception ignore) {
-            Log.w(TAG, "Error pausing after focus loss: " + ignore.getMessage());
+            JWLog.w(TAG, "Error pausing after focus loss: " + ignore.getMessage());
         }
     }
 
     private void releaseAudioFocus() {
+        JWLog.d(TAG, "releaseAudioFocus()");
         if (audioManager != null) {
             try {
                 if (android.os.Build.VERSION.SDK_INT >= 26 && audioFocusRequest != null) {
@@ -584,7 +611,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     legacyFocusChangeListener = null;
                 }
             } catch (Exception ex) {
-                Log.w(TAG, "Error releasing audio focus: " + ex.getMessage());
+                JWLog.w(TAG, "Error releasing audio focus: " + ex.getMessage());
             }
             audioManager = null;
         }
@@ -595,18 +622,21 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     // Reset the flag when playback ends or changes
     private void resetAndroidAutoFlag() {
+        JWLog.d(TAG, "resetAndroidAutoFlag()");
         isPlayingFromAndroidAuto = false;
     }
     
     // End Audio focus management
 
     private boolean hasAudioFocus() {
+        JWLog.d(TAG, "hasAudioFocus() -> querying current focus references");
         // This is a simplified check - Android doesn't provide a direct way to query focus state
         // You could track this with a boolean field updated in focus change listener
         return audioManager != null && (audioFocusRequest != null || legacyFocusChangeListener != null);
     }
 
     private boolean isAnySeekInProgress() {
+        JWLog.v(TAG, "isAnySeekInProgress(pendingSeekMs=" + pendingSeekMs + ", pendingSeekApplied=" + pendingSeekApplied + ")");
         // Check both pending seek (media selection) and recent manual seek
         boolean hasPendingSeek = pendingSeekMs != null && !pendingSeekApplied;
         // boolean hasRecentManualSeek = (System.currentTimeMillis() - lastManualSeekTime) < MANUAL_SEEK_PROTECTION_MS;
@@ -615,6 +645,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     final void cleanup() {
+        JWLog.d(TAG, "cleanup()");
         if (this.mediaSessionStateProvider != null) {
             // Clear active instance if this is the active one
             if (activeInstance == this) {
@@ -626,6 +657,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private final void softCleanup() {
+        JWLog.d(TAG, "softCleanup()");
         // Reset AA flag and release audio focus first
         resetAndroidAutoFlag();
         releaseAudioFocus();
@@ -639,7 +671,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 try {
                     context.unregisterReceiver(mediaButtonFallbackReceiver);
                 } catch (Exception unregEx) {
-                    Log.w(TAG, "Failed to unregister media button fallback receiver: " + unregEx.getMessage());
+                    JWLog.w(TAG, "Failed to unregister media button fallback receiver: " + unregEx.getMessage());
                 }
                 mediaButtonFallbackReceiver = null;
             }
@@ -651,7 +683,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                         .setActions(0L);
                 this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(stateBuilder.build());
             } catch (Exception ex) {
-                Log.w(TAG, "softCleanup: setPlaybackState failed " + ex.getMessage());
+                JWLog.w(TAG, "softCleanup: setPlaybackState failed " + ex.getMessage());
             }
 
             try {
@@ -661,14 +693,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     this.mediaSessionStateProvider.mediaSessionCompat.setQueue(null);
                 } catch (Throwable ignore) { /* setQueue may be unsupported in some paths */ }
             } catch (Exception ex) {
-                Log.w(TAG, "softCleanup: clearing metadata/queue failed " + ex.getMessage());
+                JWLog.w(TAG, "softCleanup: clearing metadata/queue failed " + ex.getMessage());
             }
 
             try {
                 // 3) Deactivate the session (keep it alive for reuse)
                 this.mediaSessionStateProvider.mediaSessionCompat.setActive(false);
             } catch (Exception ex) {
-                Log.w(TAG, "softCleanup: setActive(false) failed " + ex.getMessage());
+                JWLog.w(TAG, "softCleanup: setActive(false) failed " + ex.getMessage());
             }
 
             // IMPORTANT: Do NOT call release() here; keep the session object for future use
@@ -691,7 +723,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private static long extractResumePosition(Bundle extras) {
-       if (extras == null) return -1;
+        JWLog.d(TAG, "extractResumePosition(extras=" + JWLog.bundleInfo(extras) + ")");
+        if (extras == null) return -1;
 
         // Parse JSON payload from extras: "info"
         String infoJson = extras.getString("info", null);
@@ -707,7 +740,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     return ms;
                 }
             } catch (Exception e) {
-                Log.w(TAG, "Failed parsing extras JSON for resume: " + e.getMessage());
+                JWLog.w(TAG, "Failed parsing extras JSON for resume: " + e.getMessage());
             }
         }
         return 0L;
@@ -715,6 +748,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     /** Helper: reads a seconds value from JSON by key, accepting numbers or numeric strings. */
     private static Double readSeconds(JSONObject obj, String key) {
+        JWLog.v(TAG, "readSeconds(key=" + key + ")");
         if (!obj.has(key)) return null;
         try {
         // Try native number first
@@ -729,6 +763,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void updatePlayerState(PlayerState playerState) {
+        JWLog.d(TAG, "updatePlayerState(playerState=" + playerState + ")", true);
         PlaybackStateCompatWrapper currentPlaybackState = this.mediaSessionStateProvider.getPlaybackState();
         PlaybackStateCompatWrapper.Builder playbackStateBuilder = new PlaybackStateCompatWrapper.Builder(currentPlaybackState);
         long notificationCapabilities = this.serviceMediaApi.getNotificationCapabilities();
@@ -778,6 +813,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void updatePlaylistItem(PlaylistItem playlistItem) {
+        JWLog.d(TAG, "updatePlaylistItem(item=" + JWLog.playlistItemInfo(playlistItem) + ")", true);
         if (playlistItem == null || this.jwPlayer == null) {
             return;
         }
@@ -829,12 +865,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
+        JWLog.d(TAG, "onPlaylistItem(event.item=" + JWLog.playlistItemInfo(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null) + ")", true);
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
         // Try to apply pending seek when the item switches
         // Resolve the app-level mediaId to look up the MediaBrowser item
         if (externalMediaId != null) {
             long resumeMs = queryResumeViaReflection(externalMediaId); // contract: -1 = absent
 
+            JWLog.d(TAG, "onPlaylistItem: resumeMs=" + resumeMs);
+            
             if (resumeMs >= 0) {
                 pendingSeekMs = resumeMs;
                 pendingSeekApplied = false;
@@ -844,6 +883,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onError(ErrorEvent errorEvent) {
+        JWLog.e(TAG, "onError(event=" + (errorEvent != null ? errorEvent.getMessage() : "null") + ")");
         try {
             this.updatePlayerState(PlayerState.ERROR);
             // Instead of releasing the session (which causes Android Auto to lose root and show only Exit),
@@ -854,23 +894,28 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 } catch (Exception ignore) {}
             }
         } catch (Exception ex) {
-            Log.w(TAG, "onError handling failed: " + ex.getMessage());
+            JWLog.w(TAG, "onError handling failed: " + ex.getMessage());
         }
     }
 
     public void onAdComplete(AdCompleteEvent adCompleteEvent) {
+        JWLog.d(TAG, "onAdComplete()" );
     }
 
     public void onAdSkipped(AdSkippedEvent adSkippedEvent) {
+        JWLog.d(TAG, "onAdSkipped()" );
     }
 
     public void onAdPlay(AdPlayEvent adPlayEvent) {
+        JWLog.d(TAG, "onAdPlay()" );
     }
 
     public void onAdError(AdErrorEvent adErrorEvent) {
+        JWLog.d(TAG, "onAdError()" );
     }
 
     public void onBuffer(BufferEvent bufferEvent) {
+        JWLog.d(TAG, "onBuffer()", true);
         this.updatePlayerState(PlayerState.BUFFERING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING);
         // Try to apply pending seek while buffering
@@ -878,11 +923,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onPause(PauseEvent pauseEvent) {
+        JWLog.d(TAG, "onPause()", true);
         this.updatePlayerState(PlayerState.PAUSED);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
     }
 
     public void onPlay(PlayEvent playEvent) {
+        JWLog.d(TAG, "onPlay()", true);
         this.updatePlayerState(PlayerState.PLAYING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
         // Try to apply pending seek as soon as playback starts
@@ -890,6 +937,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
+        JWLog.d(TAG, "onPlaylistComplete()", true);
         resetAndroidAutoFlag();
 
         if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null) return;
@@ -910,7 +958,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     long caps = this.serviceMediaApi.getNotificationCapabilities();
                     actions |= caps;
                 } catch (Exception ex) {
-                    Log.w(TAG, "Could not get service capabilities: " + ex.getMessage());
+                    JWLog.w(TAG, "Could not get service capabilities: " + ex.getMessage());
                 }
             }
 
@@ -929,7 +977,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     positionMs = this.jwPlayer != null ? (long)(this.jwPlayer.getPosition() * 1000) : 0L;
                 }
             } catch (Exception ex) {
-                Log.w(TAG, "Could not get duration/position for completion: " + ex.getMessage());
+                JWLog.w(TAG, "Could not get duration/position for completion: " + ex.getMessage());
                 positionMs = 0;
             }
 
@@ -949,11 +997,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
             } catch (Exception ignore) {}
         } catch (Exception ex) {
-            Log.w(TAG, "Failed to set completion state", ex);
+            JWLog.w(TAG, "Failed to set completion state: " + ex.getMessage());
         }
     }
 
     void updateAlbumArt(String bitmapPath) {
+        JWLog.d(TAG, "updateAlbumArt(bitmapPath=" + bitmapPath + ")");
         artworkExecutor.submit(() -> {
             if (this.mediaSessionStateProvider != null) {
                 MediaMetadataCompat mediaMetadataCompat;
@@ -969,6 +1018,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private long queryResumeViaReflection(String mediaId) {
+        JWLog.d(TAG, "queryResumeViaReflection(mediaId=" + mediaId + ")");
         if (mediaId == null || mediaId.isEmpty()) return 0L;
         try {
             Class<?> c = Class.forName("com.mediabrowser.MediaItemsResumeProvider");
@@ -976,12 +1026,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             Object out = m.invoke(null, mediaId);
             return (out instanceof Number) ? ((Number) out).longValue() : 0L;
         } catch (Throwable t) {
-            Log.d(TAG, "Resume provider unavailable: " + t.getMessage());
+            JWLog.d(TAG, "Resume provider unavailable: " + t.getMessage());
             return 0L;
         }
     }
 
     private void applyPendingSeekWhenReady(PlaylistItem item) {
+        JWLog.d(TAG, "applyPendingSeekWhenReady(pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ", item=" + JWLog.playlistItemInfo(item) + ")");
         if (pendingSeekMs == null || jwPlayer == null || pendingSeekApplied) return;
 
         // Do not block on id mismatches: items can legitimately differ across domains
@@ -994,14 +1045,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             pendingSeekApplied = true;
             pendingSeekMs = null;
         } else {
-            Log.d(TAG, "Pending seek not applied; player not ready yet. Duration: " + duration + ", State: " + st);
+            JWLog.d(TAG, "Pending seek not applied; player not ready yet. Duration: " + duration + ", State: " + st);
         }
     }
     
     private void performPlay() {
+        JWLog.d(TAG, "performPlay()");
         boolean focusGranted = requestAudioFocusForPlayback(context);
         if (!focusGranted) {
-            Log.w(TAG, "Audio focus not granted - proceeding anyway");
+            JWLog.w(TAG, "Audio focus not granted - proceeding anyway");
         }
 
         try {
@@ -1014,11 +1066,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
             }
         } catch (Exception e) {
-            Log.w(TAG, "performPlay error: " + e.getMessage());
+            JWLog.w(TAG, "performPlay error: " + e.getMessage());
         }
     }
 
     private void performPause() {
+        JWLog.d(TAG, "performPause()", true);
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onPause();
@@ -1030,13 +1083,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
             }
         } catch (Exception e) {
-            Log.w(TAG, "performPause error: " + e.getMessage());
+            JWLog.w(TAG, "performPause error: " + e.getMessage());
         }
 
         captureAndStoreSeekPosition();
     }
 
     private void performStop() {
+        JWLog.d(TAG, "performStop()");
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onStop();
@@ -1048,29 +1102,31 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_STOPPED);
             }
         } catch (Exception ex) {
-            Log.w(TAG, "mediaSessionCallback onStop error: " + ex.getMessage());
+            JWLog.w(TAG, "mediaSessionCallback onStop error: " + ex.getMessage());
         }       
 
         captureAndStoreSeekPosition();
     }
 
     private void performSkipToNext() {
+        JWLog.d(TAG, "performSkipToNext()");
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onSkipToNext();
             }
         } catch (Exception ex) {
-            Log.w(TAG, "mediaSessionCallback onSkipToNext error: " + ex.getMessage());
+            JWLog.w(TAG, "mediaSessionCallback onSkipToNext error: " + ex.getMessage());
         }
     }
 
     private void performSkipToPrevious() {
+        JWLog.d(TAG, "performSkipToPrevious()");
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onSkipToPrevious();
             }
         } catch (Exception ex) {
-            Log.w(TAG, "mediaSessionCallback onSkipToPrevious error: " + ex.getMessage());
+            JWLog.w(TAG, "mediaSessionCallback onSkipToPrevious error: " + ex.getMessage());
         }
     }
 
@@ -1078,6 +1134,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * Handle seek to position for both UI and background players
      */
     private void performSeekTo(long positionMs) {
+        JWLog.d(TAG, "performSeekTo(positionMs=" + positionMs + ")");
         boolean shouldRequestFocus = false;
 
         try {
@@ -1090,7 +1147,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 // Check if background player exists and seek
                 java.lang.reflect.Method seekMethod = handlerClass.getMethod("seekToPosition", long.class);
                 seekMethod.invoke(handlerInstance, positionMs);
-                Log.d(TAG, "Performed seek in background player to " + positionMs + " ms");
+                JWLog.d(TAG, "Performed seek in background player to " + positionMs + " ms");
             }
         } catch (Exception e) { }
         
@@ -1100,9 +1157,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (this.jwPlayer != null) {
             try {
                 this.jwPlayer.seek(position);
-                Log.d(TAG, "Performed seek in UI player to " + position + " m");
+                JWLog.d(TAG, "Performed seek in UI player to " + position + " m");
             } catch (Exception uiSeekError) {
-                Log.e(TAG, "UI player seek failed", uiSeekError);
+                JWLog.e(TAG, "UI player seek failed: " + uiSeekError.getMessage());
             }
         }
 
@@ -1119,7 +1176,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (shouldRequestFocus) {
             boolean focusGranted = requestAudioFocusForPlayback(context);
             if (!focusGranted) {
-                Log.w(TAG, "Audio focus not granted for seek during playback");
+                JWLog.w(TAG, "Audio focus not granted for seek during playback");
             }
         }
 
@@ -1131,13 +1188,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * This handles both MediaBrowser logic (React Native notification) and JWPlayer logic (actual playback)
      */
     private void performMediaItemSelection(String mediaId, Bundle extras) {
+        JWLog.d(TAG, "performMediaItemSelection(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ")");
         captureAndStoreSeekPosition();
 
         try {
             Thread.sleep(500); // 0.5 seconds
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            Log.w(TAG, "Delay interrupted during handleDestroy");
+            JWLog.w(TAG, "Delay interrupted during handleDestroy");
         }
 
         initServiceMediaApi();
@@ -1152,7 +1210,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 java.lang.reflect.Method sendToReactMethod = mediaBrowserServiceClass.getMethod("sendMediaItemToReactNative", String.class);
                 sendToReactMethod.invoke(null, mediaId);
             } catch (Exception e) {
-                Log.w(TAG, "Could not call MediaBrowserService.sendMediaItemToReactNative: " + e.getMessage());
+                JWLog.w(TAG, "Could not call MediaBrowserService.sendMediaItemToReactNative: " + e.getMessage());
             }
             
             // Then, handle JWPlayer logic - start actual playback
@@ -1171,6 +1229,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
                 externalMediaId = mediaId;
 
+                JWLog.d(TAG, "Invoking handleHeadlessMediaSelection with mediaId=" + mediaId + ", title=" + title + ", subtitle=" + subtitle + ", icon=" + icon + ", pendingSeekMs=" + pendingSeekMs);
+
                 // Create extras map
                 java.util.Map<String, Object> extrasMap = new java.util.HashMap<>();
                 if (extras != null) {
@@ -1188,7 +1248,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 handleMethod.invoke(handlerInstance, mediaId, title, subtitle, icon, extrasMap);
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error handling media item selection", e);
+            JWLog.e(TAG, "Error handling media item selection: " + e.getMessage());
         }
     }
 
@@ -1196,17 +1256,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * Static methods for MediaBrowserService to delegate to active instance
      */
     public static boolean handlePlayFromMediaId(String mediaId, Bundle extras) {
+        JWLog.d(TAG, "handlePlayFromMediaId(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ") activeInstance=" + (activeInstance != null));
         pendingSeekMs = extractResumePosition(extras);
         pendingSeekApplied = false;
         
         externalMediaId = mediaId;
+
+        JWLog.d(TAG, "Storing externalMediaId=" + externalMediaId + ", pendingSeekMs=" + pendingSeekMs + " in static handler");
 
         if (activeInstance != null) {
             try {
                 activeInstance.performMediaItemSelection(mediaId, extras);
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handlePlayFromMediaId", e);
+                JWLog.e(TAG, "Error in static handlePlayFromMediaId: " + e.getMessage());
                 return false;
             }
         }
@@ -1214,12 +1277,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handlePlay() {
+        JWLog.d(TAG, "handlePlay() activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.performPlay();
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handlePlay", e);
+                JWLog.e(TAG, "Error in static handlePlay: " + e.getMessage());
                 return false;
             }
         }
@@ -1227,12 +1291,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handlePause() {
+        JWLog.d(TAG, "handlePause() activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.performPause();
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handlePause", e);
+                JWLog.e(TAG, "Error in static handlePause", e);
                 return false;
             }
         }
@@ -1240,12 +1305,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleStop() {
+        JWLog.d(TAG, "handleStop() activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.performStop();
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handleStop", e);
+                JWLog.e(TAG, "Error in static handleStop", e);
                 return false;
             }
         }
@@ -1253,12 +1319,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public static boolean handleDestroy() {
+        JWLog.d(TAG, "handleDestroy() activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.softCleanup();
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handleDestroy", e);
+                JWLog.e(TAG, "Error in static handleDestroy", e);
                 return false;
             }
         }
@@ -1266,12 +1333,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSkipToNext() {
+        JWLog.d(TAG, "handleSkipToNext() activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.performSkipToNext();
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handleSkipToNext", e);
+                JWLog.e(TAG, "Error in static handleSkipToNext", e);
                 return false;
             }
         }
@@ -1279,12 +1347,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSkipToPrevious() {
+        JWLog.d(TAG, "handleSkipToPrevious() activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.performSkipToPrevious();
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handleSkipToPrevious", e);
+                JWLog.e(TAG, "Error in static handleSkipToPrevious", e);
                 return false;
             }
         }
@@ -1292,12 +1361,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
     
     public static boolean handleSeekTo(long position) {
+        JWLog.d(TAG, "handleSeekTo(positionMs=" + position + ") activeInstance=" + (activeInstance != null));
         if (activeInstance != null) {
             try {
                 activeInstance.performSeekTo(position);
                 return true;
             } catch (Exception e) {
-                Log.e(TAG, "Error in static handleSeekTo", e);
+                JWLog.e(TAG, "Error in static handleSeekTo", e);
                 return false;
             }
         }

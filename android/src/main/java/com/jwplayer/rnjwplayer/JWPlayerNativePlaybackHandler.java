@@ -1,7 +1,6 @@
 package com.jwplayer.rnjwplayer;
 
 import android.content.Context;
-import android.util.Log;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableMap;
@@ -46,6 +45,8 @@ import com.jwplayer.pub.api.license.LicenseUtil;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 import com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper;
 import com.jwplayer.rnjwplayer.session.RNJWNotificationHelper;
+import com.jwplayer.rnjwplayer.utils.HandoffPlaybackState;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 
 // For creating minimal player view
 import android.view.ViewGroup;
@@ -117,6 +118,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
     
     private JWPlayerNativePlaybackHandler(Context context) {
+        JWLog.d(TAG, "JWPlayerNativePlaybackHandler::<init>(context=" + context + ")");
         this.context = context;
         this.playingInfoManager = GlobalPlayingInfoManager.getInstance(context);
         this.gson = new Gson();
@@ -145,6 +147,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Following the same pattern as RNJWPlayerView.setConfig()
      */
     private void createBackgroundPlayer(Map<String, Object> postData) {
+        JWLog.d(TAG, "createBackgroundPlayer(postDataKeys=" + (postData != null ? postData.keySet() : null) + ")");
         try {
             // If a UI player is currently active, do not create a headless/background player
             if (PlaybackManager.getInstance().isUIActive()) {
@@ -180,7 +183,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             }
             
             if (playbackUrl == null) {
-                Log.e(TAG, "No playback URL available");
+                JWLog.e(TAG, "No playback URL available");
                 return;
             }
             
@@ -203,12 +206,12 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             // Add image if available
             if (imageUrl != null) {
                 playlistBuilder.image(imageUrl);
-                Log.d(TAG, "📱 JAVA: Added image to PlaylistItem: " + imageUrl);
+                JWLog.d(TAG, "📱 JAVA: Added image to PlaylistItem: " + imageUrl);
             }
             
             PlaylistItem playlistItem = playlistBuilder.build();
             
-            Log.d(TAG, "📱 JAVA: Created PlaylistItem");
+            JWLog.d(TAG, "📱 JAVA: Created PlaylistItem");
             
             // Create player config for background audio
             PlayerConfig playerConfig = new PlayerConfig.Builder()
@@ -222,7 +225,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 String jwLicense = "mPb2iD4lDPvP42HIrush+pnBtg/q+9nUUCZfVw==";
                 new LicenseUtil().setLicenseKey(context, jwLicense);
             } catch (Exception e) {
-                Log.e(TAG, "Error setting JWPlayer license", e);
+                JWLog.e(TAG, "Error setting JWPlayer license", e);
                 // Continue anyway, license might already be set by main app
             }
             
@@ -249,7 +252,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             if (backgroundPlayer.getPlaylist() != null && !backgroundPlayer.getPlaylist().isEmpty()) {
                 PlaylistItem currentItem = backgroundPlayer.getPlaylist().get(0);
             } else {
-                Log.w(TAG, "WARNING: Playlist is null or empty after setup!");
+                JWLog.w(TAG, "WARNING: Playlist is null or empty after setup!");
             }
             
             // Set up background audio service components AFTER player is configured
@@ -264,7 +267,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             // while still allowing RNJWMediaSessionHelper to handle playback controls
             mediaSessionHelper = new RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
             
-            Log.d(TAG, "📱 JAVA: Background player creation completed successfully");
+            JWLog.d(TAG, "📱 JAVA: Background player creation completed successfully");
             // Artwork fetch gating (avoid duplicate network if metadata already has bitmap)
             try {
                 // imageUrl already declared earlier in createBackgroundPlayer; reuse it here
@@ -275,28 +278,29 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                             MediaMetadataCompat md = sharedMediaSession.getController().getMetadata();
                             if (md != null && md.getBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART) != null) {
                                 needFetch = false;
-                                Log.d(TAG, "ARTWORK_DEBUG: existing bitmap present; skip fetch");
+                                JWLog.d(TAG, "ARTWORK_DEBUG: existing bitmap present; skip fetch");
                             }
                         } catch (Exception metaEx) {
-                            Log.w(TAG, "ARTWORK_DEBUG: metadata inspection failed: " + metaEx.getMessage());
+                            JWLog.w(TAG, "ARTWORK_DEBUG: metadata inspection failed: " + metaEx.getMessage());
                         }
                     }
                     if (needFetch) {
                         scheduleAlbumArtFetch(imageUrl);
                     } else {
-                        Log.d(TAG, "ARTWORK_DEBUG: Skipping artwork fetch (bitmap already present)");
+                        JWLog.d(TAG, "ARTWORK_DEBUG: Skipping artwork fetch (bitmap already present)");
                     }
                 }
             } catch (Exception artEx) {
-                Log.w(TAG, "ARTWORK_DEBUG: gating error: " + artEx.getMessage());
+                JWLog.w(TAG, "ARTWORK_DEBUG: gating error: " + artEx.getMessage());
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error creating background player", e);
+            JWLog.e(TAG, "Error creating background player", e);
             cleanupBackgroundPlayer();
         }
     }
     
     public static synchronized JWPlayerNativePlaybackHandler getInstance(Context context) {
+        // JWLog.d(TAG, "getInstance(context=" + context + ")");
         if (instance == null) {
             instance = new JWPlayerNativePlaybackHandler(context);
         }
@@ -308,8 +312,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Called when notification is dismissed or app needs to cleanup
      */
     public void stopAndCleanup() {
-        Log.d(TAG, "📱 JAVA: stopAndCleanup called - stopping all background playback");
+        JWLog.d(TAG, "📱 JAVA: stopAndCleanup called - stopping all background playback");
         
+        saveCurrentSeekPosition();
+
         // Let the playback manager know this player is being destroyed.
         PlaybackManager.getInstance().clearPlayer(this);
 
@@ -340,18 +346,57 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     .build());
             }
             
-            Log.d(TAG, "📱 JAVA: stopAndCleanup completed successfully");
-            
+            JWLog.d(TAG, "📱 JAVA: stopAndCleanup completed successfully");
         } catch (Exception e) {
-            Log.e(TAG, "📱 JAVA: Error during stopAndCleanup", e);
+            JWLog.e(TAG, "📱 JAVA: Error during stopAndCleanup", e);
         }
     }
     
-        /**
+    private void saveCurrentSeekPosition() {
+        JWLog.d(TAG, "saveCurrentSeekPosition()");
+
+        // Persist last known position before stopping to enable accurate UI resume
+        try {
+            long lastMs = 0L;
+            try { lastMs = (long) (backgroundPlayer != null ? backgroundPlayer.getPosition() * 1000 : 0); } catch (Exception ignored) {}
+            if (lastMs > 0) {
+                Map<String, Object> info = playingInfoManager != null ? playingInfoManager.getCurrentPlayingInfo() : null;
+                if (info != null) {
+                    Object extIdObj = info.get("mediaId");
+                    if (extIdObj instanceof String) {
+                        String externalMediaId = (String) extIdObj;
+                        if (externalMediaId != null && !externalMediaId.isEmpty()) {
+                            Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                            java.lang.reflect.Method reportSeek = mediaBrowserServiceClass.getMethod("updateSeekPosition", String.class, long.class);
+                            reportSeek.invoke(null, externalMediaId, lastMs);
+
+                            if (backgroundPlayer != null) {
+                                PlayerState playerState = backgroundPlayer.getState();
+                            
+                                HandoffPlaybackState.set(externalMediaId, playerState == PlayerState.PLAYING, lastMs);
+                            } else {
+                                JWLog.w(TAG, "Background player is null; assuming not playing for HandoffPlaybackState");
+                            }
+                            
+                            JWLog.d(TAG, "Persisted last headless position: " + lastMs + "ms for mediaId=" + externalMediaId);
+                        }
+                    } else {
+                        JWLog.w(TAG, "Invalid mediaId type when persisting last headless position");
+                    }
+                } else {
+                    JWLog.w(TAG, "No playing info available to persist last headless position");
+                }
+            }
+        } catch (Exception persistLastEx) {
+            JWLog.w(TAG, "Persist last headless position failed: " + persistLastEx.getMessage());
+        }
+    }
+
+    /**
      * Public method to stop background playback (called from UI components)
      */
     public void stopBackgroundPlayback() {
-        Log.d(TAG, "📱 JAVA: stopBackgroundPlayback called from UI");
+        JWLog.d(TAG, "📱 JAVA: stopBackgroundPlayback called from UI");
         if (backgroundPlayer != null) {
             cleanupBackgroundPlayer();
         }
@@ -361,30 +406,31 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Seek to a specific position in the background player
      */
     public void seekToPosition(long positionMs) {
+        JWLog.d(TAG, "seekToPosition(positionMs=" + positionMs + ")");
         if (backgroundPlayer != null) {
             try {
                 boolean shouldResume = isPlaying || (autoStartEnabled && !hasStartedPlayback);
                 wasPlayingBeforeSeek = isPlaying;
                 double positionSeconds = positionMs / 1000.0;
                 backgroundPlayer.seek(positionSeconds);
-                Log.d(TAG, "Background player seeked to: " + positionSeconds + "s (wasPlaying=" + wasPlayingBeforeSeek + " shouldResume=" + shouldResume + ")");
+                JWLog.d(TAG, "Background player seeked to: " + positionSeconds + "s (wasPlaying=" + wasPlayingBeforeSeek + " shouldResume=" + shouldResume + ")");
                 if (shouldResume) {
                     mainHandler.postDelayed(() -> {
                         if (backgroundPlayer != null && (wasPlayingBeforeSeek || (autoStartEnabled && !hasStartedPlayback))) {
                             try {
-                                Log.d(TAG, "Attempting autoplay resume after seek");
+                                JWLog.d(TAG, "Attempting autoplay resume after seek");
                                 backgroundPlayer.play();
                             } catch (Exception e) {
-                                Log.w(TAG, "Autoplay resume after seek failed: " + e.getMessage());
+                                JWLog.w(TAG, "Autoplay resume after seek failed: " + e.getMessage());
                             }
                         }
                     }, 150);
                 }
             } catch (Exception e) {
-                Log.e(TAG, "Error seeking background player", e);
+                JWLog.e(TAG, "Error seeking background player", e);
             }
         } else {
-            Log.w(TAG, "Cannot seek: background player is null");
+            JWLog.w(TAG, "Cannot seek: background player is null");
         }
     }
     
@@ -392,6 +438,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Check if background player is active and playing
      */
     public boolean isBackgroundPlayerActive() {
+        JWLog.d(TAG, "isBackgroundPlayerActive() -> " + (backgroundPlayer != null && isPlaying));
         return backgroundPlayer != null && isPlaying;
     }
     
@@ -399,6 +446,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Get current background player info for session coordination
      */
     public Map<String, Object> getCurrentBackgroundPlayerInfo() {
+        // JWLog.d(TAG, "getCurrentBackgroundPlayerInfo()");
         if (backgroundPlayer != null && playingInfoManager.hasPendingMedia()) {
             Map<String, Object> currentInfo = playingInfoManager.getCurrentPlayingInfo();
             if (currentInfo != null) {
@@ -421,9 +469,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Transfer playback to UI player (stop background, return current state)
      */
     public Map<String, Object> transferToUIPlayer() {
+        JWLog.d(TAG, "transferToUIPlayer()");
         Map<String, Object> currentState = getCurrentBackgroundPlayerInfo();
         if (backgroundPlayer != null) {
-            Log.d(TAG, "Transferring background player to UI player");
+            JWLog.d(TAG, "Transferring background player to UI player");
             // Stop background player but don't clean up session
             try {
                 // Get current position before stopping
@@ -433,6 +482,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 } catch (Exception e) {
                     currentPositionMs = 0;
                 }
+
+                saveCurrentSeekPosition();
                 
                 backgroundPlayer.pause();
                 backgroundPlayer.stop();
@@ -450,7 +501,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                         .build());
                 }
             } catch (Exception e) {
-                Log.e(TAG, "Error during background player transfer", e);
+                JWLog.e(TAG, "Error during background player transfer", e);
             }
         }
         return currentState;
@@ -462,6 +513,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     public void handleHeadlessMediaSelection(String mediaId, String title, String subtitle, 
                                            String icon, Map<String, Object> extras) {
+        JWLog.d(TAG, "handleHeadlessMediaSelection(mediaId=" + JWLog.safe(mediaId) + ", title=" + JWLog.safe(title) + ")");
         // Log current state
         if (playingInfoManager.hasPendingMedia()) {
             Map<String, Object> currentInfo = playingInfoManager.getCurrentPlayingInfo();
@@ -520,13 +572,13 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                                     // Explicitly start playback for immediate response from AA (in case autostart is gated)
                                     try { uiPlayer.play(); } catch (Exception ignored) {}
                                 } catch (Exception e) {
-                                    Log.w(TAG, "UI player load failed: " + e.getMessage());
+                                    JWLog.w(TAG, "UI player load failed: " + e.getMessage());
                                 }
                             });
                         }
                     }
                 } catch (Exception ex) {
-                    Log.w(TAG, "Failed to instruct UI player to load selection: " + ex.getMessage());
+                    JWLog.w(TAG, "Failed to instruct UI player to load selection: " + ex.getMessage());
                 }
                 return;
             }
@@ -539,12 +591,12 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             
             // Store the playing info for app restoration
             playingInfoManager.setCurrentPlayingInfo(mediaId, title, subtitle, icon, extras);
-            Log.d(TAG, "📱 JAVA: Stored playing info for mediaId: " + mediaId);
+            JWLog.d(TAG, "📱 JAVA: Stored playing info for mediaId: " + mediaId);
             
             // Extract post data from extras
             String postJson = (String) extras.get("info");
             if (postJson != null) {
-                Log.d(TAG, "📱 JAVA: Found post JSON in extras, parsing...");
+                JWLog.d(TAG, "📱 JAVA: Found post JSON in extras, parsing...");
                 
                 // Parse the post data
                 Type type = new TypeToken<Map<String, Object>>(){}.getType();
@@ -554,24 +606,24 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 String s3Url = (String) post.get("s3Url");
                 String hlsUrl = (String) post.get("hls_url");
                 
-                Log.d(TAG, "📱 JAVA: Extracted URLs - S3: " + s3Url + ", HLS: " + hlsUrl);
+                JWLog.d(TAG, "📱 JAVA: Extracted URLs - S3: " + s3Url + ", HLS: " + hlsUrl);
                 
                 // Update MediaSession metadata immediately
                 updateMediaSessionMetadata(title, subtitle, icon, post);
                 
                 // Attempt to create and start background playback
                 if (s3Url != null || hlsUrl != null) {
-                    Log.d(TAG, "📱 JAVA: Starting background playback for new media");
+                    JWLog.d(TAG, "📱 JAVA: Starting background playback for new media");
                     startBackgroundPlayback(post, s3Url, hlsUrl, title, subtitle);
                 } else {
-                    Log.w(TAG, "📱 JAVA: No valid URLs found for playback");
+                    JWLog.w(TAG, "📱 JAVA: No valid URLs found for playback");
                 }
             } else {
-                Log.w(TAG, "📱 JAVA: No post JSON found in extras");
+                JWLog.w(TAG, "📱 JAVA: No post JSON found in extras");
             }
             
         } catch (Exception e) {
-            Log.e(TAG, "📱 JAVA: Error handling headless media selection", e);
+            JWLog.e(TAG, "📱 JAVA: Error handling headless media selection", e);
         }
     }
     
@@ -580,31 +632,31 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Following the same pattern as RNJWPlayerView with background audio
      */
     private void startBackgroundPlayback(Map<String, Object> postData, String s3Url, String hlsUrl, String title, String subtitle) {
-        Log.d(TAG, "📱 JAVA: startBackgroundPlayback called for: " + title);
+        JWLog.d(TAG, "📱 JAVA: startBackgroundPlayback called for: " + JWLog.safe(title));
         
         try {
             // Request audio focus before starting playback
             if (!requestAudioFocus()) {
-                Log.w(TAG, "📱 JAVA: Failed to get audio focus, delaying playback");
+                JWLog.w(TAG, "📱 JAVA: Failed to get audio focus, delaying playback");
                 return;
             }
             
-            Log.d(TAG, "📱 JAVA: Audio focus granted, creating new background player");
+            JWLog.d(TAG, "📱 JAVA: Audio focus granted, creating new background player");
             
             // Always create a new background player for the new media
             createBackgroundPlayer(postData);
             
             if (backgroundPlayer != null) {
-                Log.d(TAG, "📱 JAVA: Background player created successfully");
+                JWLog.d(TAG, "📱 JAVA: Background player created successfully");
                 if (autoStartEnabled) {
                     startAutostartChain();
                 }
             } else {
-                Log.e(TAG, "📱 JAVA: Failed to create background player");
+                JWLog.e(TAG, "📱 JAVA: Failed to create background player");
             }
             
         } catch (Exception e) {
-            Log.e(TAG, "📱 JAVA: Error starting background playback", e);
+            JWLog.e(TAG, "📱 JAVA: Error starting background playback", e);
         }
     }
     
@@ -613,6 +665,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * This method is designed for React Native app wake-up scenarios
      */
     public WritableMap getComprehensivePlaybackState() {
+        JWLog.d(TAG, "getComprehensivePlaybackState()");
         if (backgroundPlayer != null && playingInfoManager.hasPendingMedia()) {
             Map<String, Object> playingInfo = playingInfoManager.getCurrentPlayingInfo();
             if (playingInfo != null) {
@@ -630,10 +683,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 try {
                     double currentPosition = backgroundPlayer.getPosition();
                     result.putDouble("currentPosition", currentPosition);
-                    Log.d(TAG, "📱 JAVA: Current headless position: " + currentPosition + "s");
+                    JWLog.d(TAG, "📱 JAVA: Current headless position: " + currentPosition + "s");
                 } catch (Exception e) {
                     result.putDouble("currentPosition", 0.0);
-                    Log.w(TAG, "📱 JAVA: Could not get current position: " + e.getMessage());
+                    JWLog.w(TAG, "📱 JAVA: Could not get current position: " + e.getMessage());
                 }
                 
                 // Convert extras back to WritableMap (includes full post object)
@@ -659,17 +712,17 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     String postJson = (String) extras.get("info");
                     if (postJson != null) {
                         result.putString("postJson", postJson);
-                        Log.d(TAG, "📱 JAVA: Added post JSON for handoff");
+                        JWLog.d(TAG, "📱 JAVA: Added post JSON for handoff");
                     }
                 }
                 
-                Log.d(TAG, "📱 JAVA: Comprehensive playback state prepared for handoff");
+                JWLog.d(TAG, "📱 JAVA: Comprehensive playback state prepared for handoff");
                 return result;
             }
         }
         
         // Return null if no active headless playback
-        Log.d(TAG, "📱 JAVA: No active headless playback found");
+        JWLog.d(TAG, "📱 JAVA: No active headless playback found");
         return null;
     }
 
@@ -677,6 +730,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Get pending media info for app restoration (legacy method)
      */
     public WritableMap getPendingMediaInfo() {
+        JWLog.d(TAG, "getPendingMediaInfo()");
         if (playingInfoManager.hasPendingMedia()) {
             Map<String, Object> playingInfo = playingInfoManager.getCurrentPlayingInfo();
             if (playingInfo != null) {
@@ -714,6 +768,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Clear pending media info and cleanup background player
      */
     public void clearPendingMedia() {
+        JWLog.d(TAG, "clearPendingMedia()");
         playingInfoManager.clearPlayingInfo();
         cleanupBackgroundPlayer();
     }
@@ -722,6 +777,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Get the current background player instance for MediaSession control
      */
     public JWPlayer getBackgroundPlayer() {
+        JWLog.d(TAG, "getBackgroundPlayer() -> " + JWLog.id(backgroundPlayer));
         return backgroundPlayer;
     }
     
@@ -729,18 +785,21 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Control methods for MediaSession callbacks
      */
     public void playFromMediaSession() {
+        JWLog.d(TAG, "playFromMediaSession()");
         if (backgroundPlayer != null) {
             backgroundPlayer.play();
         }
     }
     
     public void pauseFromMediaSession() {
+        JWLog.d(TAG, "pauseFromMediaSession()");
         if (backgroundPlayer != null) {
             backgroundPlayer.pause();
         }
     }
     
     public void stopFromMediaSession() {
+        JWLog.d(TAG, "stopFromMediaSession()");
         if (backgroundPlayer != null) {
             backgroundPlayer.stop();
             cleanupBackgroundPlayer();
@@ -751,6 +810,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Start position updates for MediaSession
      */
     private void startPositionUpdates() {
+        JWLog.d(TAG, "startPositionUpdates()");
         if (positionUpdateTimer != null) {
             positionUpdateTimer.cancel();
         }
@@ -768,6 +828,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Stop position updates
      */
     private void stopPositionUpdates() {
+        JWLog.d(TAG, "stopPositionUpdates()");
         if (positionUpdateTimer != null) {
             positionUpdateTimer.cancel();
             positionUpdateTimer = null;
@@ -778,19 +839,24 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Update MediaSession with current position
      */
     private void updateMediaSessionPosition() {
-        if (backgroundPlayer != null && sharedMediaSession != null && sharedMediaSession.isActive() && isPlaying) {
+        JWLog.d(TAG, "updateMediaSessionPosition()");
+        if (backgroundPlayer != null) {
             try {
                 long position = (long)(backgroundPlayer.getPosition() * 1000); // Convert to milliseconds
-                
-                sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
-                    .setState(PlaybackStateCompat.STATE_PLAYING, position, 1.0f)
-                    .setActions(PlaybackStateCompat.ACTION_PLAY | 
-                               PlaybackStateCompat.ACTION_PAUSE | 
-                               PlaybackStateCompat.ACTION_STOP |
-                               PlaybackStateCompat.ACTION_SEEK_TO |
-                               PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                               PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
-                    .build());
+                // Keep MediaSession playback state in sync when available
+                if (sharedMediaSession != null) {
+                    sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+                        .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, position, isPlaying ? 1.0f : 0.0f)
+                        .setActions(PlaybackStateCompat.ACTION_PLAY | 
+                                   PlaybackStateCompat.ACTION_PAUSE | 
+                                   PlaybackStateCompat.ACTION_STOP |
+                                   PlaybackStateCompat.ACTION_SEEK_TO |
+                                   PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
+                                   PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
+                        .build());
+                }
+
+                saveCurrentSeekPosition();
                     
             } catch (Exception e) {
                 // Ignore errors during position updates
@@ -802,29 +868,32 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Cleanup background player resources
      */
     private void cleanupBackgroundPlayer() {
+        JWLog.d(TAG, "cleanupBackgroundPlayer()");
         try {
-            Log.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Cleaning up background player");
+            JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Cleaning up background player");
             
             // Stop position updates
             stopPositionUpdates();
+            
+            saveCurrentSeekPosition();
             
             // Release audio focus
             releaseAudioFocus();
             
             if (backgroundPlayer != null) {
-                Log.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Player state before cleanup: " + backgroundPlayer.getState());
+                JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Player state before cleanup: " + backgroundPlayer.getState());
                 
                 // Stop the player before cleanup
                 try {
                     backgroundPlayer.stop();
-                    Log.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Player stopped successfully");
+                    JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Player stopped successfully");
                 } catch (Exception e) {
-                    Log.w(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Error stopping player: " + e.getMessage());
+                    JWLog.w(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Error stopping player: " + e.getMessage());
                 }
                 
                 // Remove event listeners
                 backgroundPlayer.removeListeners(this);
-                Log.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Event listeners removed");
+                JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Event listeners removed");
                 backgroundPlayer = null;
             }
             
@@ -854,10 +923,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 }
             });
             
-            Log.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Background player cleanup completed");
+            JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Background player cleanup completed");
             
         } catch (Exception e) {
-            Log.e(TAG, "🎵 JWPlayerNativePlaybackHandler: Error during background player cleanup", e);
+            JWLog.e(TAG, "🎵 JWPlayerNativePlaybackHandler: Error during background player cleanup", e);
         }
     }
     
@@ -866,16 +935,16 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Following the same pattern as RNJWPlayerView
      */
     private boolean requestAudioFocus() {
-        Log.d(TAG, "📱 JAVA: requestAudioFocus called - current hasAudioFocus: " + hasAudioFocus);
+        JWLog.d(TAG, "📱 JAVA: requestAudioFocus called - current hasAudioFocus: " + hasAudioFocus);
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (hasAudioFocus) {
-                Log.d(TAG, "📱 JAVA: Audio focus already granted");
+                JWLog.d(TAG, "📱 JAVA: Audio focus already granted");
                 return true;
             }
 
             if (audioManager != null) {
-                Log.d(TAG, "📱 JAVA: Requesting audio focus for API 26+");
+                JWLog.d(TAG, "📱 JAVA: Requesting audio focus for API 26+");
                 
                 AudioAttributes playbackAttributes = new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -891,16 +960,16 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 int res = audioManager.requestAudioFocus(focusRequest);
                 synchronized (focusLock) {
                     if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
-                        Log.w(TAG, "📱 JAVA: Audio focus request failed");
+                        JWLog.w(TAG, "📱 JAVA: Audio focus request failed");
                         playbackNowAuthorized = false;
                         return false;
                     } else if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                        Log.d(TAG, "📱 JAVA: Audio focus granted");
+                        JWLog.d(TAG, "📱 JAVA: Audio focus granted");
                         playbackNowAuthorized = true;
                         hasAudioFocus = true;
                         return true;
                     } else if (res == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
-                        Log.d(TAG, "📱 JAVA: Audio focus delayed");
+                        JWLog.d(TAG, "📱 JAVA: Audio focus delayed");
                         playbackDelayed = true;
                         playbackNowAuthorized = false;
                         return false;
@@ -909,20 +978,20 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             }
         } else {
             // For older Android versions, use deprecated API
-            Log.d(TAG, "📱 JAVA: Requesting audio focus for API < 26");
+            JWLog.d(TAG, "📱 JAVA: Requesting audio focus for API < 26");
             if (audioManager != null) {
                 int res = audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
-                Log.d(TAG, "📱 JAVA: Audio focus request result: " + res);
+                JWLog.d(TAG, "📱 JAVA: Audio focus request result: " + res);
                 if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                     hasAudioFocus = true;
                     playbackNowAuthorized = true;
-                    Log.d(TAG, "📱 JAVA: Audio focus granted for older API");
+                    JWLog.d(TAG, "📱 JAVA: Audio focus granted for older API");
                     return true;
                 }
             }
         }
         
-        Log.w(TAG, "📱 JAVA: Audio focus request failed or not handled");
+        JWLog.w(TAG, "📱 JAVA: Audio focus request failed or not handled");
         return false;
     }
     
@@ -930,8 +999,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Release audio focus
      */
     private void releaseAudioFocus() {
+        JWLog.d(TAG, "releaseAudioFocus()");
         if (audioManager != null && hasAudioFocus) {
-            Log.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Releasing audio focus");
+            JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Releasing audio focus");
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && focusRequest != null) {
                 audioManager.abandonAudioFocusRequest(focusRequest);
@@ -949,18 +1019,18 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     @Override
     public void onAudioFocusChange(int focusChange) {
-        Log.d(TAG, "📱 JAVA: onAudioFocusChange called with focusChange: " + focusChange);
+        JWLog.d(TAG, "📱 JAVA: onAudioFocusChange called with focusChange: " + focusChange);
         
         switch (focusChange) {
             case AudioManager.AUDIOFOCUS_GAIN:
-                Log.d(TAG, "📱 JAVA: Audio focus gained");
+                JWLog.d(TAG, "📱 JAVA: Audio focus gained");
                 synchronized (focusLock) {
                     playbackNowAuthorized = true;
                     hasAudioFocus = true;
                     if (playbackDelayed) {
                         playbackDelayed = false;
                         if (backgroundPlayer != null) {
-                            Log.d(TAG, "📱 JAVA: Resuming delayed playback");
+                            JWLog.d(TAG, "📱 JAVA: Resuming delayed playback");
                             backgroundPlayer.play();
                         }
                     }
@@ -968,30 +1038,30 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 break;
                 
             case AudioManager.AUDIOFOCUS_LOSS:
-                Log.d(TAG, "📱 JAVA: Audio focus lost");
+                JWLog.d(TAG, "📱 JAVA: Audio focus lost");
                 synchronized (focusLock) {
                     playbackNowAuthorized = false;
                     hasAudioFocus = false;
                     if (backgroundPlayer != null) {
-                        Log.d(TAG, "📱 JAVA: Pausing player due to audio focus loss");
+                        JWLog.d(TAG, "📱 JAVA: Pausing player due to audio focus loss");
                         backgroundPlayer.pause();
                     }
                 }
                 break;
                 
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                Log.d(TAG, "📱 JAVA: Audio focus lost (transient)");
+                JWLog.d(TAG, "📱 JAVA: Audio focus lost (transient)");
                 synchronized (focusLock) {
                     playbackNowAuthorized = false;
                     if (backgroundPlayer != null) {
-                        Log.d(TAG, "📱 JAVA: Pausing player due to transient focus loss");
+                        JWLog.d(TAG, "📱 JAVA: Pausing player due to transient focus loss");
                         backgroundPlayer.pause();
                     }
                 }
                 break;
                 
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                Log.d(TAG, "📱 JAVA: Audio focus lost (can duck)");
+                JWLog.d(TAG, "📱 JAVA: Audio focus lost (can duck)");
                 // Could implement ducking here, for now just continue playing
                 break;
         }
@@ -1000,20 +1070,20 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     // JWPlayer Event Listeners - Enhanced for actual background playback
     @Override
     public void onReady(ReadyEvent readyEvent) {
-        Log.d(TAG, "📱 JAVA: 🎵 onReady event - Background player is ready for playback");
-        Log.d(TAG, "📱 JAVA: 🎵 onReady - Thread: " + Thread.currentThread().getName());
-        Log.d(TAG, "📱 JAVA: 🎵 onReady - Timestamp: " + System.currentTimeMillis());
+        JWLog.d(TAG, "📱 JAVA: 🎵 onReady event - Background player is ready for playback");
+        JWLog.d(TAG, "📱 JAVA: 🎵 onReady - Thread: " + Thread.currentThread().getName());
+        JWLog.d(TAG, "📱 JAVA: 🎵 onReady - Timestamp: " + System.currentTimeMillis());
         
         if (backgroundPlayer != null && playbackNowAuthorized && hasAudioFocus) {
-            Log.d(TAG, "📱 JAVA: 🎵 Player ready and authorized, should start playing automatically");
+            JWLog.d(TAG, "📱 JAVA: 🎵 Player ready and authorized, should start playing automatically");
         } else {
-            Log.d(TAG, "📱 JAVA: 🎵 Player ready but waiting - authorized: " + playbackNowAuthorized + ", hasAudioFocus: " + hasAudioFocus);
+            JWLog.d(TAG, "📱 JAVA: 🎵 Player ready but waiting - authorized: " + playbackNowAuthorized + ", hasAudioFocus: " + hasAudioFocus);
         }
     }
     
     @Override
     public void onPlay(PlayEvent playEvent) {
-        Log.d(TAG, "📱 JAVA: ✅ onPlay event - Background playback started successfully!");
+        JWLog.d(TAG, "📱 JAVA: ✅ onPlay event - Background playback started successfully!");
         
         // RNJWMediaSessionHelper will handle MediaSession state updates
         isPlaying = true;
@@ -1024,7 +1094,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     
     @Override
     public void onPause(PauseEvent pauseEvent) {
-        Log.d(TAG, "📱 JAVA: ⏸️ onPause event - Background playback paused");
+        JWLog.d(TAG, "📱 JAVA: ⏸️ onPause event - Background playback paused");
         
         // RNJWMediaSessionHelper will handle MediaSession state updates
         isPlaying = false;
@@ -1034,7 +1104,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     
     @Override
     public void onError(ErrorEvent errorEvent) {
-        Log.e(TAG, "📱 JAVA: ❌ onError event - Background playback error: " + errorEvent.getMessage());
+        JWLog.e(TAG, "📱 JAVA: ❌ onError event - Background playback error: " + errorEvent.getMessage());
         
         // Clear pending media on error
         playingInfoManager.clearPlayingInfo();
@@ -1045,7 +1115,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     
     @Override
     public void onComplete(CompleteEvent completeEvent) {
-        Log.d(TAG, "📱 JAVA: ✅ onComplete event - Background playback completed");
+        JWLog.d(TAG, "📱 JAVA: ✅ onComplete event - Background playback completed");
         
         // Clear the pending media since playback is complete
         playingInfoManager.clearPlayingInfo();
@@ -1058,6 +1128,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Update MediaSession metadata for now playing display
      */
     private void updateMediaSessionMetadata(String title, String subtitle, String iconUrl, Map<String, Object> post) {
+        JWLog.d(TAG, "updateMediaSessionMetadata(title=" + JWLog.safe(title) + ", subtitle=" + JWLog.safe(subtitle) + ")");
         if (sharedMediaSession == null) {
             return;
         }
@@ -1109,7 +1180,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
                 .build());
         } catch (Exception e) {
-            Log.e(TAG, "Error updating MediaSession metadata", e);
+            JWLog.e(TAG, "Error updating MediaSession metadata", e);
         }
     }
     
@@ -1117,6 +1188,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Emit stop event to React Native to stop any UI players
      */
     private void emitStopEventToReactNative() {
+        JWLog.d(TAG, "emitStopEventToReactNative()");
         try {
             ReactContext reactContext = getReactContext();
             if (reactContext != null) {
@@ -1127,10 +1199,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                     .emit("onStopUIPlayer", eventData);
                     
-                Log.d(TAG, "📱 JAVA: Emitted stop UI player event");
+                JWLog.d(TAG, "📱 JAVA: Emitted stop UI player event");
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error emitting stop UI player event", e);
+            JWLog.e(TAG, "Error emitting stop UI player event", e);
         }
     }
     
@@ -1138,6 +1210,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Helper method to get ReactContext using multiple approaches
      */
     private ReactContext getReactContext() {
+        JWLog.d(TAG, "getReactContext()");
         ReactContext reactContext = null;
         
         // Approach 1: Try getting from MediaItemsStore (MediaBrowser context)
@@ -1174,9 +1247,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     }
 
     private void scheduleAlbumArtFetch(String imageUrl) {
+        JWLog.d(TAG, "scheduleAlbumArtFetch(url=" + JWLog.safe(imageUrl) + ")");
         artworkExecutor.submit(() -> {
             try {
-                Log.d(TAG, "ARTWORK_DEBUG: fetching album art " + imageUrl);
+                JWLog.d(TAG, "ARTWORK_DEBUG: fetching album art " + imageUrl);
                 InputStream in = new URL(imageUrl).openStream();
                 Bitmap bmp = BitmapFactory.decodeStream(in);
                 if (bmp != null && sharedMediaSession != null) {
@@ -1187,42 +1261,45 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                             builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bmp);
                             builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bmp);
                             sharedMediaSession.setMetadata(builder.build());
-                            Log.d(TAG, "ARTWORK_DEBUG: album art applied to session");
+                            JWLog.d(TAG, "ARTWORK_DEBUG: album art applied to session");
                         } catch (Exception e) {
-                            Log.w(TAG, "ARTWORK_DEBUG: failed applying bitmap: " + e.getMessage());
+                            JWLog.w(TAG, "ARTWORK_DEBUG: failed applying bitmap: " + e.getMessage());
                         }
                     });
                 }
             } catch (Exception e) {
-                Log.w(TAG, "ARTWORK_DEBUG: fetch failed: " + e.getMessage());
+                JWLog.w(TAG, "ARTWORK_DEBUG: fetch failed: " + e.getMessage());
             }
         });
     }
 
     private void attemptAutostart(String phase) {
+        JWLog.d(TAG, "attemptAutostart(phase=" + phase + ")");
         if (!autoStartEnabled) return;
         if (backgroundPlayer == null) return;
         if (hasStartedPlayback) return; // already started
         if (!(playbackNowAuthorized && hasAudioFocus)) {
-            Log.d(TAG, "\ud83d\udcf1 JAVA: Autostart phase " + phase + " skipped (not authorized yet)");
+            JWLog.d(TAG, "\ud83d\udcf1 JAVA: Autostart phase " + phase + " skipped (not authorized yet)");
             return;
         }
         autostartAttempts++;
         try {
-            Log.d(TAG, "\ud83d\udcf1 JAVA: Autostart " + phase + " attempt #" + autostartAttempts);
+            JWLog.d(TAG, "\ud83d\udcf1 JAVA: Autostart " + phase + " attempt #" + autostartAttempts);
             backgroundPlayer.play();
         } catch (Exception e) {
-            Log.w(TAG, "Autostart play() failed in phase " + phase + ": " + e.getMessage());
+            JWLog.w(TAG, "Autostart play() failed in phase " + phase + ": " + e.getMessage());
         }
     }
 
     private void scheduleAutostartRetry(String nextPhase, long delayMs) {
+        JWLog.d(TAG, "scheduleAutostartRetry(nextPhase=" + nextPhase + ", delayMs=" + delayMs + ")");
         if (!autoStartEnabled) return;
         if (hasStartedPlayback) return;
         mainHandler.postDelayed(() -> attemptAutostart(nextPhase), delayMs);
     }
 
     private void startAutostartChain() {
+        JWLog.d(TAG, "startAutostartChain()");
         attemptAutostart("initial");
         scheduleAutostartRetry("second", 400);
         scheduleAutostartRetry("third", 1200);
