@@ -25,13 +25,18 @@ import android.support.v4.media.session.PlaybackStateCompat;
 import android.view.KeyEvent;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.Collections;
 
+import com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler;
+import com.jwplayer.rnjwplayer.PlaybackManager;
 import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
 import com.jwplayer.rnjwplayer.misc.PlaybackStateCompatWrapper;
+import com.jwplayer.rnjwplayer.session.RNJWNotificationHelper;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.PlayerState;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
+import com.jwplayer.pub.api.configuration.PlayerConfig;
 import com.jwplayer.pub.api.events.AdCompleteEvent;
 import com.jwplayer.pub.api.events.AdErrorEvent;
 import com.jwplayer.pub.api.events.AdPlayEvent;
@@ -83,6 +88,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static boolean pendingSeekApplied = false;
 
     private static String externalMediaId = null;
+    private static String externalSubtitle = null;
+
+    private JWPlayerNativePlaybackHandler jwPlayerNativePlaybackHandler = null;
 
     // MediaSession callback to handle transport controls on Android 13/14+
     private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
@@ -232,6 +240,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         this.context = context;
         this.rnjwNotificationHelper = notificationHelper;
         this.mediaServiceFactory = bgaFactory;
+        this.jwPlayerNativePlaybackHandler = JWPlayerNativePlaybackHandler.getInstance(context);
         
         // Set this as the active instance for delegation
         activeInstance = this;
@@ -250,8 +259,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void initServiceMediaApi() {
-        JWLog.d(TAG, "initServiceMediaApi()");
-
+        JWLog.d(TAG, "initServiceMediaApi()");    
+        
         if (activeInstance != this) {
             JWLog.w(TAG, "initServiceMediaApi: This instance is not active; skipping initialization");
             return;
@@ -265,8 +274,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         this.jwPlayer = serviceMediaApi.getPlayer();
         Context currentContext = this.context;
         this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
-//            String simpleName = RNJWMediaSessionHelper.class.getSimpleName();
-//            this.a = new b(new MediaSessionCompat(currentContext, simpleName));
 
         // Attach callback (was previously intentionally omitted)
         try {
@@ -280,31 +287,17 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         setupMediaButtonFallback(currentContext);
         
         // Check if background player is active and coordinate
-        try {
-            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
-            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
-            
-            if (handlerInstance != null) {
-                // Check if background player is active
-                java.lang.reflect.Method isActiveMethod = handlerClass.getMethod("isBackgroundPlayerActive");
-                Boolean isBackgroundActive = (Boolean) isActiveMethod.invoke(handlerInstance);
-                
-                if (isBackgroundActive != null && isBackgroundActive) {                       
-                    // Get background player info
-                    java.lang.reflect.Method getInfoMethod = handlerClass.getMethod("getCurrentBackgroundPlayerInfo");
-                    Object backgroundInfo = getInfoMethod.invoke(handlerInstance);
-                    
-                    if (backgroundInfo instanceof java.util.Map) {
-                        java.util.Map<String, Object> bgInfo = (java.util.Map<String, Object>) backgroundInfo;
-                        // Transfer background player to UI if they're playing the same content
-                        java.lang.reflect.Method transferMethod = handlerClass.getMethod("transferToUIPlayer");
-                        Object transferResult = transferMethod.invoke(handlerInstance);                            
-                    }
-                }
+        Boolean isBackgroundActive = jwPlayerNativePlaybackHandler.isBackgroundPlayerActive();
+
+        if (isBackgroundActive != null && isBackgroundActive) {
+            try {
+                Object transferResult = jwPlayerNativePlaybackHandler.transferToUIPlayer();
+                JWLog.d(TAG, "coordinateWithBackground: transferToUIPlayer invoked, result=" + transferResult);
+            } catch (Throwable t) {
+                JWLog.w(TAG, "coordinateWithBackground: transferToUIPlayer failed: " + t.getMessage());
             }
-        } catch (Exception e) {
-            JWLog.w(TAG, "Could not coordinate with background player: " + e.getMessage());
+        } else {
+            JWLog.d(TAG, "coordinateWithBackground: background player not active");
         }
         
         // DON'T set callback here - MediaBrowserService already has the callback set
@@ -312,8 +305,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         
         this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
         JWPlayer currentJwPlayer = this.jwPlayer;
-        this.updatePlaylistItem(currentJwPlayer.getPlaylistItem());
+        // Only seed playlist when there is no active background/service session
+        try {
+            // Check if there's already an active session by checking if we have a player
+            boolean isActivePlayerExist = serviceMediaApi != null && serviceMediaApi.getPlayer() != null;
+            if (!isActivePlayerExist) {
+                this.updatePlaylistItem(currentJwPlayer.getPlaylistItem());
+            } else {
+                JWLog.d(TAG, "initServiceMediaApi: skipping updatePlaylistItem because a session is already active");
+            }
+        } catch (Throwable t) {
+            // be safe and skip seeding on errors to avoid replay storms
+            JWLog.w(TAG, "initServiceMediaApi: capability check failed, skipping updatePlaylistItem: " + t.getMessage());
+        }
         this.updatePlayerState(currentJwPlayer.getState());
+        // Try to apply any pending seek right away
+        try { 
+            applyPendingSeekWhenReady(currentJwPlayer.getPlaylistItem()); 
+        } catch (Throwable ignore) {}
     }
 
     private void updatePlaybackState(JWPlayer player, int state) {
@@ -762,6 +771,92 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return null;
     }
 
+    /** Helper: normalize an image URL/string coming from JSON. Treats empty/"null"/"undefined" as absent (null). */
+    private static String normalizeImage(String s) {
+        if (s == null) return null;
+        String trimmed = s.trim();
+        if (trimmed.isEmpty()) return null;
+        if ("null".equalsIgnoreCase(trimmed)) return null;
+        if ("undefined".equalsIgnoreCase(trimmed)) return null;
+        return trimmed;
+    }
+
+    private String getStringFromExtras(Bundle extras, String key) {
+        JWLog.d(TAG, "getStringFromExtras(extras=" + JWLog.bundleInfo(extras) + ", key=" + key + ")");
+        if (extras == null) return null;
+        String value = extras.getString(key, null);
+        if (value == null) {
+            String infoJson = extras.getString("info", null);
+            if (infoJson == null) return null;
+        
+            try {
+                JSONObject obj = new JSONObject(infoJson);
+                value = obj.optString(key, null);                
+            } catch (Exception e) {
+                JWLog.w(TAG, "getStringFromExtras: failed parsing info JSON: " + e.getMessage());
+            }
+        }
+        return value;
+    }
+
+    private String getSubtitleFromExtras(Bundle extras) {
+        JWLog.d(TAG, "getSubtitleFromExtras(extras=" + JWLog.bundleInfo(extras) + ")");
+        if (extras == null) return null;
+
+        String subtitle = null;
+        String infoJson = extras.getString("info", null);
+        if (infoJson == null) return null;
+
+        try {
+            JSONObject obj = new JSONObject(infoJson);
+            if (obj.has("series") && obj.get("series") instanceof JSONObject) {
+                try { 
+                    JSONObject series = (JSONObject)obj.get("series");
+                    subtitle = series.optString("name", null); 
+                } catch (Throwable ignore) {
+                    JWLog.e(TAG, "getSubtitleFromExtras Throwable series" + ignore);
+                }
+            }
+        } catch (Exception e) {
+            JWLog.w(TAG, "getSubtitleFromExtras: failed parsing info JSON: " + e.getMessage());
+        }
+        return subtitle;
+    }
+
+    private String getImageFromExtras(Bundle extras) {
+        JWLog.d(TAG, "getImageFromExtras(extras=" + JWLog.bundleInfo(extras) + ")");
+        if (extras == null) return null;
+
+        String image = null;
+        String infoJson = extras.getString("info", null);
+        if (infoJson == null) return null;
+
+        try {
+            JSONObject obj = new JSONObject(infoJson);
+            image = normalizeImage(obj.optString("image", null));
+            if (obj.has("series") && obj.get("series") instanceof JSONObject) {
+                try { 
+                    JSONObject series = (JSONObject)obj.get("series");
+                    // Prefer extras image if valid; otherwise, try series image
+                    String seriesImage = normalizeImage(series.optString("image", null));
+                    if (image == null && seriesImage != null) {
+                        image = "https://res.cloudinary.com/ouinternal/image/upload/c_scale,f_auto,q_auto,w_275/" + seriesImage + ".jpeg";
+                        JWLog.d(TAG, "Image from series = " + image);
+                    } else if (image != null) {
+                        JWLog.d(TAG, "Image from extras = " + image);
+                    } else {
+                        JWLog.d(TAG, "No image provided in extras/series");
+                    }
+                } catch (Throwable ignore) {
+                    JWLog.e(TAG, "getImageFromExtras Throwable series" + ignore);
+                }
+            }
+        } catch (Exception e) {
+            JWLog.w(TAG, "getImageFromExtras: failed parsing info JSON: " + e.getMessage());
+        }
+        return image;
+    }
+
     private void updatePlayerState(PlayerState playerState) {
         JWLog.d(TAG, "updatePlayerState(playerState=" + playerState + ")", true);
         PlaybackStateCompatWrapper currentPlaybackState = this.mediaSessionStateProvider.getPlaybackState();
@@ -831,8 +926,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         builder.putString("android.media.metadata.DISPLAY_TITLE", 
             playlistItem.getTitle() != null ? playlistItem.getTitle() : "");
 
+        String subtitle = playlistItem.getDescription();
+        if (subtitle == null || subtitle.isEmpty()) {
+            subtitle = externalSubtitle != null ? externalSubtitle : "";
+        }
+
         builder.putString("android.media.metadata.DISPLAY_SUBTITLE", 
-            playlistItem.getDescription() != null ? playlistItem.getDescription() : "");
+            subtitle);
 
         builder.putString("android.media.metadata.MEDIA_ID", 
             playlistItem.getMediaId() != null ? playlistItem.getMediaId() : "");
@@ -1137,19 +1237,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "performSeekTo(positionMs=" + positionMs + ")");
         boolean shouldRequestFocus = false;
 
-        try {
-            // Try to seek in background player first
-            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
-            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
-            
-            if (handlerInstance != null) {
-                // Check if background player exists and seek
-                java.lang.reflect.Method seekMethod = handlerClass.getMethod("seekToPosition", long.class);
-                seekMethod.invoke(handlerInstance, positionMs);
-                JWLog.d(TAG, "Performed seek in background player to " + positionMs + " ms");
-            }
-        } catch (Exception e) { }
+        jwPlayerNativePlaybackHandler.seekToPosition(positionMs);
+        JWLog.d(TAG, "Performed seek in background player to " + positionMs + " ms");
         
         long position = (long) (positionMs / 1000.0);
 
@@ -1204,49 +1293,63 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         isPlayingFromAndroidAuto = true;
 
         try {
-            // First, call MediaBrowserService static method to send to React Native
+            // Determine if UI is currently in Android PiP (Picture-in-Picture) mode
+            boolean isPip = false;
             try {
-                Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
-                java.lang.reflect.Method sendToReactMethod = mediaBrowserServiceClass.getMethod("sendMediaItemToReactNative", String.class);
-                sendToReactMethod.invoke(null, mediaId);
-            } catch (Exception e) {
-                JWLog.w(TAG, "Could not call MediaBrowserService.sendMediaItemToReactNative: " + e.getMessage());
-            }
-            
-            // Then, handle JWPlayer logic - start actual playback
-            Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
-            java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
-            Object handlerInstance = getInstanceMethod.invoke(null, this.context);
-            
-            if (handlerInstance != null) {
-                // Extract media info from extras
-                String title = extras != null ? extras.getString("title", "Unknown Title") : "Unknown Title";
-                String subtitle = extras != null ? extras.getString("subtitle", "") : "";
-                String icon = extras != null ? extras.getString("icon", "") : "";
-                
-                pendingSeekMs = extractResumePosition(extras);
-                pendingSeekApplied = false;
-
-                externalMediaId = mediaId;
-
-                JWLog.d(TAG, "Invoking handleHeadlessMediaSelection with mediaId=" + mediaId + ", title=" + title + ", subtitle=" + subtitle + ", icon=" + icon + ", pendingSeekMs=" + pendingSeekMs);
-
-                // Create extras map
-                java.util.Map<String, Object> extrasMap = new java.util.HashMap<>();
-                if (extras != null) {
-                    for (String key : extras.keySet()) {
-                        Object value = extras.get(key);
-                        if (value != null) {
-                            extrasMap.put(key, value);
-                        }
+                PlaybackManager pm = PlaybackManager.getInstance();
+                JWPlayer uiPlayer = pm.getActivePlayerIfUI();
+                if (uiPlayer != null) {
+                    try { 
+                        isPip = uiPlayer.isInPictureInPictureMode(); 
+                    } catch (Throwable ignore) { 
+                        isPip = false; 
                     }
                 }
-                
-                // Call handleHeadlessMediaSelection
-                java.lang.reflect.Method handleMethod = handlerClass.getMethod("handleHeadlessMediaSelection", 
-                    String.class, String.class, String.class, String.class, java.util.Map.class);
-                handleMethod.invoke(handlerInstance, mediaId, title, subtitle, icon, extrasMap);
+            } catch (Throwable t) {
+                JWLog.w(TAG, "AA_SELECT CHECK_PIP failed: " + t.getMessage());
             }
+
+            // Send selection to React Native ONLY when not in PiP
+            if (!isPip) {
+                try {
+                    Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                    java.lang.reflect.Method sendToReactMethod = mediaBrowserServiceClass.getMethod("sendMediaItemToReactNative", String.class);
+                    sendToReactMethod.invoke(null, mediaId);
+                } catch (Exception e) {
+                    JWLog.w(TAG, "Could not call MediaBrowserService.sendMediaItemToReactNative: " + e.getMessage());
+                }
+            } else {
+                JWLog.d(TAG, "AA_SELECT PIP_NATIVE_LOAD: skipping RN dispatch; UI reuse path will load item natively");
+            }
+
+            // Then, handle JWPlayer logic - start actual playback
+            String titleFromExtras = getStringFromExtras(extras, "title");
+            String title = titleFromExtras != null ? titleFromExtras : "Unknown Title";
+
+            String subtitleFromExtras = getSubtitleFromExtras(extras);
+            String subtitle = subtitleFromExtras != null ? subtitleFromExtras : ""; // TODO: default subtitle?
+
+            String iconFromExtras = getImageFromExtras(extras);
+            String icon = iconFromExtras != null ? iconFromExtras : "";
+
+            pendingSeekMs = extractResumePosition(extras);
+            pendingSeekApplied = false;
+
+            externalMediaId = mediaId;
+            externalSubtitle = subtitle;
+
+            // Create extras map
+            java.util.Map<String, Object> extrasMap = new java.util.HashMap<>();
+            if (extras != null) {
+                for (String key : extras.keySet()) {
+                    Object value = extras.get(key);
+                    if (value != null) {
+                        extrasMap.put(key, value);
+                    }
+                }
+            }
+            
+            jwPlayerNativePlaybackHandler.handleHeadlessMediaSelection(mediaId, title, subtitle, icon, extrasMap);            
         } catch (Exception e) {
             JWLog.e(TAG, "Error handling media item selection: " + e.getMessage());
         }

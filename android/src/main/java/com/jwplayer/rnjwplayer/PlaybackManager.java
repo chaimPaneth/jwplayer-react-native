@@ -15,6 +15,8 @@ public class PlaybackManager {
     private boolean isTransitioning = false;
     // Track whether the UI player (RNJWPlayerView) is in background
     private volatile boolean uiInBackground = false;
+    // Track whether the app is currently in Android Picture-in-Picture (PiP)
+    private volatile boolean pipActive = false;
 
     private static final String TAG = "PlaybackManager";
 
@@ -38,6 +40,7 @@ public class PlaybackManager {
             // Reset UI background flag when a new handler is set; RNJWPlayerView will update it via lifecycle callbacks
             if (!(handler instanceof RNJWPlayerView)) {
                 uiInBackground = false;
+                pipActive = false;
             }
         }
     }
@@ -66,6 +69,7 @@ public class PlaybackManager {
                 mActivePlayer = null;
                 mActivePlayerHandler = null;
                 uiInBackground = false;
+                pipActive = false;
             } else {
                 JWLog.d(TAG, "No active player to clean up.");
             }
@@ -121,7 +125,7 @@ public class PlaybackManager {
      */
     public boolean isUIActive() {
         synchronized (mutex) {
-            boolean active = mActivePlayerHandler instanceof RNJWPlayerView && !uiInBackground;
+            boolean active = mActivePlayerHandler instanceof RNJWPlayerView && (!uiInBackground || pipActive);
             // JWLog.d(TAG, "isUIActive() -> " + active + " (uiInBackground=" + uiInBackground + ")");
             return active;
         }
@@ -148,13 +152,24 @@ public class PlaybackManager {
     }
 
     /**
-     * Returns the active JWPlayer instance only if the active handler is the UI player.
-     * Otherwise returns null.
+     * Returns the active JWPlayer instance when the UI is in the foreground or PiP.
+     *
+     * Historically this only returned the player for RNJWPlayerView when the UI was not
+     * in background. However, when Android Picture-in-Picture (PiP) is active, the UI is
+     * not considered "in background" (uiInBackground == false) but the active handler can
+     * be JWPlayerNativePlaybackHandler. In that case we still want access to the active
+     * player instance.
+     *
+     * Contract:
+     * - Returns JWPlayer if the app UI is not in background (foreground or PiP) and there
+     *   is an active handler of either RNJWPlayerView or JWPlayerNativePlaybackHandler.
+     * - Returns null otherwise.
      */
     public JWPlayer getActivePlayerIfUI() {
-        JWLog.d(TAG, "getActivePlayerIfUI()");
+        // JWLog.d(TAG, "getActivePlayerIfUI()");
         synchronized (mutex) {
-            if (mActivePlayerHandler instanceof RNJWPlayerView && !uiInBackground) {
+            // Allow access to the active player when UI is foreground or in PiP.
+            if ((!uiInBackground || pipActive) && mActivePlayer != null) {
                 return mActivePlayer;
             }
             return null;
@@ -168,5 +183,15 @@ public class PlaybackManager {
     public void setUiInBackground(boolean inBackground) {
         this.uiInBackground = inBackground;
         JWLog.d(TAG, "setUiInBackground(" + inBackground + ")");
+    }
+
+    /**
+     * Notify the manager that the app toggled Android PiP mode.
+     * When PiP is active, treat the UI player as logically active for routing decisions
+     * even if the host activity is technically paused/backgrounded.
+     */
+    public void setUiInPip(boolean inPip) {
+        this.pipActive = inPip;
+        JWLog.d(TAG, "setUiInPip(" + inPip + ")");
     }
 }

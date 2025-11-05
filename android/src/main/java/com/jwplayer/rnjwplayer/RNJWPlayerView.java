@@ -862,7 +862,10 @@ public class RNJWPlayerView extends RelativeLayout implements
             if (Objects.equals(intent.getAction(), "onPictureInPictureModeChanged")) {
                 if (intent.hasExtra("newConfig") && intent.hasExtra("isInPictureInPictureMode")) {
                     // Tell the JWP SDK we are toggling so it can handle toolbar / internal setup
-                    mPlayer.onPictureInPictureModeChanged(intent.getBooleanExtra("isInPictureInPictureMode", false), intent.getParcelableExtra("newConfig"));
+                    Boolean isInPip = intent.getBooleanExtra("isInPictureInPictureMode", false);
+                    mPlayer.onPictureInPictureModeChanged(isInPip, intent.getParcelableExtra("newConfig"));
+
+                    PlaybackManager.getInstance().setUiInPip(isInPip);
 
                     View decorView = mActivity.getWindow().getDecorView();
                     ViewGroup rootView = decorView.findViewById(android.R.id.content);
@@ -871,7 +874,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT);
 
-                    if (intent.getBooleanExtra("isInPictureInPictureMode", false)) {
+                    if (isInPip) {
                         // Going into Picture in Picture
                         ViewGroup parent = (ViewGroup) mPlayerView.getParent();
 
