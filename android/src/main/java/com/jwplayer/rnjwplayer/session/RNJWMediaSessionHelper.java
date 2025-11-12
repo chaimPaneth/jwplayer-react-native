@@ -48,6 +48,8 @@ import com.jwplayer.pub.api.events.PauseEvent;
 import com.jwplayer.pub.api.events.PlayEvent;
 import com.jwplayer.pub.api.events.PlaylistCompleteEvent;
 import com.jwplayer.pub.api.events.PlaylistItemEvent;
+import com.jwplayer.pub.api.events.SeekEvent;
+import com.jwplayer.pub.api.events.SeekedEvent;
 import com.jwplayer.pub.api.events.listeners.AdvertisingEvents;
 import com.jwplayer.pub.api.events.listeners.VideoPlayerEvents;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
@@ -57,7 +59,7 @@ import com.jwplayer.rnjwplayer.utils.JWLog;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener {
+public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener, VideoPlayerEvents.OnSeekListener, VideoPlayerEvents.OnSeekedListener {
     private static final String TAG = "RNJWMediaSessionHelper";
 
     private JWPlayer jwPlayer;
@@ -86,11 +88,40 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // Pending seek info
     private static Long pendingSeekMs = null;
     private static boolean pendingSeekApplied = false;
+    private static final long SEEK_END_GUARD_MS = 500L;
 
     private static String externalMediaId = null;
     private static String externalSubtitle = null;
 
     private JWPlayerNativePlaybackHandler jwPlayerNativePlaybackHandler = null;
+    private boolean lastSeekRequestedWhilePaused = false;
+    private long lastKnownDurationMs = -1L;
+    private boolean suppressNextSeekCallback = false;
+    
+    // Completion state management
+    private boolean completionScheduledFromSeek = false;
+    private boolean awaitingReplayFromStart = false;
+    private long suppressAutoPlayUntilMs = 0L;
+
+    private void captureDurationSnapshot() {
+        try {
+            double durationSeconds = -1.0;
+            if (jwPlayer != null) {
+                durationSeconds = jwPlayer.getDuration();
+            } else if (serviceMediaApi != null && serviceMediaApi.getPlayer() != null) {
+                durationSeconds = serviceMediaApi.getPlayer().getDuration();
+            }
+
+            if (durationSeconds > 0) {
+                long durationMs = (long) (durationSeconds * 1000L);
+                if (durationMs > 0) {
+                    lastKnownDurationMs = durationMs;
+                }
+            }
+        } catch (Exception durationEx) {
+            JWLog.w(TAG, "captureDurationSnapshot failed: " + durationEx.getMessage());
+        }
+    }
 
     // MediaSession callback to handle transport controls on Android 13/14+
     private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
@@ -219,6 +250,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             JWLog.d(TAG, "storeSeekPosition: externalMediaId is null");
             return;
         }
+
+        if (resetToStartAfterSeekCompletion && position > 0) {
+            JWLog.d(TAG, "storeSeekPosition: override due to pending completion reset");
+            position = 0L;
+        }
         
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
@@ -303,7 +339,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // DON'T set callback here - MediaBrowserService already has the callback set
         // and it will delegate to us when needed via static methods or fallback to direct handling
         
-        this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
+        this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED});
         JWPlayer currentJwPlayer = this.jwPlayer;
         // Only seed playlist when there is no active background/service session
         try {
@@ -720,7 +756,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // --- Player/notification cleanup ---
         if (this.jwPlayer != null) {
             this.jwPlayer.removeListeners(this,
-                    new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR});
+                new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED});
             (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
             this.jwPlayer = null;
         } else {
@@ -938,7 +974,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             playlistItem.getMediaId() != null ? playlistItem.getMediaId() : "");
 
         if (playlistItem.getDuration() != null) {
-            builder.putLong("android.media.metadata.DURATION", (long)(playlistItem.getDuration() * 1000));
+            long durationMs = (long)(playlistItem.getDuration() * 1000);
+            builder.putLong("android.media.metadata.DURATION", durationMs);
+            lastKnownDurationMs = durationMs;
         }
 
         if (currentItem != null) {
@@ -967,6 +1005,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         JWLog.d(TAG, "onPlaylistItem(event.item=" + JWLog.playlistItemInfo(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null) + ")", true);
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
+        completionScheduledFromSeek = false;
         // Try to apply pending seek when the item switches
         // Resolve the app-level mediaId to look up the MediaBrowser item
         if (externalMediaId != null) {
@@ -974,10 +1013,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
             JWLog.d(TAG, "onPlaylistItem: resumeMs=" + resumeMs);
             
-            if (resumeMs >= 0) {
+            if (resumeMs > 0) {
                 pendingSeekMs = resumeMs;
                 pendingSeekApplied = false;
                 applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+            } else {
+                pendingSeekMs = null;
+                pendingSeekApplied = false;
             }
         }
     }
@@ -1016,10 +1058,84 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onBuffer(BufferEvent bufferEvent) {
         JWLog.d(TAG, "onBuffer()", true);
+        captureDurationSnapshot();
         this.updatePlayerState(PlayerState.BUFFERING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING);
         // Try to apply pending seek while buffering
         applyPendingSeekWhenReady(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
+    }
+
+    @Override
+    public void onSeek(SeekEvent seekEvent) {
+        double position = seekEvent != null ? seekEvent.getPosition() : 0.0;
+        double offset = seekEvent != null ? seekEvent.getOffset() : 0.0;
+        JWLog.d(TAG, "onSeek(position=" + position + ", offset=" + offset + ")");
+        if (suppressNextSeekCallback) {
+            JWLog.d(TAG, "onSeek: suppressing callback triggered by guarded reseek");
+            suppressNextSeekCallback = false;
+            return;
+        }
+
+        if (seekEvent != null) {
+            long offsetMs = (long) (offset * 1000L);
+            long safeMs = sanitizeSeekPosition(offsetMs);
+
+            maybeClearResetFlagForSeek(safeMs);
+
+            if (safeMs != offsetMs) {
+                JWLog.d(TAG, "onSeek: reseeking to guarded position " + safeMs + " ms (requested=" + offsetMs + " ms)");
+                suppressNextSeekCallback = true;
+                performSeekTo(safeMs);
+                return;
+            }
+
+            lastRequestedSeekPositionMs = offsetMs;
+            lastSeekRequestedWhilePaused = !isCurrentlyPlaying();
+        }
+    }
+
+    @Override
+    public void onSeeked(SeekedEvent seekedEvent) {
+        double positionSeconds = seekedEvent != null ? seekedEvent.getPosition() : 0.0;
+        long eventPositionMs = (long) (positionSeconds * 1000L);
+        long effectivePositionMs = eventPositionMs > 0 ? eventPositionMs : lastRequestedSeekPositionMs;
+        effectivePositionMs = sanitizeSeekPosition(effectivePositionMs);
+
+        JWLog.d(TAG, "onSeeked(position=" + positionSeconds + ", effectiveMs=" + effectivePositionMs + ")");
+
+        if (jwPlayer != null) {
+            PlayerState stateAfterSeek;
+            try {
+                stateAfterSeek = jwPlayer.getState();
+            } catch (Exception ignore) {
+                stateAfterSeek = null;
+            }
+
+            int playbackState;
+            if (stateAfterSeek == PlayerState.PLAYING) {
+                playbackState = PlaybackStateCompat.STATE_PLAYING;
+            } else if (stateAfterSeek == PlayerState.BUFFERING) {
+                playbackState = lastSeekRequestedWhilePaused
+                        ? PlaybackStateCompat.STATE_PAUSED
+                        : PlaybackStateCompat.STATE_BUFFERING;
+            } else {
+                playbackState = PlaybackStateCompat.STATE_PAUSED;
+            }
+
+            updatePlaybackState(jwPlayer, playbackState, effectivePositionMs);
+
+            if (lastSeekRequestedWhilePaused) {
+                updatePlayerState(PlayerState.PAUSED);
+            }
+        }
+
+        maybeClearResetFlagForSeek(effectivePositionMs);
+        storeSeekPosition(effectivePositionMs);
+        maybeCompleteFromSeek(effectivePositionMs);
+
+        lastSeekRequestedWhilePaused = false;
+        lastRequestedSeekPositionMs = -1L;
+        suppressNextSeekCallback = false;
     }
 
     public void onPause(PauseEvent pauseEvent) {
@@ -1030,14 +1146,31 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onPlay(PlayEvent playEvent) {
         JWLog.d(TAG, "onPlay()", true);
+        
+        // Block immediate auto-play after seek-triggered completion
+        if (SystemClock.elapsedRealtime() <= suppressAutoPlayUntilMs) {
+            JWLog.d(TAG, "onPlay: suppressing auto-play after seek completion");
+            performPause();
+            return;
+        }
+
+        // Handle replay from start after completion
+        if (awaitingReplayFromStart) {
+            JWLog.d(TAG, "onPlay: rewinding after completion");
+            awaitingReplayFromStart = false;
+            performSeekTo(0L);
+        }
+
+        captureDurationSnapshot();
         this.updatePlayerState(PlayerState.PLAYING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
-        // Try to apply pending seek as soon as playback starts
         applyPendingSeekWhenReady(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
     }
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
         JWLog.d(TAG, "onPlaylistComplete()", true);
+        boolean triggeredBySeekCompletion = completionScheduledFromSeek;
+        completionScheduledFromSeek = false;
         resetAndroidAutoFlag();
 
         if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null) return;
@@ -1080,6 +1213,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 JWLog.w(TAG, "Could not get duration/position for completion: " + ex.getMessage());
                 positionMs = 0;
             }
+
+            long durationCandidate = totalDurationMs > 0 ? totalDurationMs : positionMs;
+            
+            // Set replay flag for seek-triggered completions
+            if (triggeredBySeekCompletion) {
+                awaitingReplayFromStart = true;
+                if (durationCandidate > 0) {
+                    positionMs = durationCandidate;
+                }
+            } else {
+                awaitingReplayFromStart = false;
+                if (durationCandidate > 0) {
+                    positionMs = durationCandidate;
+                }
+            }
+            
+            storeSeekPosition(0L);
 
             // Set to PAUSED state with normal playback rate so progress bar stays interactive
             // Position at the end, but with rate 1.0f so seeking works
@@ -1148,9 +1298,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             JWLog.d(TAG, "Pending seek not applied; player not ready yet. Duration: " + duration + ", State: " + st);
         }
     }
-    
+
     private void performPlay() {
         JWLog.d(TAG, "performPlay()");
+        
+        // Clear suppression flag on explicit play
+        suppressAutoPlayUntilMs = 0L;
+        
+        // Handle replay from start after completion
+        if (awaitingReplayFromStart) {
+            JWLog.d(TAG, "performPlay: rewinding after completion");
+            awaitingReplayFromStart = false;
+            performSeekTo(0L);
+        }
+        
         boolean focusGranted = requestAudioFocusForPlayback(context);
         if (!focusGranted) {
             JWLog.w(TAG, "Audio focus not granted - proceeding anyway");
@@ -1235,31 +1396,54 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      */
     private void performSeekTo(long positionMs) {
         JWLog.d(TAG, "performSeekTo(positionMs=" + positionMs + ")");
-        boolean shouldRequestFocus = false;
+        long safePositionMs = sanitizeSeekPosition(positionMs);
+        if (safePositionMs != positionMs) {
+            JWLog.d(TAG, "performSeekTo: clamped requested position to " + safePositionMs + " ms");
+        }
 
-        jwPlayerNativePlaybackHandler.seekToPosition(positionMs);
-        JWLog.d(TAG, "Performed seek in background player to " + positionMs + " ms");
-        
-        long position = (long) (positionMs / 1000.0);
+        maybeClearResetFlagForSeek(safePositionMs);
+
+        boolean shouldRequestFocus = false;
+        PlayerState previousState = null;
+
+        if (jwPlayer != null) {
+            try {
+                previousState = jwPlayer.getState();
+            } catch (Exception ignore) {
+                previousState = null;
+            }
+        }
+
+        try {
+            jwPlayerNativePlaybackHandler.seekToPosition(safePositionMs);
+            JWLog.d(TAG, "Performed seek in background player to " + safePositionMs + " ms");
+        } catch (Exception handlerSeekError) {
+            JWLog.w(TAG, "Background player seek failed: " + handlerSeekError.getMessage());
+        }
+
+        double safePositionSeconds = safePositionMs / 1000.0;
 
         // Always seek UI player too (or as fallback) so its reported position updates promptly
         if (this.jwPlayer != null) {
             try {
-                this.jwPlayer.seek(position);
-                JWLog.d(TAG, "Performed seek in UI player to " + position + " m");
+                this.jwPlayer.seek(safePositionSeconds);
+                JWLog.d(TAG, "Performed seek in UI player to " + safePositionSeconds + " s");
             } catch (Exception uiSeekError) {
                 JWLog.e(TAG, "UI player seek failed: " + uiSeekError.getMessage());
             }
         }
 
         if (jwPlayer != null) {
-            // Keep state (playing vs paused) consistent after seek
-            int playerState = (jwPlayer.getState() == PlayerState.PLAYING)
-                    ? PlaybackStateCompat.STATE_PLAYING
-                    : PlaybackStateCompat.STATE_PAUSED;
+            // Keep state (playing vs paused) consistent after seek using the prior state snapshot
+            boolean wasPlaying = previousState == PlayerState.PLAYING || previousState == PlayerState.BUFFERING;
+            int targetPlaybackState = wasPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
 
-            shouldRequestFocus = (playerState == PlaybackStateCompat.STATE_PLAYING);
-            updatePlaybackState(jwPlayer, playerState, position);
+            shouldRequestFocus = wasPlaying;
+            updatePlaybackState(jwPlayer, targetPlaybackState, safePositionMs);
+
+            lastSeekRequestedWhilePaused = !wasPlaying;
+        } else {
+            lastSeekRequestedWhilePaused = false;
         }
 
         if (shouldRequestFocus) {
@@ -1269,7 +1453,129 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
 
-        storeSeekPosition(positionMs);
+        lastRequestedSeekPositionMs = safePositionMs;
+        storeSeekPosition(safePositionMs);
+    }
+
+    private void maybeClearResetFlagForSeek(long targetPositionMs) {
+        if (!resetToStartAfterSeekCompletion || targetPositionMs <= 0) {
+            return;
+        }
+
+        long durationMs = getCurrentDurationMs();
+        long guardWindow = Math.max(SEEK_END_GUARD_MS, 750L);
+        boolean awayFromCompletionZone = durationMs <= 0 || targetPositionMs + guardWindow < durationMs;
+
+        if (awayFromCompletionZone) {
+            JWLog.d(TAG, "maybeClearResetFlagForSeek: clearing completion reset flag due to seek to " + targetPositionMs + " ms");
+            resetToStartAfterSeekCompletion = false;
+        }
+    }
+
+    private void resetPlaybackToStartIfNeeded(String caller) {
+        if (!resetToStartAfterSeekCompletion) {
+            return;
+        }
+
+        JWLog.d(TAG, caller + ": rewinding after seek-triggered completion");
+        try {
+            performSeekTo(0L);
+        } catch (Exception resetEx) {
+            JWLog.w(TAG, caller + ": rewind failed " + resetEx.getMessage());
+        } finally {
+            resetToStartAfterSeekCompletion = false;
+        }
+    }
+
+    private long sanitizeSeekPosition(long positionMs) {
+        if (positionMs <= 0) return 0L;
+
+        long durationMs = getCurrentDurationMs();
+        if (durationMs > 0 && positionMs >= durationMs) {
+            long guardWindow = Math.min(SEEK_END_GUARD_MS, Math.max(durationMs / 20L, 250L));
+            long safeUpperBound = durationMs - guardWindow;
+            if (safeUpperBound < 0) {
+                safeUpperBound = Math.max(durationMs - 50L, 0L);
+            }
+            long adjusted = Math.min(positionMs, safeUpperBound);
+            if (adjusted < 0) {
+                adjusted = 0L;
+            }
+            JWLog.d(TAG, "sanitizeSeekPosition: clamping requestedMs=" + positionMs + " to " + adjusted + " (durationMs=" + durationMs + ")");
+            return adjusted;
+        }
+
+        return Math.max(positionMs, 0L);
+    }
+
+    private void maybeCompleteFromSeek(long positionMs) {
+        long durationMs = getCurrentDurationMs();
+        if (durationMs <= 0) {
+            return;
+        }
+
+        PlayerState currentState = null;
+        try {
+            if (jwPlayer != null) {
+                currentState = jwPlayer.getState();
+            } else if (serviceMediaApi != null && serviceMediaApi.getPlayer() != null) {
+                currentState = serviceMediaApi.getPlayer().getState();
+            }
+        } catch (Exception stateEx) {
+            JWLog.w(TAG, "maybeCompleteFromSeek: state lookup failed " + stateEx.getMessage());
+        }
+
+        if (currentState == PlayerState.COMPLETE) {
+            JWLog.d(TAG, "maybeCompleteFromSeek: ignoring seek while already complete");
+            return;
+        }
+
+        long delta = Math.max(durationMs - positionMs, 0L);
+        long completionThreshold = Math.max(SEEK_END_GUARD_MS, 750L);
+
+        if (delta <= completionThreshold) {
+            if (completionScheduledFromSeek) {
+                JWLog.d(TAG, "maybeCompleteFromSeek: completion already scheduled");
+                return;
+            }
+
+            JWLog.d(TAG, "maybeCompleteFromSeek: treating seek to " + positionMs + " as completion (duration=" + durationMs + ")");
+            completionScheduledFromSeek = true;
+            try {
+                onPlaylistComplete(null);
+                JWLog.d(TAG, "maybeCompleteFromSeek: pausing player after forced completion");
+                performPause();
+                suppressNextOnPlayAfterSeekCompletion = true;
+                suppressOnPlayExpiryMs = SystemClock.elapsedRealtime() + AUTO_PLAY_SUPPRESS_WINDOW_MS;
+            } catch (Exception completeEx) {
+                JWLog.w(TAG, "maybeCompleteFromSeek: completion handling failed " + completeEx.getMessage());
+            }
+        }
+    }
+
+    private long getCurrentDurationMs() {
+        double durationSeconds = -1.0;
+        try {
+            if (jwPlayer != null) {
+                durationSeconds = jwPlayer.getDuration();
+            } else if (serviceMediaApi != null && serviceMediaApi.getPlayer() != null) {
+                durationSeconds = serviceMediaApi.getPlayer().getDuration();
+            }
+        } catch (Exception durationEx) {
+            JWLog.w(TAG, "getCurrentDurationMs: duration lookup failed " + durationEx.getMessage());
+        }
+
+        long candidate = -1L;
+        if (durationSeconds > 0) {
+            candidate = (long) (durationSeconds * 1000L);
+        }
+
+        if (candidate > 0) {
+            lastKnownDurationMs = candidate;
+            return candidate;
+        }
+
+        return lastKnownDurationMs;
     }
 
     /**
