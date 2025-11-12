@@ -95,13 +95,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private JWPlayerNativePlaybackHandler jwPlayerNativePlaybackHandler = null;
     private boolean lastSeekRequestedWhilePaused = false;
+    private long lastRequestedSeekPositionMs = -1L;
     private long lastKnownDurationMs = -1L;
     private boolean suppressNextSeekCallback = false;
-    
-    // Completion state management
     private boolean completionScheduledFromSeek = false;
-    private boolean awaitingReplayFromStart = false;
-    private long suppressAutoPlayUntilMs = 0L;
+    private boolean resetToStartAfterSeekCompletion = false;
+    private boolean suppressNextOnPlayAfterSeekCompletion = false;
+    private long suppressOnPlayExpiryMs = 0L;
+
+    // Block only the immediate auto-play callback that fires right after we force completion
+    private static final long AUTO_PLAY_SUPPRESS_WINDOW_MS = 350L;
 
     private void captureDurationSnapshot() {
         try {
@@ -1146,24 +1149,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onPlay(PlayEvent playEvent) {
         JWLog.d(TAG, "onPlay()", true);
-        
-        // Block immediate auto-play after seek-triggered completion
-        if (SystemClock.elapsedRealtime() <= suppressAutoPlayUntilMs) {
-            JWLog.d(TAG, "onPlay: suppressing auto-play after seek completion");
-            performPause();
-            return;
+        long now = SystemClock.elapsedRealtime();
+        if (suppressNextOnPlayAfterSeekCompletion) {
+            if (now <= suppressOnPlayExpiryMs) {
+                JWLog.d(TAG, "onPlay: suppressing auto-play after seek completion");
+                suppressNextOnPlayAfterSeekCompletion = false;
+                performPause();
+                return;
+            }
+
+            suppressNextOnPlayAfterSeekCompletion = false;
         }
 
-        // Handle replay from start after completion
-        if (awaitingReplayFromStart) {
-            JWLog.d(TAG, "onPlay: rewinding after completion");
-            awaitingReplayFromStart = false;
-            performSeekTo(0L);
-        }
-
+        resetPlaybackToStartIfNeeded("onPlay");
         captureDurationSnapshot();
         this.updatePlayerState(PlayerState.PLAYING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
+        // Try to apply pending seek as soon as playback starts
         applyPendingSeekWhenReady(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
     }
 
@@ -1215,21 +1217,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
 
             long durationCandidate = totalDurationMs > 0 ? totalDurationMs : positionMs;
-            
-            // Set replay flag for seek-triggered completions
+            long resumePositionMs = 0L;
             if (triggeredBySeekCompletion) {
-                awaitingReplayFromStart = true;
+                resetToStartAfterSeekCompletion = true;
                 if (durationCandidate > 0) {
                     positionMs = durationCandidate;
                 }
             } else {
-                awaitingReplayFromStart = false;
+                resetToStartAfterSeekCompletion = false;
                 if (durationCandidate > 0) {
                     positionMs = durationCandidate;
                 }
             }
-            
-            storeSeekPosition(0L);
+            storeSeekPosition(resumePositionMs);
 
             // Set to PAUSED state with normal playback rate so progress bar stays interactive
             // Position at the end, but with rate 1.0f so seeking works
@@ -1301,17 +1301,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performPlay() {
         JWLog.d(TAG, "performPlay()");
-        
-        // Clear suppression flag on explicit play
-        suppressAutoPlayUntilMs = 0L;
-        
-        // Handle replay from start after completion
-        if (awaitingReplayFromStart) {
-            JWLog.d(TAG, "performPlay: rewinding after completion");
-            awaitingReplayFromStart = false;
-            performSeekTo(0L);
-        }
-        
+        suppressNextOnPlayAfterSeekCompletion = false;
+        resetPlaybackToStartIfNeeded("performPlay");
         boolean focusGranted = requestAudioFocusForPlayback(context);
         if (!focusGranted) {
             JWLog.w(TAG, "Audio focus not granted - proceeding anyway");
