@@ -80,7 +80,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private boolean currentlyHasFocus = false;
     private boolean isPlayingFromAndroidAuto = false;
     private long lastFocusRequestTime = 0;
+    private long androidAutoHandoffStartTime = 0;
     private static final long FOCUS_LOSS_IGNORE_WINDOW_MS = 1000; // 1 second
+    private static final long ANDROID_AUTO_HANDOFF_TIMEOUT_MS = 5000; // 5 seconds max
 
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
@@ -88,10 +90,27 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // Pending seek info
     private static Long pendingSeekMs = null;
     private static boolean pendingSeekApplied = false;
+    private static int autoHandoffSeekAttempts = 0; // Track number of onSeeked during handoff
     private static final long SEEK_END_GUARD_MS = 500L;
 
     private static String externalMediaId = null;
     private static String externalSubtitle = null;
+
+    // Static position cache: stores last known position per mediaId (survives instance recreation)
+    // This is critical for handoff because MediaItemsStore only has the original extras bundle
+    private static final java.util.Map<String, Long> lastKnownPositionCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Static method to cache a position for handoff from background player to UI player.
+     * Called by JWPlayerNativePlaybackHandler during cleanup to ensure the position
+     * survives instance recreation and is available when the new UI player initializes.
+     */
+    public static void cachePositionForHandoff(String mediaId, long positionMs) {
+        if (mediaId != null && !mediaId.isEmpty() && positionMs > 0) {
+            lastKnownPositionCache.put(mediaId, positionMs);
+            JWLog.d(TAG, "cachePositionForHandoff: Cached " + positionMs + "ms for mediaId=" + mediaId);
+        }
+    }
 
     private JWPlayerNativePlaybackHandler jwPlayerNativePlaybackHandler = null;
     private boolean lastSeekRequestedWhilePaused = false;
@@ -254,9 +273,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             return;
         }
 
+        // CRITICAL: Never store 0 during Android Auto handoff - it's spurious noise from JWPlayer
+        if (position == 0 && isPlayingFromAndroidAuto && pendingSeekMs != null && pendingSeekMs > 0) {
+            JWLog.d(TAG, "storeSeekPosition: BLOCKED storing 0 during AA handoff (pendingSeekMs=" + pendingSeekMs + ")");
+            return;
+        }
+
         if (resetToStartAfterSeekCompletion && position > 0) {
             JWLog.d(TAG, "storeSeekPosition: override due to pending completion reset");
             position = 0L;
+        }
+
+        // CRITICAL: Cache position in static map for handoff resume
+        // This survives instance recreation and is checked before MediaItemsResumeProvider
+        if (position > 0) {
+            lastKnownPositionCache.put(externalMediaId, position);
+            JWLog.d(TAG, "storeSeekPosition: Cached position " + position + "ms for mediaId=" + externalMediaId + " in static cache");
         }
         
         try {
@@ -264,9 +296,10 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             java.lang.reflect.Method reportSeek =
                     mediaBrowserServiceClass.getMethod("updateSeekPosition", String.class, long.class);
             reportSeek.invoke(null, externalMediaId, position); // position in ms
-        } catch (Exception ignore) {
+            JWLog.d(TAG, "storeSeekPosition: Successfully stored position " + position + "ms for mediaId=" + externalMediaId + " via MediaBrowserService.updateSeekPosition()");
+        } catch (Exception e) {
             // Safe to ignore; just don't break the seek
-            JWLog.w(TAG, "Could not report seek to React Native: " + ignore.getMessage());
+            JWLog.w(TAG, "Could not report seek to React Native: " + e.getMessage());
         }
     }
 
@@ -330,10 +363,37 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         if (isBackgroundActive != null && isBackgroundActive) {
             try {
+                // CRITICAL: Capture background player's CURRENT position BEFORE transfer/cleanup
+                // Get the comprehensive playback state which includes current position
+                java.lang.reflect.Method getStateMethod = jwPlayerNativePlaybackHandler.getClass()
+                        .getDeclaredMethod("getComprehensivePlaybackState");
+                getStateMethod.setAccessible(true);
+                Object stateObj = getStateMethod.invoke(jwPlayerNativePlaybackHandler);
+                
+                if (stateObj instanceof com.facebook.react.bridge.WritableMap) {
+                    com.facebook.react.bridge.WritableMap stateMap = (com.facebook.react.bridge.WritableMap) stateObj;
+                    
+                    // Extract current position and mediaId
+                    if (stateMap.hasKey("currentPosition") && stateMap.hasKey("mediaId")) {
+                        double positionSeconds = stateMap.getDouble("currentPosition");
+                        String bgMediaId = stateMap.getString("mediaId");
+                        long positionMs = (long) (positionSeconds * 1000);
+                        
+                        if (positionMs > 0 && bgMediaId != null && !bgMediaId.isEmpty()) {
+                            // Store this position in MediaBrowserService immediately
+                            // This ensures queryResumeViaReflection will return the correct value
+                            externalMediaId = bgMediaId; // Set before calling storeSeekPosition
+                            storeSeekPosition(positionMs);
+                            JWLog.d(TAG, "coordinateWithBackground: captured and stored position " + positionMs + "ms from background player for mediaId=" + bgMediaId);
+                        }
+                    }
+                }
+                
+                // Now proceed with transfer
                 Object transferResult = jwPlayerNativePlaybackHandler.transferToUIPlayer();
                 JWLog.d(TAG, "coordinateWithBackground: transferToUIPlayer invoked, result=" + transferResult);
             } catch (Throwable t) {
-                JWLog.w(TAG, "coordinateWithBackground: transferToUIPlayer failed: " + t.getMessage());
+                JWLog.w(TAG, "coordinateWithBackground: failed: " + t.getMessage());
             }
         } else {
             JWLog.d(TAG, "coordinateWithBackground: background player not active");
@@ -490,6 +550,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             return true;
         }
         
+        // Detect Android Auto handoff: if we're currently playing and requesting focus
+        // it's likely a handoff from Android Auto to phone app
+        boolean wasPlayingBeforeRequest = isCurrentlyPlaying();
+        if (wasPlayingBeforeRequest && serviceMediaApi != null) {
+            JWLog.d(TAG, "requestAudioFocusForPlayback: Detected potential Android Auto handoff (was playing)");
+            isPlayingFromAndroidAuto = true;
+            androidAutoHandoffStartTime = System.currentTimeMillis();
+        }
+        
         lastFocusRequestTime = System.currentTimeMillis();
         
         if (audioManager == null) {
@@ -553,6 +622,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             case android.media.AudioManager.AUDIOFOCUS_GAIN:
                 JWLog.d(TAG, "AUDIOFOCUS_GAIN received");
                 currentlyHasFocus = true;
+                
+                // Clear Android Auto handoff flag after gaining focus
+                if (isPlayingFromAndroidAuto) {
+                    JWLog.d(TAG, "AUDIOFOCUS_GAIN: Clearing Android Auto handoff flag");
+                    isPlayingFromAndroidAuto = false;
+                }
+                
                 if (wasPlayingBeforeFocusLoss) {
                     wasPlayingBeforeFocusLoss = false;
                     try {
@@ -571,10 +647,25 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 break;
                 
             case android.media.AudioManager.AUDIOFOCUS_LOSS:
-                JWLog.d(TAG, "AUDIOFOCUS_LOSS received");
-                // Ignore focus loss if it happens too soon after requesting focus
+                JWLog.d(TAG, "AUDIOFOCUS_LOSS received (timeSinceLastRequest=" + timeSinceLastRequest + "ms, isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")");
                 currentlyHasFocus = false;
+                
+                // If focus loss happens long after the last request, this is Android Auto disconnect, not handoff
+                // Clear the flag so normal pause/audio focus behavior resumes
+                if (isPlayingFromAndroidAuto && timeSinceLastRequest > 2000) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: Clearing Android Auto flag - this is a disconnect (time=" + timeSinceLastRequest + "ms)");
+                    resetAndroidAutoFlag();
+                }
+                
+                // Skip pause during Android Auto handoff - focus will be regained immediately
+                if (isPlayingFromAndroidAuto) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: Ignoring during Android Auto handoff, keeping playing state");
+                    return;
+                }
+                
+                // Ignore focus loss if it happens too soon after requesting focus
                 if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: Ignoring due to timing window (< " + FOCUS_LOSS_IGNORE_WINDOW_MS + "ms)");
                     return;
                 }
                 
@@ -585,10 +676,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 break;
                 
             case android.media.AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT received");
+                JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT received (timeSinceLastRequest=" + timeSinceLastRequest + "ms, isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")");
                 currentlyHasFocus = false;
+                
+                // If transient loss happens long after request, clear AA flag
+                if (isPlayingFromAndroidAuto && timeSinceLastRequest > 2000) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: Clearing Android Auto flag - this is a disconnect (time=" + timeSinceLastRequest + "ms)");
+                    resetAndroidAutoFlag();
+                }
+                
+                // Skip pause during Android Auto handoff
+                if (isPlayingFromAndroidAuto) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: Ignoring during Android Auto handoff");
+                    return;
+                }
+                
                 // Also ignore transient loss if too soon
                 if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: Ignoring due to timing window");
                     return;
                 }
                 
@@ -672,6 +777,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private void resetAndroidAutoFlag() {
         JWLog.d(TAG, "resetAndroidAutoFlag()");
         isPlayingFromAndroidAuto = false;
+        androidAutoHandoffStartTime = 0;
     }
     
     // End Audio focus management
@@ -1009,18 +1115,114 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "onPlaylistItem(event.item=" + JWLog.playlistItemInfo(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null) + ")", true);
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
         completionScheduledFromSeek = false;
+        
+        // Get playlist start time from JS (if available)
+        long playlistStartMs = 0L;
+        boolean hasExplicitStart = false;
+        try {
+            if (playlistItemEvent != null && playlistItemEvent.getPlaylistItem() != null) {
+                Double startSeconds = playlistItemEvent.getPlaylistItem().getStartTime(); // seconds
+                if (startSeconds != null && startSeconds > 0) {
+                    playlistStartMs = (long) (startSeconds * 1000L);
+                    hasExplicitStart = playlistStartMs > 0;
+                }
+            }
+        } catch (Throwable t) {
+            JWLog.w(TAG, "onPlaylistItem: failed reading playlist starttime: " + t.getMessage());
+        }
+        
+        // Mark as Android Auto handoff if we have externalMediaId set
+        // This prevents audio focus loss from pausing playback during handoff
+        if (externalMediaId != null) {
+            isPlayingFromAndroidAuto = true;
+            lastFocusRequestTime = System.currentTimeMillis();
+            JWLog.d(TAG, "onPlaylistItem: Marked as Android Auto handoff (will ignore AUDIOFOCUS_LOSS for " + FOCUS_LOSS_IGNORE_WINDOW_MS + "ms)");
+        }
+        
+        // Priority for resume position:
+        // 1. Static cache (most recent position from background player cleanup)
+        // 2. MediaItemsResumeProvider (original extras bundle)
+        // 3. Explicit playlist startTime from JS
+        // 4. Default to 0
         // Try to apply pending seek when the item switches
         // Resolve the app-level mediaId to look up the MediaBrowser item
         if (externalMediaId != null) {
-            long resumeMs = queryResumeViaReflection(externalMediaId); // contract: -1 = absent
-
-            JWLog.d(TAG, "onPlaylistItem: resumeMs=" + resumeMs);
+            JWLog.d(TAG, "onPlaylistItem: Resolving resume position for mediaId=" + externalMediaId + " (hasExplicitStart=" + hasExplicitStart + ", playlistStartMs=" + playlistStartMs + ")");
+            
+            // CRITICAL: Check static cache FIRST - this has the most recent position from background player
+            // The cache survives instance recreation and is updated by storeSeekPosition during cleanup
+            Long cachedPositionMs = lastKnownPositionCache.get(externalMediaId);
+            long savedPositionMs;
+            String positionSource;
+            
+            if (cachedPositionMs != null && cachedPositionMs > 0) {
+                savedPositionMs = cachedPositionMs;
+                positionSource = "static cache (most recent)";
+                JWLog.d(TAG, "onPlaylistItem: Found position " + savedPositionMs + "ms in static cache for mediaId=" + externalMediaId);
+            } else {
+                // Fallback to MediaItemsResumeProvider (original extras bundle)
+                savedPositionMs = queryResumeViaReflection(externalMediaId); // contract: -1 = absent
+                positionSource = "MediaItemsResumeProvider";
+            }
+            long resumeMs;
+            
+            JWLog.d(TAG, "onPlaylistItem: Position sources - savedPositionMs=" + savedPositionMs + "ms (from " + positionSource + "), playlistStartMs=" + playlistStartMs + "ms (from extras)");
+            
+            if (savedPositionMs > 0) {
+                // Use saved position (most recent from background player or previous session)
+                resumeMs = savedPositionMs;
+                JWLog.d(TAG, "onPlaylistItem: using saved position resumeMs=" + resumeMs + "ms (Priority 1: Most recent saved position, overriding playlist starttime=" + playlistStartMs + "ms)");
+            } else if (hasExplicitStart) {
+                // Fallback to playlist startTime if no saved position
+                resumeMs = playlistStartMs;
+                JWLog.d(TAG, "onPlaylistItem: no saved position, using playlist starttime from JS as resumeMs=" + resumeMs + "ms (Priority 2: Explicit startTime from JS, no saved position available)");
+            } else {
+                // No saved position and no explicit start time
+                resumeMs = -1L;
+                JWLog.d(TAG, "onPlaylistItem: no saved position or playlist starttime, resumeMs=" + resumeMs + " (will use default 0ms)");
+            }
+            
             
             if (resumeMs > 0) {
                 pendingSeekMs = resumeMs;
                 pendingSeekApplied = false;
-                applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+                autoHandoffSeekAttempts = 0; // Reset for new handoff
+                JWLog.d(TAG, "onPlaylistItem: Set pendingSeekMs=" + pendingSeekMs + "ms for Android Auto handoff (autoHandoffSeekAttempts reset to 0)");
+                
+                // If this is Android Auto handoff, trigger play immediately
+                // The onSeeked handler will protect against spurious seeks:
+                // - Phase 1: Block spurious seek-to-0 entirely and re-seek to pendingSeekMs
+                // - Phase 2: Counter-based fallback for other wrong positions
+                if (isPlayingFromAndroidAuto && jwPlayer != null) {
+                    PlayerState currentState = jwPlayer.getState();
+                    JWLog.d(TAG, "onPlaylistItem: Android Auto handoff detected (state=" + currentState + ", resumeMs=" + resumeMs + ", will trigger play for counter-based correction)");
+                    
+                    if (currentState == PlayerState.IDLE || currentState == PlayerState.PAUSED) {
+                        try {
+                            // Trigger play first - this will start buffering and trigger onSeeked events
+                            // The two-phase defense in onSeeked will handle position correction:
+                            // - Phase 1: Block spurious seek-to-0 and re-seek
+                            // - Phase 2: Counter-based validation for other wrong positions
+                            jwPlayer.play();
+                            JWLog.d(TAG, "onPlaylistItem: Triggered play for Android Auto handoff (state was " + currentState + "), counter logic will correct position in onSeeked to " + pendingSeekMs + "ms");
+                            // pendingSeekMs is still set, onSeeked will validate and apply it
+                        } catch (Exception ex) {
+                            JWLog.w(TAG, "onPlaylistItem: Failed to trigger play during handoff: " + ex.getMessage());
+                            // Fallback: try applying seek directly
+                            JWLog.d(TAG, "onPlaylistItem: Falling back to applyPendingSeekWhenReady");
+                            applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+                        }
+                    } else {
+                        // Player already playing/buffering, just let seek apply
+                        JWLog.d(TAG, "onPlaylistItem: Player state is " + currentState + ", letting applyPendingSeekWhenReady handle position");
+                        applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+                    }
+                } else {
+                    JWLog.d(TAG, "onPlaylistItem: Not Android Auto handoff (isPlayingFromAndroidAuto=false), applying pending seek normally");
+                    applyPendingSeekWhenReady(playlistItemEvent.getPlaylistItem());
+                }
             } else {
+                JWLog.d(TAG, "onPlaylistItem: No valid resume position (resumeMs<=0), clearing pendingSeekMs");
                 pendingSeekMs = null;
                 pendingSeekApplied = false;
             }
@@ -1072,7 +1274,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onSeek(SeekEvent seekEvent) {
         double position = seekEvent != null ? seekEvent.getPosition() : 0.0;
         double offset = seekEvent != null ? seekEvent.getOffset() : 0.0;
-        JWLog.d(TAG, "onSeek(position=" + position + ", offset=" + offset + ")");
+        int androidVersion = Build.VERSION.SDK_INT;
+        JWLog.d(TAG, "onSeek(position=" + position + ", offset=" + offset + ", Android=" + androidVersion + ")");
+        
         if (suppressNextSeekCallback) {
             JWLog.d(TAG, "onSeek: suppressing callback triggered by guarded reseek");
             suppressNextSeekCallback = false;
@@ -1082,6 +1286,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (seekEvent != null) {
             long offsetMs = (long) (offset * 1000L);
             long safeMs = sanitizeSeekPosition(offsetMs);
+
+            // During Android Auto handoff, if JWPlayer is seeking to autostart position (mStartTime),
+            // DON'T interrupt it - let it complete, then we'll correct the position in onSeeked
+            if (isPlayingFromAndroidAuto && pendingSeekMs != null && !pendingSeekApplied && safeMs < pendingSeekMs) {
+                JWLog.d(TAG, "onSeek: Android Auto handoff - JWPlayer autostart detected at " + safeMs + "ms, will correct to " + pendingSeekMs + "ms in onSeeked (Android " + androidVersion + ")");
+            }
 
             maybeClearResetFlagForSeek(safeMs);
 
@@ -1101,10 +1311,71 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onSeeked(SeekedEvent seekedEvent) {
         double positionSeconds = seekedEvent != null ? seekedEvent.getPosition() : 0.0;
         long eventPositionMs = (long) (positionSeconds * 1000L);
+        int androidVersion = Build.VERSION.SDK_INT;
+
+        // CRITICAL: During Android Auto handoff, completely ignore spurious 0 seeks
+        // Android 12/14 emit a second seek-to-0 after the correct resume seek - this must be blocked
+        if (isPlayingFromAndroidAuto && pendingSeekMs != null && eventPositionMs == 0) {
+            JWLog.d(TAG, "onSeeked: IGNORING spurious 0 seek during AA handoff (pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ")");
+            // If we haven't successfully applied the pending seek yet, re-seek to the correct target
+            if (!pendingSeekApplied && jwPlayer != null) {
+                JWLog.d(TAG, "onSeeked: Re-seeking to pendingSeekMs=" + pendingSeekMs + " after spurious 0");
+                suppressNextSeekCallback = true;
+                lastRequestedSeekPositionMs = pendingSeekMs;
+                jwPlayer.seek(pendingSeekMs / 1000.0);
+            }
+            return; // Don't process the spurious 0 event at all
+        }
+
         long effectivePositionMs = eventPositionMs > 0 ? eventPositionMs : lastRequestedSeekPositionMs;
         effectivePositionMs = sanitizeSeekPosition(effectivePositionMs);
 
-        JWLog.d(TAG, "onSeeked(position=" + positionSeconds + ", effectiveMs=" + effectivePositionMs + ")");
+        JWLog.d(TAG, "onSeeked(position=" + positionSeconds + ", effectiveMs=" + effectivePositionMs + ", Android=" + androidVersion + ")");
+
+        // Android Auto handoff correction: Two-phase defense strategy
+        // Phase 1 (above): Block spurious seek-to-0 entirely (Android 12/14 quirk)
+        // Phase 2 (below): Counter-based correction for other wrong positions
+        // - Track onSeeked attempts when position is wrong (but not 0)
+        // - Allow first attempt, correct on second if still wrong
+        // - Immediately accept correct positions
+        if (isPlayingFromAndroidAuto && pendingSeekMs != null && !pendingSeekApplied) {
+            autoHandoffSeekAttempts++;
+            long deltaFromTarget = Math.abs(effectivePositionMs - pendingSeekMs);
+            
+            JWLog.d(TAG, "onSeeked: Android " + androidVersion + " handoff attempt #" + autoHandoffSeekAttempts 
+                + " (effective=" + effectivePositionMs + "ms, expected=" + pendingSeekMs + "ms, delta=" + deltaFromTarget + "ms)");
+            JWLog.d(TAG, "onSeeked: Counter-based correction active - tracking seeks to validate final position");
+            
+            if (deltaFromTarget > 2000) {
+                if (autoHandoffSeekAttempts == 1) {
+                    // First onSeeked with wrong position - allow it, wait for second
+                    JWLog.d(TAG, "onSeeked: First attempt wrong, waiting for second onSeeked");
+                    return; // Keep pendingSeekMs guard active
+                } else {
+                    // Second (or later) onSeeked still wrong - correct now
+                    JWLog.d(TAG, "onSeeked: Second attempt still wrong (" + effectivePositionMs + "ms), correcting to " + pendingSeekMs + "ms");
+                    try {
+                        if (jwPlayer != null) {
+                            double correctPositionSeconds = pendingSeekMs / 1000.0;
+                            jwPlayer.seek(correctPositionSeconds);
+                            pendingSeekApplied = true;
+                            lastRequestedSeekPositionMs = pendingSeekMs;
+                            JWLog.d(TAG, "onSeeked: Correction seek initiated to " + correctPositionSeconds + "s");
+                        }
+                    } catch (Exception seekEx) {
+                        JWLog.w(TAG, "onSeeked: Failed to correct seek position: " + seekEx.getMessage());
+                    }
+                    return; // Don't store the wrong position
+                }
+            } else {
+                // Position is correct - use validated position and clear immediately
+                JWLog.d(TAG, "onSeeked: Position correct on attempt #" + autoHandoffSeekAttempts + ", using validated position and clearing pendingSeekMs");
+                effectivePositionMs = pendingSeekMs; // Use the validated stored position
+                pendingSeekMs = null;
+                pendingSeekApplied = true;
+                // Continue to normal playback state handling with corrected position
+            }
+        }
 
         if (jwPlayer != null) {
             PlayerState stateAfterSeek;
@@ -1133,7 +1404,35 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         maybeClearResetFlagForSeek(effectivePositionMs);
-        storeSeekPosition(effectivePositionMs);
+
+        // Clear pendingSeekMs if we've reached the target position (within 2 seconds tolerance)
+        if (pendingSeekApplied && pendingSeekMs != null) {
+            long delta = Math.abs(effectivePositionMs - pendingSeekMs);
+            if (delta < 2000) {
+                JWLog.d(TAG, "onSeeked: target position reached (" + effectivePositionMs + " ~= " + pendingSeekMs + "), clearing pendingSeekMs");
+                pendingSeekMs = null;
+            } else {
+                JWLog.d(TAG, "onSeeked: position mismatch, keeping pendingSeekMs guard (effective=" + effectivePositionMs + ", expected=" + pendingSeekMs + ", delta=" + delta + "ms)");
+            }
+        }
+
+        // Avoid accidentally wiping a valid resume position with 0 during
+        // handoff/guarded seeks. Only persist 0 when we are truly at start
+        // without any pending resume semantics.
+        if (effectivePositionMs <= 0
+            && (pendingSeekMs != null && pendingSeekMs > 0
+                || resetToStartAfterSeekCompletion
+                || completionScheduledFromSeek
+                || isPlayingFromAndroidAuto)) {
+            JWLog.d(TAG, "onSeeked: skipping storeSeekPosition(0) to preserve resume state " +
+                "(pendingSeekMs=" + pendingSeekMs +
+                ", resetToStartAfterSeekCompletion=" + resetToStartAfterSeekCompletion +
+                ", completionScheduledFromSeek=" + completionScheduledFromSeek +
+                ", isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")");
+        } else {
+            storeSeekPosition(effectivePositionMs);
+        }
+
         maybeCompleteFromSeek(effectivePositionMs);
 
         lastSeekRequestedWhilePaused = false;
@@ -1142,7 +1441,30 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     public void onPause(PauseEvent pauseEvent) {
-        JWLog.d(TAG, "onPause()", true);
+        JWLog.d(TAG, "onPause(isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")", true);
+        
+        // Check if handoff flag is stale (been set for too long)
+        if (isPlayingFromAndroidAuto && androidAutoHandoffStartTime > 0) {
+            long handoffDuration = System.currentTimeMillis() - androidAutoHandoffStartTime;
+            if (handoffDuration > ANDROID_AUTO_HANDOFF_TIMEOUT_MS) {
+                JWLog.d(TAG, "onPause: Handoff flag timeout (" + handoffDuration + "ms) - clearing and allowing pause");
+                resetAndroidAutoFlag();
+            }
+        }
+        
+        // Skip pause during Android Auto handoff - keep playing
+        if (isPlayingFromAndroidAuto) {
+            JWLog.d(TAG, "onPause: Ignoring pause during Android Auto handoff, forcing play");
+            try {
+                if (jwPlayer != null) {
+                    jwPlayer.play();
+                }
+            } catch (Exception ex) {
+                JWLog.w(TAG, "onPause: Failed to resume play: " + ex.getMessage());
+            }
+            return;
+        }
+        
         this.updatePlayerState(PlayerState.PAUSED);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
     }
@@ -1165,6 +1487,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         captureDurationSnapshot();
         this.updatePlayerState(PlayerState.PLAYING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
+        
+        // Clear Android Auto handoff flag once playback successfully starts after handoff
+        // This ensures pause button works after handoff completes
+        if (isPlayingFromAndroidAuto && pendingSeekApplied) {
+            JWLog.d(TAG, "onPlay: Android Auto handoff completed successfully, clearing flag");
+            resetAndroidAutoFlag();
+        }
+        
         // Try to apply pending seek as soon as playback starts
         applyPendingSeekWhenReady(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
     }
@@ -1269,14 +1599,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private long queryResumeViaReflection(String mediaId) {
         JWLog.d(TAG, "queryResumeViaReflection(mediaId=" + mediaId + ")");
-        if (mediaId == null || mediaId.isEmpty()) return 0L;
+        if (mediaId == null || mediaId.isEmpty()) {
+            JWLog.d(TAG, "queryResumeViaReflection: mediaId is null or empty, returning 0");
+            return 0L;
+        }
         try {
             Class<?> c = Class.forName("com.mediabrowser.MediaItemsResumeProvider");
             java.lang.reflect.Method m = c.getMethod("getResumePositionMs", String.class);
             Object out = m.invoke(null, mediaId);
-            return (out instanceof Number) ? ((Number) out).longValue() : 0L;
+            long result = (out instanceof Number) ? ((Number) out).longValue() : 0L;
+            JWLog.d(TAG, "queryResumeViaReflection: Retrieved position " + result + "ms for mediaId=" + mediaId + " via MediaItemsResumeProvider.getResumePositionMs()");
+            return result;
         } catch (Throwable t) {
-            JWLog.d(TAG, "Resume provider unavailable: " + t.getMessage());
+            JWLog.w(TAG, "queryResumeViaReflection: Resume provider unavailable - " + t.getMessage());
             return 0L;
         }
     }
@@ -1291,9 +1626,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         PlayerState st = jwPlayer.getState();
 
         if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
+            // Seed lastRequestedSeekPositionMs BEFORE calling performSeekTo so onSeeked has a valid fallback
+            lastRequestedSeekPositionMs = pendingSeekMs;
+            suppressNextSeekCallback = true;
             performSeekTo(pendingSeekMs);
-            pendingSeekApplied = true;
-            pendingSeekMs = null;
+            // DON'T set pendingSeekApplied here - let onSeeked's two-phase defense confirm position first!
+            // Phase 1 blocks spurious 0 seeks, Phase 2 counter logic validates other positions
+            // DON'T clear pendingSeekMs yet - keep it until onSeeked completes to guard against spurious seek-to-0
+            JWLog.d(TAG, "Pending seek initiated with lastRequestedSeekPositionMs=" + lastRequestedSeekPositionMs + ", counter logic will validate in onSeeked");
+            
+            // If this is Android Auto handoff, force play after seeking
+            if (isPlayingFromAndroidAuto && jwPlayer != null) {
+                JWLog.d(TAG, "Android Auto handoff detected - forcing play after pending seek");
+                try {
+                    jwPlayer.play();
+                } catch (Exception ex) {
+                    JWLog.w(TAG, "Failed to force play after Android Auto handoff: " + ex.getMessage());
+                }
+            }
         } else {
             JWLog.d(TAG, "Pending seek not applied; player not ready yet. Duration: " + duration + ", State: " + st);
         }
@@ -1323,7 +1673,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     private void performPause() {
-        JWLog.d(TAG, "performPause()", true);
+        JWLog.d(TAG, "performPause(isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")", true);
+        
+        // Check if handoff flag is stale (been set for too long)
+        if (isPlayingFromAndroidAuto && androidAutoHandoffStartTime > 0) {
+            long handoffDuration = System.currentTimeMillis() - androidAutoHandoffStartTime;
+            if (handoffDuration > ANDROID_AUTO_HANDOFF_TIMEOUT_MS) {
+                JWLog.d(TAG, "performPause: Handoff flag timeout (" + handoffDuration + "ms) - clearing and allowing pause");
+                resetAndroidAutoFlag();
+            }
+        }
+        
+        // Skip pause during Android Auto handoff
+        if (isPlayingFromAndroidAuto) {
+            JWLog.d(TAG, "performPause: Ignoring during Android Auto handoff");
+            return;
+        }
+        
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onPause();
@@ -1586,8 +1952,10 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         initServiceMediaApi();
         
-        // Mark that this is from Android Auto
+        // Mark that this is from Android Auto and record the time
         isPlayingFromAndroidAuto = true;
+        androidAutoHandoffStartTime = System.currentTimeMillis();
+        JWLog.d(TAG, "performMediaItemSelection: Set Android Auto handoff flag at " + androidAutoHandoffStartTime);
 
         try {
             // Determine if UI is currently in Android PiP (Picture-in-Picture) mode
@@ -1659,10 +2027,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "handlePlayFromMediaId(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ") activeInstance=" + (activeInstance != null));
         pendingSeekMs = extractResumePosition(extras);
         pendingSeekApplied = false;
+        autoHandoffSeekAttempts = 0; // Reset counter for new handoff
         
         externalMediaId = mediaId;
 
-        JWLog.d(TAG, "Storing externalMediaId=" + externalMediaId + ", pendingSeekMs=" + pendingSeekMs + " in static handler");
+        JWLog.d(TAG, "handlePlayFromMediaId: Static state initialized - externalMediaId=" + externalMediaId + ", pendingSeekMs=" + pendingSeekMs + "ms (extracted from extras), autoHandoffSeekAttempts=0, pendingSeekApplied=false");
 
         if (activeInstance != null) {
             try {

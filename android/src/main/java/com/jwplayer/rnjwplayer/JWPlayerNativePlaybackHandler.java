@@ -517,6 +517,15 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     if (extIdObj instanceof String) {
                         String externalMediaId = (String) extIdObj;
                         if (externalMediaId != null && !externalMediaId.isEmpty()) {
+                            // CRITICAL: Also update static cache in RNJWMediaSessionHelper
+                            // This ensures the UI player gets the correct position on handoff
+                            try {
+                                RNJWMediaSessionHelper.cachePositionForHandoff(externalMediaId, lastMs);
+                                JWLog.d(TAG, "Cached position in RNJWMediaSessionHelper: " + lastMs + "ms for mediaId=" + externalMediaId);
+                            } catch (Exception cacheEx) {
+                                JWLog.w(TAG, "Failed to cache position in RNJWMediaSessionHelper: " + cacheEx.getMessage());
+                            }
+                            
                             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
                             java.lang.reflect.Method reportSeek = mediaBrowserServiceClass.getMethod("updateSeekPosition", String.class, long.class);
                             reportSeek.invoke(null, externalMediaId, lastMs);
