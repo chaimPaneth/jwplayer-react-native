@@ -174,13 +174,21 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         @Override
         public void onSkipToNext() {
             JWLog.d(TAG, "mediaSessionCallback.onSkipToNext()");
-            performSkipToNext();
+            try {
+                performSkipToNext();
+            } catch (Exception e) {
+                JWLog.e(TAG, "mediaSessionCallback.onSkipToNext() - ERROR: " + e.getMessage(), e);
+            }
         }
 
         @Override
         public void onSkipToPrevious() {
             JWLog.d(TAG, "mediaSessionCallback.onSkipToPrevious()");
-            performSkipToPrevious();
+            try {
+                performSkipToPrevious();
+            } catch (Exception e) {
+                JWLog.e(TAG, "mediaSessionCallback.onSkipToPrevious() - ERROR: " + e.getMessage(), e);
+            }
         }
 
         @Override
@@ -537,8 +545,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     // Audio focus management
-    private boolean requestAudioFocusForPlayback(Context ctx) {
-        JWLog.d(TAG, "requestAudioFocusForPlayback(ctx=" + JWLog.id(ctx) + ", isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ", currentlyHasFocus=" + currentlyHasFocus + ")");
+    private boolean requestAudioFocusForPlayback() {
+        JWLog.d(TAG, "requestAudioFocusForPlayback(context=" + JWLog.id(context) + ", isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ", currentlyHasFocus=" + currentlyHasFocus + ")");
         // If this is from Android Auto, let Android Auto handle audio focus
         if (isPlayingFromAndroidAuto) {
             currentlyHasFocus = true; // Assume we have focus
@@ -562,7 +570,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         lastFocusRequestTime = System.currentTimeMillis();
         
         if (audioManager == null) {
-            audioManager = (android.media.AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            audioManager = (android.media.AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
         }
         if (audioManager == null) {
             JWLog.w(TAG, "AudioManager unavailable - cannot request focus");
@@ -1108,7 +1116,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         // Try to request audio focus when a new item is loaded
-        requestAudioFocusForPlayback(context);
+        requestAudioFocusForPlayback();
     }
 
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
@@ -1505,6 +1513,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         completionScheduledFromSeek = false;
         resetAndroidAutoFlag();
 
+        // Notify React Native about playlist completion via MediaBrowserService
+        // This allows RN to decide whether to auto-advance to next track
+        try {
+            JWLog.d(TAG, "onPlaylistComplete: notifying React Native via MediaBrowserService with mediaId=" + externalMediaId);
+            Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+            java.lang.reflect.Method sendCompleteMethod = mediaBrowserServiceClass.getMethod("sendPlaylistCompleteToReactNative", String.class);
+            sendCompleteMethod.invoke(null, externalMediaId);
+            JWLog.d(TAG, "onPlaylistComplete: React Native notified successfully");
+        } catch (Exception e) {
+            JWLog.w(TAG, "onPlaylistComplete: Could not notify MediaBrowserService: " + e.getMessage());
+        }
+
         if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null) return;
 
         try {
@@ -1529,55 +1549,59 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
             stateBuilder.builder.setActions(actions);
 
-            // Get the total duration for positioning at the end
-            long totalDurationMs = 0;
-            long positionMs = 0;
-            
             try {
-                if (this.jwPlayer != null && this.jwPlayer.getPlaylistItem() != null && this.jwPlayer.getPlaylistItem().getDuration() != null) {
-                    totalDurationMs = (long)(this.jwPlayer.getPlaylistItem().getDuration() * 1000);
-                    positionMs = totalDurationMs; // Position at the end
+                // Get the total duration for positioning at the end
+                long totalDurationMs = 0;
+                long positionMs = 0;
+
+                try {
+                    if (this.jwPlayer != null && this.jwPlayer.getPlaylistItem() != null && this.jwPlayer.getPlaylistItem().getDuration() != null) {
+                        totalDurationMs = (long)(this.jwPlayer.getPlaylistItem().getDuration() * 1000);
+                        positionMs = totalDurationMs; // Position at the end
+                    } else {
+                        // Fallback: try to get current position
+                        positionMs = this.jwPlayer != null ? (long)(this.jwPlayer.getPosition() * 1000) : 0L;
+                    }
+                } catch (Exception ex) {
+                    JWLog.w(TAG, "Could not get duration/position for completion: " + ex.getMessage());
+                    positionMs = 0;
+                }
+
+                long durationCandidate = totalDurationMs > 0 ? totalDurationMs : positionMs;
+                long resumePositionMs = 0L;
+                if (triggeredBySeekCompletion) {
+                    resetToStartAfterSeekCompletion = true;
+                    if (durationCandidate > 0) {
+                        positionMs = durationCandidate;
+                    }
                 } else {
-                    // Fallback: try to get current position
-                    positionMs = this.jwPlayer != null ? (long)(this.jwPlayer.getPosition() * 1000) : 0L;
+                    resetToStartAfterSeekCompletion = false;
+                    if (durationCandidate > 0) {
+                        positionMs = durationCandidate;
+                    }
                 }
+                storeSeekPosition(resumePositionMs);
+
+                // Set to PAUSED state with normal playback rate so progress bar stays interactive
+                // Position at the end, but with rate 1.0f so seeking works
+                stateBuilder.builder.setState(PlaybackStateCompat.STATE_PAUSED, positionMs, 1.0f);
+
+                this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(new PlaybackStateCompatWrapper(stateBuilder.builder.build()).playbackStateCompat);
+
+                // Keep session active so UI remains available
+                this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
+
+                // Explicitly show notification (like the a(PlayerState) method does)
+                this.rnjwNotificationHelper.showNotification(this.context, this.mediaSessionStateProvider, this.serviceMediaApi);
+
+                try {
+                    updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
+                } catch (Exception ignore) {}
             } catch (Exception ex) {
-                JWLog.w(TAG, "Could not get duration/position for completion: " + ex.getMessage());
-                positionMs = 0;
+                JWLog.w(TAG, "Failed to set completion state: " + ex.getMessage());
             }
-
-            long durationCandidate = totalDurationMs > 0 ? totalDurationMs : positionMs;
-            long resumePositionMs = 0L;
-            if (triggeredBySeekCompletion) {
-                resetToStartAfterSeekCompletion = true;
-                if (durationCandidate > 0) {
-                    positionMs = durationCandidate;
-                }
-            } else {
-                resetToStartAfterSeekCompletion = false;
-                if (durationCandidate > 0) {
-                    positionMs = durationCandidate;
-                }
-            }
-            storeSeekPosition(resumePositionMs);
-
-            // Set to PAUSED state with normal playback rate so progress bar stays interactive
-            // Position at the end, but with rate 1.0f so seeking works
-            stateBuilder.builder.setState(PlaybackStateCompat.STATE_PAUSED, positionMs, 1.0f);
-
-            this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(new PlaybackStateCompatWrapper(stateBuilder.builder.build()).playbackStateCompat);
-
-            // Keep session active so UI remains available
-            this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
-
-            // Explicitly show notification (like the a(PlayerState) method does)
-            this.rnjwNotificationHelper.showNotification(this.context, this.mediaSessionStateProvider, this.serviceMediaApi);
-
-            try {
-                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
-            } catch (Exception ignore) {}
         } catch (Exception ex) {
-            JWLog.w(TAG, "Failed to set completion state: " + ex.getMessage());
+            JWLog.w(TAG, "Failed in onPlaylistComplete: " + ex.getMessage());
         }
     }
 
@@ -1653,7 +1677,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "performPlay()");
         suppressNextOnPlayAfterSeekCompletion = false;
         resetPlaybackToStartIfNeeded("performPlay");
-        boolean focusGranted = requestAudioFocusForPlayback(context);
+        boolean focusGranted = requestAudioFocusForPlayback();
         if (!focusGranted) {
             JWLog.w(TAG, "Audio focus not granted - proceeding anyway");
         }
@@ -1728,6 +1752,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToNext() {
         JWLog.d(TAG, "performSkipToNext()");
+        
+        // Notify React Native about skip to next via MediaBrowserService (using reflection)
+        // This allows RN to fetch the next post from series and load it
+        try {
+            Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+            java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod("sendSkipToNextEventToReactNative", String.class);
+            sendSkipNextMethod.invoke(null, externalMediaId);
+        } catch (Exception e) {
+            JWLog.w(TAG, "performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
+        }
+        
+        // Also try JWPlayer's internal skip (for playlists within a single post)
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onSkipToNext();
@@ -1739,6 +1775,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToPrevious() {
         JWLog.d(TAG, "performSkipToPrevious()");
+        
+        // Notify React Native about skip to previous via MediaBrowserService (using reflection)
+        // This allows RN to fetch the previous post from series and load it
+        try {
+            Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+            java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod("sendSkipToPreviousEventToReactNative", String.class);
+            sendSkipPrevMethod.invoke(null, externalMediaId);
+        } catch (Exception e) {
+            JWLog.w(TAG, "performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
+        }
+        
+        // Also try JWPlayer's internal skip (for playlists within a single post)
         try {
             if (serviceMediaApi != null) {
                 serviceMediaApi.onSkipToPrevious();
@@ -1804,7 +1852,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         if (shouldRequestFocus) {
-            boolean focusGranted = requestAudioFocusForPlayback(context);
+            boolean focusGranted = requestAudioFocusForPlayback();
             if (!focusGranted) {
                 JWLog.w(TAG, "Audio focus not granted for seek during playback");
             }
@@ -1941,6 +1989,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      */
     private void performMediaItemSelection(String mediaId, Bundle extras) {
         JWLog.d(TAG, "performMediaItemSelection(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ")");
+
+        requestAudioFocusForPlayback();
+
         captureAndStoreSeekPosition();
 
         try {

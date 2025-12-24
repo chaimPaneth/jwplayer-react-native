@@ -1100,6 +1100,15 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     private boolean requestAudioFocus() {
         JWLog.d(TAG, "📱 JAVA: requestAudioFocus called - current hasAudioFocus: " + hasAudioFocus);
+
+        if (audioManager == null) {
+            audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+        }   
+
+        if (audioManager == null) {
+            JWLog.w(TAG, "📱 JAVA: AudioManager is null, cannot request audio focus");
+            return false;
+        }
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (hasAudioFocus) {
@@ -1107,51 +1116,47 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 return true;
             }
 
-            if (audioManager != null) {
-                JWLog.d(TAG, "📱 JAVA: Requesting audio focus for API 26+");
-                
-                AudioAttributes playbackAttributes = new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build();
-                        
-                focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(playbackAttributes)
-                        .setAcceptsDelayedFocusGain(true)
-                        .setOnAudioFocusChangeListener(this)
-                        .build();
+            JWLog.d(TAG, "📱 JAVA: Requesting audio focus for API 26+");
+            
+            AudioAttributes playbackAttributes = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build();
+                    
+            focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(playbackAttributes)
+                    .setAcceptsDelayedFocusGain(true)
+                    .setOnAudioFocusChangeListener(this)
+                    .build();
 
-                int res = audioManager.requestAudioFocus(focusRequest);
-                synchronized (focusLock) {
-                    if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
-                        JWLog.w(TAG, "📱 JAVA: Audio focus request failed");
-                        playbackNowAuthorized = false;
-                        return false;
-                    } else if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                        JWLog.d(TAG, "📱 JAVA: Audio focus granted");
-                        playbackNowAuthorized = true;
-                        hasAudioFocus = true;
-                        return true;
-                    } else if (res == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
-                        JWLog.d(TAG, "📱 JAVA: Audio focus delayed");
-                        playbackDelayed = true;
-                        playbackNowAuthorized = false;
-                        return false;
-                    }
+            int res = audioManager.requestAudioFocus(focusRequest);
+            synchronized (focusLock) {
+                if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
+                    JWLog.w(TAG, "📱 JAVA: Audio focus request failed");
+                    playbackNowAuthorized = false;
+                    return false;
+                } else if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                    JWLog.d(TAG, "📱 JAVA: Audio focus granted");
+                    playbackNowAuthorized = true;
+                    hasAudioFocus = true;
+                    return true;
+                } else if (res == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
+                    JWLog.d(TAG, "📱 JAVA: Audio focus delayed");
+                    playbackDelayed = true;
+                    playbackNowAuthorized = false;
+                    return false;
                 }
             }
         } else {
             // For older Android versions, use deprecated API
             JWLog.d(TAG, "📱 JAVA: Requesting audio focus for API < 26");
-            if (audioManager != null) {
-                int res = audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
-                JWLog.d(TAG, "📱 JAVA: Audio focus request result: " + res);
-                if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                    hasAudioFocus = true;
-                    playbackNowAuthorized = true;
-                    JWLog.d(TAG, "📱 JAVA: Audio focus granted for older API");
-                    return true;
-                }
+            int res = audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+            JWLog.d(TAG, "📱 JAVA: Audio focus request result: " + res);
+            if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                hasAudioFocus = true;
+                playbackNowAuthorized = true;
+                JWLog.d(TAG, "📱 JAVA: Audio focus granted for older API");
+                return true;
             }
         }
         
