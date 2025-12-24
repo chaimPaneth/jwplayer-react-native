@@ -1062,7 +1062,13 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             }
             
             if (mediaSessionHelper != null) {
-                // RNJWMediaSessionHelper will clean up its own resources
+                JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Detaching old player from media session (lightweight)");
+                try {
+                    mediaSessionHelper.detachPlayerOnly();
+                    JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Media session helper detach completed");
+                } catch (Exception e) {
+                    JWLog.w(TAG, "🎵 JWPlayerNativePlaybackHandler: Error detaching media session helper: " + e.getMessage());
+                }
                 mediaSessionHelper = null;
             }
             

@@ -806,7 +806,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return hasPendingSeek; // || hasRecentManualSeek;
     }
 
-    final void cleanup() {
+    public final void cleanup() {
         JWLog.d(TAG, "cleanup()");
         if (this.mediaSessionStateProvider != null) {
             // Clear active instance if this is the active one
@@ -816,6 +816,34 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         softCleanup();
+    }
+
+    /**
+     * Lightweight cleanup for media switching - only detaches the old player
+     * without destroying MediaSession state. Keeps AA UI visible during transitions.
+     */
+    public final void detachPlayerOnly() {
+        JWLog.d(TAG, "detachPlayerOnly() - lightweight cleanup for media switch");
+        
+        // Only remove player listeners - don't touch MediaSession, notification, or audio focus
+        if (this.jwPlayer != null) {
+            try {
+                this.jwPlayer.removeListeners(this,
+                    new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, 
+                                    EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, 
+                                    EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, 
+                                    EventType.SEEK, EventType.SEEKED});
+                JWLog.d(TAG, "detachPlayerOnly() - removed player listeners");
+            } catch (Exception e) {
+                JWLog.w(TAG, "detachPlayerOnly() - error removing listeners: " + e.getMessage());
+            }
+            this.jwPlayer = null;
+        }
+        
+        // Clear service media API reference (new player will create new one)
+        if (this.serviceMediaApi != null) {
+            this.serviceMediaApi = null;
+        }
     }
 
     private final void softCleanup() {
