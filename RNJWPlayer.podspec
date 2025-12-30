@@ -9,10 +9,10 @@ Pod::Spec.new do |s|
   s.license      = package['license']
   s.authors      = package['author']
   s.homepage     = package['homepage']
-  s.platform     = :ios, "14.0"
+  s.platform     = :ios, "15.0"
   s.source       = { :git => "https://github.com/jwplayer/jwplayer-react-native.git", :tag => "v#{s.version}" }
   s.source_files  = "ios/RNJWPlayer/*.{h,m,swift}"
-  s.dependency   'JWPlayerKit', '4.21.2'
+  s.dependency   'JWPlayerKit', '4.25.0'
   s.dependency   'React-Core'
   s.static_framework = true
   s.info_plist = {
@@ -28,7 +28,7 @@ Pod::Spec.new do |s|
 
   if defined?($RNJWPlayerUseGoogleCast)
     Pod::UI.puts "RNJWPlayer: enable Google Cast"
-    s.dependency 'google-cast-sdk', '4.8.1'
+    s.dependency 'google-cast-sdk', '4.8.3'
     s.pod_target_xcconfig = {
       'OTHER_SWIFT_FLAGS' => '$(inherited) -D USE_GOOGLE_CAST'
     }

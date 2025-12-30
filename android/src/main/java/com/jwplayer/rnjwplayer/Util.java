@@ -17,6 +17,7 @@ import com.jwplayer.pub.api.media.captions.CaptionType;
 import com.jwplayer.pub.api.media.playlists.MediaSource;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
@@ -54,6 +55,14 @@ public class Util {
                     out.close();
                 }
             }
+            
+            // Check response code before reading
+            int responseCode = urlConnection.getResponseCode();
+            
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw new IOException("HTTP POST failed with code " + responseCode);
+            }
+            
             // Read and return the response body.
             InputStream inputStream = urlConnection.getInputStream();
             try {
@@ -61,6 +70,9 @@ public class Util {
             } finally {
                 inputStream.close();
             }
+        } catch (IOException e) {
+            Log.e("Util", "❌ [HTTP POST] Exception: " + e.getMessage(), e);
+            throw e;
         } finally {
             if (urlConnection != null) {
                 urlConnection.disconnect();
@@ -139,6 +151,15 @@ public class Util {
             itemBuilder.description(desc);
         }
 
+        if (playlistItem.hasKey("userInfo")) {
+            try {
+                JSONObject info = MapUtil.toJSONObject(playlistItem.getMap("userInfo"));
+                itemBuilder.userInfo(info);
+            } catch (JSONException e) {
+                Log.e("userInfo", "Error parsing `userInfo` from your playlist. Message: " + e.getLocalizedMessage());
+            }
+        }
+
         if (playlistItem.hasKey("image")) {
             String image = playlistItem.getString("image");
             itemBuilder.image(image);
@@ -184,7 +205,8 @@ public class Util {
         }
 
         if (playlistItem.hasKey("authUrl")) {
-            itemBuilder.mediaDrmCallback(new WidevineCallback(playlistItem.getString("authUrl")));
+            String authUrl = playlistItem.getString("authUrl");
+            itemBuilder.mediaDrmCallback(new WidevineCallback(authUrl));
         }
 
         if (playlistItem.hasKey("adSchedule")) {

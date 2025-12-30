@@ -2,235 +2,191 @@ declare module "@jwplayer/jwplayer-react-native" {
   import React from "react";
   import { ViewStyle } from "react-native";
 
+  // ============================================================================
+  // UNIFIED CONFIGURATION TYPES
+  // ============================================================================
+  // For detailed type definitions, see types/ directory
+  // Types are also available by importing from '@jwplayer/jwplayer-react-native/types'
+  
+  // Main configuration interface - see types/unified-config.d.ts for full documentation
+  export interface JWPlayerConfig {
+    license: string;
+    file?: string;
+    sources?: any[];
+    playlist?: any[] | string;
+    playlistIndex?: number;
+    autostart?: boolean;
+    mute?: boolean;
+    repeat?: boolean;
+    preload?: 'auto' | 'none' | boolean;
+    stretching?: 'uniform' | 'fill' | 'exactfit' | 'none';
+    playbackRates?: number[];
+    playbackRateControls?: boolean;
+    bitrateUpperBound?: number;
+    advertising?: any;
+    related?: any;
+    pid?: string;
+    playerId?: string;
+    styling?: any;
+    uiConfig?: any;
+    backgroundAudioEnabled?: boolean;
+    category?: string;
+    categoryOptions?: string[];
+    mode?: string;
+    forceLegacyConfig?: boolean;
+    playlistItemCallbackEnabled?: boolean;
+    playerInModal?: boolean;
+    fullScreenOnLandscape?: boolean;
+    landscapeOnFullScreen?: boolean;
+    portraitOnExitFullScreen?: boolean;
+    exitFullScreenOnPortrait?: boolean;
+    enableLockScreenControls?: boolean;
+    pipEnabled?: boolean;
+    useTextureView?: boolean;
+    allowCrossProtocolRedirectsSupport?: boolean;
+    displaytitle?: boolean;
+    displayTitle?: boolean;
+    displaydescription?: boolean;
+    displayDescription?: boolean;
+    nextupoffset?: string | number;
+    thumbnailPreview?: number;
+    logoView?: any;
+    title?: string;
+    description?: string;
+    image?: string;
+    tracks?: any[];
+    starttime?: number;
+    mediaid?: string;
+    mediaId?: string;
+    [key: string]: any;
+  }
+  
+  // Main configuration type alias
+  export type Config = JWPlayerConfig;
+  
+  // Re-export common types with proper names
+  export type JWAdvertisingConfig = any;
+  export type JWPlaylistItem = any;
+  export type JWSource = any;
+  export type JWTrack = any;
+  export type JWImaDaiSettings = any;
+  export type JWImaSdkSettings = any;
+  export type JWAdBreak = any;
+  export type JWAdRules = any;
+  export type JWUiConfig = any;
+  export type JWLogoView = any;
+  export type JWRelatedConfig = any;
+  export type JWStyling = any;
+  export type ThumbnailPreview = 101 | 102 | 103;
+  export type Stretching = 'uniform' | 'fill' | 'exactfit' | 'none';
+
+  // ============================================================================
+  // BACKWARD COMPATIBILITY
+  // ============================================================================
+  
+  /**
+   * @deprecated Use JWPlayerConfig or Config instead
+   * Maintained for backward compatibility
+   */
   interface JwConfig {
     pid?: string;
     mute?: boolean;
     forceLegacyConfig?: boolean;
+    playlistItemCallbackEnabled?: boolean;
     useTextureView?: boolean;
     autostart?: boolean;
-    nextupoffset?: string | number; // String with % or number
+    nextupoffset?: string | number;
     repeat?: boolean;
-    allowCrossProtocolRedirectsSupport?: boolean; // maybe android only?
+    allowCrossProtocolRedirectsSupport?: boolean;
     displaytitle?: boolean;
     displaydescription?: boolean;
-    stretching?: JwStretching;
-    thumbnailPreview?: JwThumbnailPreview;
+    stretching?: string;
+    thumbnailPreview?: number;
     preload?: boolean;
-    playlist?: JwPlaylistItem[] | string;
-    sources?: JwSource[]; // Can be used in place of `playlist` to build a playlist, but not recommended (cannot be used for DRM)
-    file?: string; // Can be used in place of `playlist` to build a playlist, but not recommended (cannot be used for DRM)
+    playlist?: any[] | string;
+    sources?: any[];
+    file?: string;
     playlistIndex?: number;
-    related?: JwRelatedConfig;
-    uiConfig?: JwUiConfig;
-    logoView?: JwLogoView;
-    advertising?: JwAdvertisingConfig;
+    related?: any;
+    uiConfig?: any;
+    logoView?: any;
+    advertising?: any;
     playbackRates?: number[];
     playbackRateControls?: boolean;
-    // Non-Json Parsing props
     license: string;
     playerInModal?: boolean;
     fullScreenOnLandscape?: boolean;
     landscapeOnFullScreen?: boolean;
     portraitOnExitFullScreen?: boolean;
     exitFullScreenOnPortrait?: boolean;
+    enableLockScreenControls?: boolean;
+    pipEnabled?: boolean;
+    [key: string]: any;
   }
 
-  type JwThumbnailPreview = 101 | 102 | 103;
+  // ============================================================================
+  // TYPE ALIASES FOR BACKWARD COMPATIBILITY
+  // ============================================================================
 
-  type JwStretching = "uniform" | "fill" | "exactfit" | "none";
+  /**
+   * @deprecated Use Stretching from unified types
+   */
+  type JwStretching = Stretching;
 
-  type JwAdvertisingConfig = VmapAdvertisingConfig | VastAdvertisingConfig | ImaVmapAdvertisingConfig
-    | ImaAdvertisingConfig | ImaDaiAdvertisingConfig;
+  /**
+   * @deprecated Use ThumbnailPreview from unified types
+   */
+  type JwThumbnailPreview = ThumbnailPreview;
 
-  interface JwAdRules {
-    startOn?: number;
-    frequency?: number;
-    timeBetweenAds?: number;
-    startOnSeek?: JwStartOnSeek;
-  }
+  // Re-export advertising types with legacy names for backward compatibility
+  /**
+   * @deprecated Advertising types are now imported from unified types
+   * Use JWAdvertisingConfig instead
+   */
+  type VmapAdvertisingConfig = import('./types').VmapAdvertisingConfig;
+  type VastAdvertisingConfig = import('./types').VastAdvertisingConfig;
+  type ImaVmapAdvertisingConfig = import('./types').ImaAdvertisingConfig;
+  type ImaAdvertisingConfig = import('./types').ImaAdvertisingConfig;
+  type ImaDaiAdvertisingConfig = import('./types').ImaDaiAdvertisingConfig;
 
+  /**
+   * @deprecated Use JWAdRules from unified types
+   */
   type JwStartOnSeek = "pre" | "none";
-  interface VmapAdvertisingConfig {
-    cuetext?: string;
-    adpodmessage?: string;
-    vpaidcontrols?: boolean;
-    requestTimeout?: number;
-    creativeTimeout?: number;
-    conditionaladoptout?: boolean;
-    schedule: string; // Must bestring for VMAP
-    rules?: JwAdRules;
-    allowedOmidVendors?: string[];
-    omidSupport?: JwOmidSupport;
-    admessage?: string;
-    skipmessage?: string;
-    skiptext?: string;
-    skipoffset?: number;
-  }
-
-  interface VastAdvertisingConfig {
-    cuetext?: string;
-    adpodmessage?: string;
-    vpaidcontrols?: boolean;
-    requestTimeout?: number;
-    creativeTimeout?: number;
-    conditionaladoptout?: boolean;
-    schedule?: JwAdBreak[]; // Array of breaks or object of breaks
-    rules: JwAdRules;
-    allowedOmidVendors?: string[];
-    omidSupport?: JwOmidSupport; 
-    admessage?: string;
-    skipmessage?: string;
-    skiptext?: string;
-    skipoffset?: number;
-  }
-
+  
+  /**
+   * @deprecated Use JWAdBreak from unified types
+   */
+  type JwAdType = "LINEAR" | "NONLINEAR";
+  
+  /**
+   * @deprecated Use OmidSupport from unified types
+   */
   type JwOmidSupport = "auto" | "enabled" | "disabled";
-
-  interface ImaVmapAdvertisingConfig {
-    imaSdkSettings?: JwImaSdkSettings;
-    tag?: string;
-  }
-
-  interface ImaAdvertisingConfig {
-    imaSdkSettings?: JwImaSdkSettings;
-    schedule?: JwAdBreak[] | JwAdBreak; // Array of breaks or object of breaks
-  }
-
-  interface ImaDaiAdvertisingConfig {
-    imaDaiSettings?: JwImaDaiSettings;
-    imaSdkSettings?: JwImaSdkSettings;
-  }
-
-  interface JwImaSdkSettings {
-    sessionId?: string;
-    ppid?: string;
-    autoPlayAdBreaks?: boolean;
-    language?: string;
-    maxRedirects?: number; //int
-    playerType?: string;
-    playerVersion?: string;
-    isDebugMode?: boolean;
-    doesRestrictToCustomPlayer?: boolean;
-  }
-
-  interface JwLogoView {
-    imageFile: string;
-    fades: boolean; // margin required for fade on Android
-    margin?: number;
-    position?: JwLogoPosition;
-    webLink: string;
-  }
-
+  
+  /**
+   * @deprecated Use LogoPosition from unified types
+   */
   type JwLogoPosition = "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
 
-  interface JwUiConfig { // all default to false. When using this, it's specify all or they are assumed false
-    hasOverlay?: boolean;
-    hasControlbar?: boolean;
-    hasCenterControls?: boolean;
-    hasNextUp?: boolean;
-    hasSideSeek?: boolean;
-    hasLogoView?: boolean;
-    hasError?: boolean;
-    hasPlaylist?: boolean;
-    hasQualitySubMenu?: boolean;
-    hasCaptionsSubMenu?: boolean;
-    hasPlaybackRatesSubMenu?: boolean;
-    hasAudiotracksSubMenu?: boolean;
-    hasMenu?: boolean;
-    hasPlayerControlsContainer?: boolean;
-    hasCastingMenu?: boolean;
-    hasChapters?: boolean;
-    hasAds?: boolean;
-  }
-
-  interface JwRelatedConfig {
-    file?: string;
-    oncomplete?: JwRelatedOnComplete;
-    onclick?: JwOnRelatedClick;
-    // autoplaymessage: string; // deprecated
-    autoplaytimer: number;
-  }
-
-  interface JwPlaylistItem {
-    title?: string;
-    description?: string;
-    file?: string;
-    image?: string;
-    mediaid?: string;
-    feedid?: string;
-    recommendations?: string;
-    starttime?: number; // double -- default 0.0
-    duration: number; // int -- default 0
-    tracks?: JwTrack[];
-    sources?: JwSource[];
-    externalMetadata?: JwExternalMetadata[];
-    adschedule?: JwAdBreak[]; // array of schedules
-    schedule?: { [key: string]: JwAdBreak };
-    imaDaiSettings?: JwImaDaiSettings;
-    httpheaders?: { [key: string]: string };
-  }
-
-  interface JwImaDaiSettings {
-    videoID?: string;
-    cmsID?: string;
-    assetKey?: string;
-    apiKey?: string;
-    streamType?: string;
-    adTagParameters?: { [key: string]: string };
-  }
-
-  interface JwAdBreak {
-    ad?: string | string[];
-    offset?: string;
-    skipoffset?: number;
-    type?: JwAdType;
-    custParams?: { [key: string]: string };
-  }
-
-  type JwAdType = "LINEAR" | "NONLINEAR";
-
-  interface JwExternalMetadata {
-    startTime?: number; // double
-    endTime?: number; // double
-    id: number; // int
-  }
-
-  interface JwSource {
-    drm?: JwDrm;
-    file?: string;
-    label?: string;
-    default?: string;
-    type?: string;
-    httpheaders?: { [key: string]: string };
-  }
-
-  interface JwDrm {
-    widevine?: JwWidevine;
-    fairplay?: JwFairplay;
-  }
-
-  interface JwFairplay {
-    processSpcUrl?: string;
-    certificateUrl?: string;
-  }
-
-  interface JwWidevine {
-    url?: string;
-    keySetId?: string;
-  }
-
-  interface JwTrack {
-    id?: string;
-    file?: string;
-    kind: TrackKind;
-    label?: string;
-    default?: boolean;
-  }
-
+  // Re-export playlist and media types for backward compatibility
+  /**
+   * @deprecated These types are now imported from unified types
+   * Direct usage is discouraged - import from './types' instead
+   */
   type JwRelatedOnComplete = "hide" | "show" | "none" | "autoplay";
-
   type JwOnRelatedClick = "play" | "link";
 
+  // ============================================================================
+  // LEGACY TYPE DEFINITIONS
+  // ============================================================================
+  // The following types are maintained for backward compatibility with existing code.
+  // New code should use the unified types imported from './types' above.
+  // These legacy definitions may be removed in a future major version.
+  
+  /**
+   * @deprecated Use types from './types' instead
+   */
   interface AudioTrack {
     autoSelect: boolean;
     defaultTrack: boolean;
@@ -343,6 +299,12 @@ declare module "@jwplayer/jwplayer-react-native" {
     recommendations?: string;
     startTime?: number;
     autostart?: boolean;
+    /**
+     * Data to be passed to Chromecast receiver (optional and typically used for DRM implementations)
+     * 
+     * Only made available in legacy objects as there is no way to pass this otherwise
+     */
+    userInfo?: { [key: string]: any };
   }
   type RelatedOnClicks = "play" | "link";
   type RelatedOnCompletes = "show" | "hide" | "autoplay";
@@ -367,11 +329,15 @@ declare module "@jwplayer/jwplayer-react-native" {
       buttons?: string;
       backgroundColor?: string;
       fontColor?: string;
-      timeslider?: { progress?: string; rail?: string; thumb?: string };
+      timeslider?: { 
+        thumb?: string;
+        rail?: string;
+        slider?: string;
+      };
     };
     font?: Font;
-    displayTitle?: boolean;
-    displayDescription?: boolean;
+    showTitle?: boolean;
+    showDesc?: boolean;
     captionsStyle?: {
       font?: Font;
       fontColor?: string;
@@ -379,7 +345,7 @@ declare module "@jwplayer/jwplayer-react-native" {
       highlightColor?: string;
       edgeStyle?: EdgeStyles;
     };
-    menuStyle: {
+    menuStyle?: {
       font?: Font;
       fontColor?: string;
       backgroundColor?: string;
@@ -438,7 +404,10 @@ declare module "@jwplayer/jwplayer-react-native" {
     | "settings"
     | "languages"
     | "fullscreen";
-  interface Config {
+  /**
+   * @deprecated Legacy iOS config interface - use JWPlayerConfig instead
+   */
+  interface LegacyIOSConfig {
     license: string;
     advertising?: Advertising;
     autostart?: boolean;
@@ -466,8 +435,12 @@ declare module "@jwplayer/jwplayer-react-native" {
     fairplayCertUrl?: string;
     contentUUID?: string;
     viewOnly?: boolean;
-    enableLockScreenControls: boolean;
-    pipEnabled: boolean;
+    enableLockScreenControls?: boolean;
+    pipEnabled?: boolean;
+    offlineMessage?: string;
+    offlineImage?: string;
+    forceFullScreenOnLandscape?: boolean;
+    forceLandscapeOnFullScreen?: boolean;
   }
   interface BaseEvent<T> {
     nativeEvent: T;
@@ -535,7 +508,7 @@ declare module "@jwplayer/jwplayer-react-native" {
   type NativeError = (event: BaseEvent<PlayerErrorEventProps> | BaseEvent<PlayerSetupErrorProps> | BaseEvent<PlayerErrorProps>) => void;
   type NativeWarning = (event: BaseEvent<PlayerWarningEventProps>) => void;
   interface PropsType {
-    config: Config | JwConfig;
+    config: JWPlayerConfig | JwConfig | LegacyIOSConfig;
     style?: ViewStyle;
     controls?: boolean;
     forceLegacyConfig?: boolean;
@@ -570,9 +543,57 @@ declare module "@jwplayer/jwplayer-react-native" {
     onCaptionsList?: (event: BaseEvent<CaptionsListEventProps>) => void;
     onAudioTracks?: () => void;
     shouldComponentUpdate?: (nextProps: any, nextState: any) => boolean;
+    onBeforeNextPlaylistItem?: (event: BaseEvent<PlaylistItemEventProps>) => void;
   }
 
+  export const JWPlayerAdEvents: {
+    /// This event is reported when the ad break has come to an end.
+    JWAdEventTypeAdBreakEnd: 0;
+    /// This event is reported when the ad break has begun.
+    JWAdEventTypeAdBreakStart: 1;
+    /// This event is reported when the user taps the ad.
+    JWAdEventTypeClicked: 2;
+    /// This event is reported when the ad is done playing.
+    JWAdEventTypeComplete: 3;
+    /// This event is used to report the ad impression, supplying additional detailed information about the ad.
+    JWAdEventTypeImpression: 4;
+    /// This event reports meta data information associated with the ad.
+    JWAdEventTypeMeta: 5;
+    /// The event is reported when the ad pauses.
+    JWAdEventTypePause: 6;
+    /// This event is reported when the ad begins playing, even in the middle of the stream after it was paused.
+    JWAdEventTypePlay: 7;
+    /// The event reports data about the ad request, when the ad is about to be loaded.
+    JWAdEventTypeRequest: 8;
+    /// This event reports the schedule of ads across the currently playing content.
+    JWAdEventTypeSchedule: 9;
+    /// This event is reported when the user skips the ad.
+    JWAdEventTypeSkipped: 10;
+    /// This event is reported when the ad begins.
+    JWAdEventTypeStarted: 11;
+    /// This event relays information about ad companions.
+    JWAdEventTypeCompanion: 12;
+  };
+
+  export const JWPlayerState: {
+    JWPlayerStateUnknown?: number;
+    JWPlayerStateIdle: number;
+    JWPlayerStateBuffering: number;
+    JWPlayerStatePlaying: number;
+    JWPlayerStatePaused: number;
+    JWPlayerStateComplete: number;
+    JWPlayerStateError: number | null;
+  };
+
+  export const JWPlayerAdClients: {
+    JWAdClientJWPlayer: 0;
+    JWAdClientGoogleIMA: 1;
+    JWAdClientGoogleIMADAI: 2;
+    JWAdClientUnknown: 3;
+  };
+
   export default class JWPlayer extends React.Component<PropsType> {
+    quite(): void;
     pause(): void;
     play(): void;
     stop(): void;
@@ -586,9 +607,21 @@ declare module "@jwplayer/jwplayer-react-native" {
     setControls(show: boolean): void;
     setLockScreenControls(show: boolean): void;
     seekTo(time: number): void;
-    loadPlaylist(playlistItems: PlaylistItem[] | JwPlaylistItem[] | string): void;
+    changePlaylist(fileUrl: string): void;
+    /**
+     * Side load playlist items into an already setup player
+     * @param playlistItems `PlaylistItem` or `JWPlaylistItem`
+     */
+    loadPlaylist(playlistItems: PlaylistItem[] | JWPlaylistItem[]): void;
+    /**
+     * Side load playlist via URL into an already setup player
+     * @param playlistUrl URL for playlist to load (format for response: json)
+     */
+    loadPlaylistWithUrl(playlistUrl: string): void;
     setFullscreen(fullScreen: boolean): void;
-    position(): Promise<number>;
+    time(): Promise<number | null>;
+    position(): Promise<number | null>;
+    togglePIP(): void;
     setUpCastController(): void;
     presentCastDialog(): void;
     connectedDevice(): Promise<CastingDevice | null>;
@@ -601,5 +634,70 @@ declare module "@jwplayer/jwplayer-react-native" {
     setCurrentCaptions(index: number): void;
     getCurrentCaptions(): Promise<number | null>; 
     setVisibility(visibility: boolean, controls: JWControlType[]): void;
+    /**
+     * Reconfigures or recreates the player with a new configuration.
+     * 
+     * IMPORTANT: This method should only be called after the player has been properly
+     * initialized and is ready (i.e., after onPlayerReady has fired). Calling this
+     * method before the player is ready may lead to undefined behavior.
+     * 
+     * **Platform Behavior:**
+     * 
+     * - **iOS**: Always performs a complete player recreation by:
+     *   1. Safely handling PiP state if active (waits for PiP to close)
+     *   2. Performing complete cleanup of the current player instance
+     *   3. Creating a new player instance with the provided config
+     * 
+     * - **Android**: Intelligently determines whether to recreate or reconfigure:
+     *   - ~90% of cases: Reconfigures existing player (preserves player instance, faster)
+     *   - ~10% of cases: Recreates player (only when necessary, e.g., license changes)
+     *   - Automatically handles state preservation (fullscreen, PiP)
+     * 
+     * **Use this method when you need to:**
+     * - Switch to a new playlist or video programmatically
+     * - Update player configuration dynamically (e.g., from user settings)
+     * - Handle content changes during PiP mode
+     * - Write cross-platform code (same API works on both platforms)
+     * 
+     * **Do NOT use this method:**
+     * - Before the player is ready (wait for onPlayerReady)
+     * - When the player is not properly initialized
+     * 
+     * **For simple playlist updates, consider using `loadPlaylist()` instead.**
+     * 
+     * @example
+     * ```typescript
+     * // Cross-platform example - works the same on both iOS and Android
+     * const switchVideo = () => {
+     *   playerRef.current?.recreatePlayerWithConfig({
+     *     license: 'YOUR_LICENSE_KEY',
+     *     playlist: [{
+     *       file: 'https://example.com/video.mp4',
+     *       title: 'New Video'
+     *     }],
+     *     autostart: true
+     *   });
+     * };
+     * 
+     * // Use inside onPlayerReady
+     * <JWPlayer
+     *   ref={playerRef}
+     *   config={initialConfig}
+     *   onPlayerReady={() => {
+     *     // Now safe to use recreatePlayerWithConfig
+     *     console.log('Player ready, can switch content if needed');
+     *   }}
+     * />
+     * ```
+     * 
+     * @param config The new configuration to apply
+     * @throws May throw if called before player is ready or with invalid config
+     */
+    recreatePlayerWithConfig(config: JWPlayerConfig | JwConfig | LegacyIOSConfig): void;
+    /**
+     * Only called inside `onBeforeNextPlaylistItem` callback, and once per callback
+     * @param playlistItem  `PlaylistItem` or  `JWPlaylistItem`
+     */
+    resolveNextPlaylistItem(playlistItem: PlaylistItem | JWPlaylistItem): void;
   }
 }

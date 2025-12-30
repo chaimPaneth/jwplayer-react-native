@@ -174,6 +174,12 @@ export default class JWPlayer extends Component {
 		config: PropTypes.shape({
 			license: PropTypes.string.isRequired,
 			forceLegacyConfig: PropTypes.bool,
+			/**
+			 * Only enable if you are prepared to implement `onBeforeNextPlaylistItem` on the JS side
+			 * And resolve the promise with `resolveNextPlaylistItem` inside the callback
+			 * Otherwise, the player will not proceed to the next item
+			 */
+			playlistItemCallbackEnabled: PropTypes.bool,
 			backgroundAudioEnabled: PropTypes.bool,
 			category: PropTypes.oneOf([
 				'Ambient',
@@ -227,6 +233,7 @@ export default class JWPlayer extends Component {
 					desc: PropTypes.string,
 					mediaId: PropTypes.string,
 					autostart: PropTypes.bool,
+					userInfo: PropTypes.object,
 					recommendations: PropTypes.string,
 					tracks: PropTypes.arrayOf(
 						PropTypes.shape({
@@ -374,6 +381,16 @@ export default class JWPlayer extends Component {
 		onCaptionsChanged: PropTypes.func,
 		onCaptionsList: PropTypes.func,
 		onAudioTracks: PropTypes.func,
+		/**
+		 * Callback that is fired when the player is about to play the next playlist item.
+		 * Indented to be paired with `playlistItemCallbackEnabled` prop
+		 * 
+		 * Android will only fire after index 0 (starting at index 1) 
+	 	 * 
+	     * iOS will fire all playlist items (including index 0)
+		 */
+		onBeforeNextPlaylistItem: PropTypes.func,
+		resolveNextPlaylistItem: PropTypes.func
 	};
 
 	constructor(props) {
@@ -517,6 +534,11 @@ export default class JWPlayer extends Component {
 	loadPlaylist(playlistItems) {
 		if (RNJWPlayerManager)
 			RNJWPlayerManager.loadPlaylist(this.getRNJWPlayerBridgeHandle(), playlistItems);
+	}
+
+	loadPlaylistWithUrl(playlistUrl) {
+		if (RNJWPlayerManager)
+			RNJWPlayerManager.loadPlaylistWithUrl(this.getRNJWPlayerBridgeHandle(), playlistUrl);
 	}
 
 	setFullscreen(fullscreen) {
@@ -703,6 +725,56 @@ export default class JWPlayer extends Component {
 				console.error(e);
 				return null;
 			}
+		}
+	}
+
+	/**
+	 * Only to be called in the onBeforeNextPlaylistItem callback.
+	 * If called outside of the callback, it will not have any effect.
+	 * 
+	 * Can only be called once inside the onBeforeNextPlaylistItem callback.
+	 * @param {PlaylistItem | JwPlaylistItem} playlistItem 
+	 */
+	resolveNextPlaylistItem(playlistItem) { 
+		if (RNJWPlayerManager) {
+			RNJWPlayerManager.resolveNextPlaylistItem(
+				this.getRNJWPlayerBridgeHandle(),
+				playlistItem
+			);
+		}
+	}
+
+	/**
+	 * Recreates the player with a new configuration, handling cleanup and PiP state.
+	 * 
+	 * IMPORTANT: This method should only be called after the player has been properly
+	 * initialized and is ready (i.e., after onPlayerReady has fired). Calling this
+	 * method before the player is ready may lead to undefined behavior.
+	 * 
+	 * This method:
+	 * 1. Safely handles PiP state if active
+	 * 2. Performs complete cleanup of the current player instance
+	 * 3. Creates a new player instance with the provided config
+	 * 
+	 * Use this method when you need to:
+	 * - Switch between different DRM configurations
+	 * - Handle content changes during PiP mode
+	 * - Force a complete player recreation
+	 * 
+	 * @param {Config | JwConfig} config The new configuration to apply to the recreated player
+	 * @throws {Error} May throw if called before player is ready or with invalid config
+	 */
+	recreatePlayerWithConfig(config) {
+		if (!config) {
+			console.warn('JWPlayer: Attempting to recreate player with null/undefined config');
+			return;
+		}
+		
+		if (RNJWPlayerManager) {
+			RNJWPlayerManager.recreatePlayerWithConfig(
+				this.getRNJWPlayerBridgeHandle(),
+				config
+			);
 		}
 	}
 

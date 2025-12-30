@@ -1,4 +1,4 @@
-import React, {useRef, useState} from 'react';
+import React, {useState} from 'react';
 import {
   StyleSheet,
   View,
@@ -6,12 +6,16 @@ import {
   FlatList,
   TouchableOpacity,
   Image,
+  Platform,
 } from 'react-native';
+import {useSafeAreaInsets} from 'react-native-safe-area-context';
 import Player from '../components/AnimatedPlayer';
 
 export default () => {
   const [isVisible, setIsVisible] = useState(false);
-  const [playerItem, setPlayerItem] = useState({});
+  const [playerItem, setPlayerItem] = useState(null);
+  const [playerKey, setPlayerKey] = useState(0);
+  const insets = useSafeAreaInsets();
   const data = [
     {
       title: 'JWPlayer-1',
@@ -46,14 +50,37 @@ export default () => {
   return (
     <View style={{flex: 1, backgroundColor: 'white'}}>
       <FlatList
-        contentContainerStyle={styles.flatList}
+        contentContainerStyle={[
+          styles.flatList,
+          Platform.OS === 'android' && {paddingBottom: insets.bottom},
+        ]}
         keyExtractor={({title}, index) => `${title}-${index}`}
         data={data}
         renderItem={({item, index}) => (
           <TouchableOpacity
             onPress={() => {
-              setIsVisible(true);
-              setPlayerItem(item);
+              // Don't reload if it's the same item
+              if (playerItem?.file === item.file) {
+                setIsVisible(true);
+                return;
+              }
+
+              if (Platform.OS === 'android') {
+                // On Android, force component recreation by setting to null first
+                setPlayerItem(null);
+                setIsVisible(false);
+                // Then set new item in next frame
+                setTimeout(() => {
+                  setPlayerItem(item);
+                  setPlayerKey(prev => prev + 1);
+                  setIsVisible(true);
+                }, 0);
+              } else {
+                // On iOS, update directly and increment key to trigger recreation
+                setPlayerItem(item);
+                setPlayerKey(prev => prev + 1);
+                setIsVisible(true);
+              }
             }}
             style={styles.itemContainer}>
             <Image style={styles.image} source={{uri: item?.image}} />
@@ -66,7 +93,12 @@ export default () => {
         ItemSeparatorComponent={() => <View style={styles.separator} />}
       />
       {isVisible && playerItem && (
-        <Player {...playerItem} setIsVisible={setIsVisible} />
+        <Player 
+          key={`player-${playerKey}`}
+          {...playerItem} 
+          setIsVisible={setIsVisible} 
+          bottomInset={insets.bottom} 
+        />
       )}
     </View>
   );

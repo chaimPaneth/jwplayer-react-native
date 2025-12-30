@@ -1,4 +1,3 @@
-
 package com.jwplayer.rnjwplayer;
 
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -45,6 +44,22 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
       return;
     }
     view.mPlayerView.getPlayer().setControls(controls);
+  }
+
+  /**
+   * Recreates the player with a new configuration, handling cleanup and PiP state.
+   * This method ensures proper cleanup and state restoration during configuration changes.
+   *
+   * @param view The RNJWPlayerView instance
+   * @param config The new configuration to apply
+   */
+  @ReactProp(name = "recreatePlayerWithConfig")
+  public void recreatePlayerWithConfig(RNJWPlayerView view, ReadableMap config) {
+    if (view == null || view.mPlayerView == null) {
+      return;
+    }
+    view.mPlayerView.getPlayer().stop();
+    view.setConfig(config);
   }
 
   public Map getExportedCustomBubblingEventTypeConstants() {
@@ -174,6 +189,10 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
                     MapBuilder.of(
                             "phasedRegistrationNames",
                             MapBuilder.of("bubbled", "onLoaded")))
+            .put("topBeforeNextPlaylistItem",
+                    MapBuilder.of(
+                            "phasedRegistrationNames",
+                            MapBuilder.of("bubbled", "onBeforeNextPlaylistItem")))
             .build();
   }
 

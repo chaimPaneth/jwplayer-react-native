@@ -1,6 +1,7 @@
 package com.jwplayer.rnjwplayer;
 
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.content.BroadcastReceiver;
@@ -20,6 +21,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.View.MeasureSpec;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
@@ -157,6 +159,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         VideoPlayerEvents.OnCaptionsListListener,
         VideoPlayerEvents.OnCaptionsChangedListener,
         VideoPlayerEvents.OnMetaListener,
+        VideoPlayerEvents.PlaylistItemCallbackListener,
 
         CastingEvents.OnCastListener,
 
@@ -237,6 +240,9 @@ public class RNJWPlayerView extends RelativeLayout implements
     private MediaServiceController mMediaServiceController;
     private PipHandlerReceiver mReceiver = null;
 
+    // Add completion handler field
+    PlaylistItemDecision itemUpdatePromise = null;
+
     private void doBindService() {
         if (mMediaServiceController != null) {
             if (!isBackgroundAudioServiceRunning()) {
@@ -313,6 +319,17 @@ public class RNJWPlayerView extends RelativeLayout implements
         getReactContext().addLifecycleEventListener(this);
     }
 
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        super.onLayout(changed, l, t, r, b);
+        
+        // Standard React Native layout handling
+        // Since we're no longer constantly swapping views, this is simpler
+        if (mPlayerView != null) {
+            mPlayerView.layout(0, 0, r - l, b - t);
+        }
+    }
+
     private LifecycleObserver lifecycleObserver = new LifecycleEventObserver() {
         @Override
         public void onStateChanged(@NonNull LifecycleOwner source, @NonNull Lifecycle.Event event) {
@@ -368,9 +385,9 @@ public class RNJWPlayerView extends RelativeLayout implements
 
             // If we are casting we need to break the cast session as there is no simple
             // way to reconnect to an existing session if the player that created it is dead
-            
+
             // If this doesn't match your use case, using a single player object and load content
-            // into it rather than creating a new player for every piece of content. 
+            // into it rather than creating a new player for every piece of content.
             mPlayer.stop();
 
             // send signal to JW SDK player is destroyed
@@ -379,6 +396,9 @@ public class RNJWPlayerView extends RelativeLayout implements
             // Stop listening to activities lifecycle
             mActivity.getLifecycle().removeObserver(lifecycleObserver);
             mPlayer.deregisterActivityForPip();
+
+            // Remove playlist item callback listener
+            mPlayer.removePlaylistItemCallbackListener();
 
             mPlayer.removeListeners(this,
                     // VideoPlayerEvents
@@ -437,7 +457,13 @@ public class RNJWPlayerView extends RelativeLayout implements
             );
 
             mPlayer = null;
-            mPlayerView = null;
+            
+            // Remove the old player view from the view hierarchy to prevent
+            // the old UI controls from receiving touch events (fixes GitHub issue #188 crash)
+            if (mPlayerView != null) {
+                removeView(mPlayerView);
+                mPlayerView = null;
+            }
 
             getReactContext().removeLifecycleEventListener(this);
 
@@ -457,7 +483,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
     }
 
-    public void setupPlayerView(Boolean backgroundAudioEnabled) {
+    public void setupPlayerView(Boolean backgroundAudioEnabled, Boolean playlistItemCallbackEnabled) {
         if (mPlayer != null) {
 
             mPlayer.addListeners(this,
@@ -522,9 +548,33 @@ public class RNJWPlayerView extends RelativeLayout implements
             } else {
                 mPlayer.setFullscreenHandler(new fullscreenHandler());
             }
-
             mPlayer.allowBackgroundAudio(backgroundAudioEnabled);
+
+            if (playlistItemCallbackEnabled) {
+                mPlayer.setPlaylistItemCallbackListener(this);
+            }
         }
+    }
+
+    public void resolveNextPlaylistItem(ReadableMap playlistItem) {
+        if (itemUpdatePromise == null) {
+            return;
+        }
+
+        if (playlistItem == null) {
+            itemUpdatePromise.continuePlayback();
+            itemUpdatePromise = null;
+            return;
+        }
+
+        try {
+            PlaylistItem updatedPlaylistItem = Util.getPlaylistItem(playlistItem);
+            itemUpdatePromise.modify(updatedPlaylistItem);
+        } catch (Exception exception) {
+            itemUpdatePromise.continuePlayback();
+        }
+
+        itemUpdatePromise = null;
     }
 
     /**
@@ -628,6 +678,18 @@ public class RNJWPlayerView extends RelativeLayout implements
         return delegate;
     }
 
+    @Override
+    public void onBeforeNextPlaylistItem(PlaylistItemDecision playlistItemDecision, PlaylistItem nextItem, int indexOfNextItem) {
+        WritableMap event = Arguments.createMap();
+        Gson gson = new Gson();
+        event.putString("message", "onBeforeNextPlaylistItem");
+        event.putInt("index", indexOfNextItem);
+        event.putString("playlistItem", gson.toJson(nextItem));
+        getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topBeforeNextPlaylistItem", event);
+
+        itemUpdatePromise = playlistItemDecision;
+    }
+
     private class fullscreenHandler implements FullscreenHandler {
         ViewGroup mPlayerViewContainer = (ViewGroup) mPlayerView.getParent();
         private View mDecorView;
@@ -698,7 +760,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 public void run() {
                     // View may not have been removed properly (especially if returning from PiP)
                     mPlayerViewContainer.removeView(mPlayerView);
-                    
+
                     mPlayerViewContainer.addView(mPlayerView, new ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT));
@@ -813,6 +875,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private void registerReceiver() {
         mReceiver = new PipHandlerReceiver();
         IntentFilter intentFilter = new IntentFilter("onPictureInPictureModeChanged");
@@ -836,48 +899,189 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     }
 
+    /**
+     * Creates a UiConfig that ensures PLAYER_CONTROLS_CONTAINER is always shown.
+     * If controls are not shown, the PLAYER_CONTROLS_CONTAINER UI Group is not displayed.
+     * This logic ensures that the PLAYER_CONTROLS_CONTAINER UI Group is displayed regardless if controls are shown or not.
+     * There is no way to recover controls if you do not show this UiGroup.
+     * But you are able to hide the controls still if it is shown.
+     */
+    private UiConfig createUiConfigWithControlsContainer(JWPlayer player, UiConfig originalUiConfig) {
+        if (!player.getControls()) {
+            return new UiConfig.Builder(originalUiConfig).show(UiGroup.PLAYER_CONTROLS_CONTAINER).build();
+        } else {
+            return originalUiConfig;
+        }
+    }
+
+    /**
+     * Main entry point for setting/updating player configuration.
+     * Uses a smart approach: only recreate the player view when absolutely necessary,
+     * otherwise reconfigure the existing player instance.
+     * 
+     * This follows JWPlayer SDK's intended usage pattern and significantly reduces overhead.
+     */
     public void setConfig(ReadableMap prop) {
         if (mConfig == null || !mConfig.equals(prop)) {
-            if (mConfig != null && isOnlyDiff(prop, "playlist") && mPlayer != null) { // still safe check, even with JW
-                // JSON change
-                PlayerConfig oldConfig = mPlayer.getConfig();
-                PlayerConfig config = new PlayerConfig.Builder()
-                        .autostart(oldConfig.getAutostart())
-                        .nextUpOffset(oldConfig.getNextUpOffset())
-                        .repeat(oldConfig.getRepeat())
-                        .relatedConfig(oldConfig.getRelatedConfig())
-                        .displayDescription(oldConfig.getDisplayDescription())
-                        .displayTitle(oldConfig.getDisplayTitle())
-                        .advertisingConfig(oldConfig.getAdvertisingConfig())
-                        .stretching(oldConfig.getStretching())
-                        .uiConfig(oldConfig.getUiConfig())
-                        .playlist(Util.createPlaylist(mPlaylistProp))
-                        .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
-                        .preload(oldConfig.getPreload())
-                        .useTextureView(oldConfig.useTextureView())
-                        .thumbnailPreview(oldConfig.getThumbnailPreview())
-                        .mute(oldConfig.getMute())
-                        .build();
-
-                mPlayer.setup(config);
+            // Set license key if provided
+            if (prop.hasKey("license")) {
+                new LicenseUtil().setLicenseKey(getReactContext(), prop.getString("license"));
             } else {
-                if (prop.hasKey("license")) {
-                    new LicenseUtil().setLicenseKey(getReactContext(), prop.getString("license"));
-                } else {
-                    Log.e(TAG, "JW SDK license not set");
-                }
-
-                // The entire config is different (other than the "playlist" key)
-                this.setupPlayer(prop);
+                Log.e(TAG, "JW SDK license not set");
             }
-        } else {
-            // No change
+
+            // First time setup - need to create player view
+            if (mPlayer == null) {
+                this.createPlayerView(prop);
+                mConfig = prop;
+                return;
+            }
+            
+            // Check if we need full player recreation (rare cases only)
+            if (requiresPlayerRecreation(prop)) {
+                Log.d(TAG, "Player recreation required - destroying and recreating player view");
+                this.destroyPlayer();
+                this.createPlayerView(prop);
+            } else {
+                // Normal case: reconfigure existing player without recreation
+                Log.d(TAG, "Reconfiguring existing player without recreation");
+                this.reconfigurePlayer(prop);
+            }
         }
 
         mConfig = prop;
     }
 
+    /**
+     * Determines if a config change requires full player view recreation.
+     * Only return true for changes that genuinely cannot be handled by reconfiguration.
+     * 
+     * Currently, the JWPlayer SDK can handle almost all config changes via setup(),
+     * so we only recreate for critical changes like license updates.
+     */
+    private boolean requiresPlayerRecreation(ReadableMap prop) {
+        if (mConfig == null || mPlayer == null) {
+            return true;
+        }
+        
+        // License change requires recreation
+        if (prop.hasKey("license") && mConfig.hasKey("license")) {
+            String newLicense = prop.getString("license");
+            String oldLicense = mConfig.getString("license");
+            if (newLicense != null && !newLicense.equals(oldLicense)) {
+                return true;
+            }
+        }
+        
+        // Add other cases here if needed in the future
+        // For example: switching between playerView and playerViewController modes
+        
+        return false;
+    }
+
+    /**
+     * Reconfigures the existing player instance with new settings.
+     * This is the preferred path for config updates as it preserves the player instance
+     * and video surface, following JWPlayer SDK's design intent.
+     * 
+     * Based on the pattern used in loadPlaylist() and loadPlaylistWithUrl().
+     */
+    private void reconfigurePlayer(ReadableMap prop) {
+        if (mPlayer == null) {
+            Log.e(TAG, "Cannot reconfigure - player is null");
+            return;
+        }
+
+        PlayerConfig oldConfig = mPlayer.getConfig();
+        boolean wasFullscreen = mPlayer.getFullscreen();
+        boolean currentControlsState = mPlayer.getControls();
+        
+        // Stop playback before reconfiguration to avoid issues (Issue #188 fix)
+        mPlayer.stop();
+        
+        // Build new configuration
+        PlayerConfig newConfig = buildPlayerConfig(prop, oldConfig);
+        
+        // ALWAYS ensure PLAYER_CONTROLS_CONTAINER is shown in UiConfig after setup.
+        // This prevents issues where controls are off and JWPlayer SDK hides UI groups,
+        // leaving them in a state where setControls(true) won't work.
+        // We'll manage controls state via setControls() API after setup for clean state management.
+        UiConfig fixedUiConfig = new UiConfig.Builder(newConfig.getUiConfig())
+            .show(UiGroup.PLAYER_CONTROLS_CONTAINER)
+            .build();
+        newConfig = new PlayerConfig.Builder(newConfig)
+            .uiConfig(fixedUiConfig)
+            .build();
+        
+        // Apply new configuration to existing player
+        mPlayer.setup(newConfig);
+        
+        // Now manage controls state via API (after setup, when UI groups are in clean state)
+        if (prop.hasKey("controls")) {
+            // Developer explicitly set controls in props - use that value
+            mPlayer.setControls(prop.getBoolean("controls"));
+        } else if (!currentControlsState) {
+            // Controls were off before reconfigure and no explicit prop provided
+            // Restore the off state (after ensuring UI groups are visible)
+            mPlayer.setControls(false);
+        }
+        // Note: If controls were on and no prop provided, they'll stay on (default from configureUI)
+        
+        // Restore fullscreen state if needed
+        // The fullscreen view is still active but internals need to be notified
+        if (wasFullscreen) {
+            mPlayer.setFullscreen(true, true);
+        }
+    }
+
+    /**
+     * Builds a PlayerConfig from React Native props, preserving relevant old config values.
+     * This ensures smooth transitions when reconfiguring the player.
+     */
+    private PlayerConfig buildPlayerConfig(ReadableMap prop, PlayerConfig oldConfig) {
+        PlayerConfig.Builder configBuilder = new PlayerConfig.Builder();
+        
+        // Try to parse as JW config first
+        JSONObject obj;
+        PlayerConfig jwConfig = null;
+        Boolean forceLegacy = prop.hasKey("forceLegacyConfig") ? prop.getBoolean("forceLegacyConfig") : false;
+        Boolean isJwConfig = false;
+
+        if (!forceLegacy) {
+            try {
+                obj = MapUtil.toJSONObject(prop);
+                jwConfig = JsonHelper.parseConfigJson(obj);
+                isJwConfig = true;
+                return jwConfig;  // Return directly if valid JW config
+            } catch (Exception ex) {
+                Log.d(TAG, "Not a JW config format, using legacy builder");
+                isJwConfig = false;
+            }
+        }
+
+        // Legacy config building
+        configurePlaylist(configBuilder, prop);
+        configureBasicSettings(configBuilder, prop);
+        configureStyling(configBuilder, prop);
+        configureAdvertising(configBuilder, prop);
+        configureUI(configBuilder, prop);
+        
+        return configBuilder.build();
+    }
+
+    /**
+     * Utility method to check if only a specific key differs between configs.
+     * This is kept for potential future optimizations or debugging, but is no longer
+     * used in the main setConfig flow since we now reconfigure the player for all changes.
+     * 
+     * @deprecated Consider using reconfigurePlayer() for all config changes instead
+     */
+    @Deprecated
     public boolean isOnlyDiff(ReadableMap prop, String keyName) {
+        if (mConfig == null || prop == null) {
+            return false;
+        }
+        
         // Convert ReadableMap to HashMap
         Map<String, Object> mConfigMap = mConfig.toHashMap();
         Map<String, Object> propMap = prop.toHashMap();
@@ -909,153 +1113,177 @@ public class RNJWPlayerView extends RelativeLayout implements
                 .deepEquals(new ReadableArray[]{mPlaylistProp}, new ReadableArray[]{prop.getArray("playlist")});
     }
 
-    private void setupPlayer(ReadableMap prop) {
-        // Legacy
+    private void configurePlaylist(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        if (playlistNotTheSame(prop)) {
+            List<PlaylistItem> playlist = new ArrayList<>();
+            mPlaylistProp = prop.getArray("playlist");
+            if (mPlaylistProp != null && mPlaylistProp.size() > 0) {
+                int j = 0;
+                while (mPlaylistProp.size() > j) {
+                    ReadableMap playlistItem = mPlaylistProp.getMap(j);
+                    PlaylistItem newPlayListItem = Util.getPlaylistItem((playlistItem));
+                    playlist.add(newPlayListItem);
+                    j++;
+                }
+            }
+            configBuilder.playlist(playlist);
+        }
+    }
+
+    private void configureBasicSettings(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        if (prop.hasKey("autostart")) {
+            boolean autostart = prop.getBoolean("autostart");
+            configBuilder.autostart(autostart);
+        }
+
+        if (prop.hasKey("nextUpStyle")) {
+            ReadableMap nextUpStyle = prop.getMap("nextUpStyle");
+            if (nextUpStyle != null && nextUpStyle.hasKey("offsetSeconds")
+                    && nextUpStyle.hasKey("offsetPercentage")) {
+                int offsetSeconds = prop.getInt("offsetSeconds");
+                int offsetPercentage = prop.getInt("offsetPercentage");
+                configBuilder.nextUpOffset(offsetSeconds).nextUpOffsetPercentage(offsetPercentage);
+            }
+        }
+
+        if (prop.hasKey("repeat")) {
+            boolean repeat = prop.getBoolean("repeat");
+            configBuilder.repeat(repeat);
+        }
+
+        if (prop.hasKey("stretching")) {
+            String stretching = prop.getString("stretching");
+            configBuilder.stretching(stretching);
+        }
+    }
+
+    private void configureStyling(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        if (prop.hasKey("styling")) {
+            ReadableMap styling = prop.getMap("styling");
+            if (styling != null) {
+                if (styling.hasKey("displayDescription")) {
+                    boolean displayDescription = styling.getBoolean("displayDescription");
+                    configBuilder.displayDescription(displayDescription);
+                }
+
+                if (styling.hasKey("displayTitle")) {
+                    boolean displayTitle = styling.getBoolean("displayTitle");
+                    configBuilder.displayTitle(displayTitle);
+                }
+
+                if (styling.hasKey("colors")) {
+                    mColors = styling.getMap("colors");
+                }
+            }
+        }
+    }
+
+    private void configureAdvertising(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        if (prop.hasKey("advertising")) {
+            ReadableMap ads = prop.getMap("advertising");
+            AdvertisingConfig advertisingConfig = RNJWPlayerAds.getAdvertisingConfig(ads);
+            if (advertisingConfig != null) {
+                configBuilder.advertisingConfig(advertisingConfig);
+            }
+        }
+    }
+
+    private void configureUI(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        // Handle controls property - default to true if not specified
+        boolean controls = true; // Default to showing controls
+        if (prop.hasKey("controls")) {
+            controls = prop.getBoolean("controls");
+        }
+        
+        if (!controls) {
+            UiConfig uiConfig = new UiConfig.Builder().hideAllControls().build();
+            configBuilder.uiConfig(uiConfig);
+        } else {
+            // Explicitly show controls and ensure controls container is visible
+            // This ensures controls work even if setControls() is called later
+            UiConfig uiConfig = new UiConfig.Builder()
+                .displayAllControls()
+                .show(UiGroup.PLAYER_CONTROLS_CONTAINER)
+                .build();
+            configBuilder.uiConfig(uiConfig);
+        }
+
+        if (prop.hasKey("hideUIGroups")) {
+            ReadableArray uiGroupsArray = prop.getArray("hideUIGroups");
+            UiConfig.Builder hideConfigBuilder = new UiConfig.Builder().displayAllControls();
+            for (int i = 0; i < uiGroupsArray.size(); i++) {
+                if (uiGroupsArray.getType(i) == ReadableType.String) {
+                    UiGroup uiGroup = GROUP_TYPES.get(uiGroupsArray.getString(i));
+                    if (uiGroup != null) {
+                        hideConfigBuilder.hide(uiGroup);
+                    }
+                }
+            }
+            UiConfig hideJwControlbarUiConfig = hideConfigBuilder.build();
+            configBuilder.uiConfig(hideJwControlbarUiConfig);
+        }
+    }
+
+    /**
+     * Creates a new player view and initializes it with the provided configuration.
+     * This should only be called for initial setup or when full recreation is required.
+     * 
+     * Note: This method calls destroyPlayer() first to ensure clean state.
+     */
+    private void createPlayerView(ReadableMap prop) {
         PlayerConfig.Builder configBuilder = new PlayerConfig.Builder();
 
         JSONObject obj;
         PlayerConfig jwConfig = null;
         Boolean forceLegacy = prop.hasKey("forceLegacyConfig") ? prop.getBoolean("forceLegacyConfig") : false;
+        Boolean playlistItemCallbackEnabled = prop.hasKey("playlistItemCallbackEnabled") ? prop.getBoolean("playlistItemCallbackEnabled") : false;
         Boolean isJwConfig = false;
+
         if (!forceLegacy) {
             try {
                 obj = MapUtil.toJSONObject(prop);
                 jwConfig = JsonHelper.parseConfigJson(obj);
                 isJwConfig = true;
             } catch (Exception ex) {
-                Log.e("RNJWPlayerView", ex.toString());
-                isJwConfig = false; // not a valid jw config. Try to setup in legacy
+                Log.e(TAG, "Not a valid JW config format, falling back to legacy: " + ex.toString());
+                isJwConfig = false;
             }
         }
 
         if (!isJwConfig) {
-            // Legacy
-            if (playlistNotTheSame(prop)) {
-                List<PlaylistItem> playlist = new ArrayList<>();
-                mPlaylistProp = prop.getArray("playlist");
-                if (mPlaylistProp != null && mPlaylistProp.size() > 0) {
-
-                    int j = 0;
-                    while (mPlaylistProp.size() > j) {
-                        ReadableMap playlistItem = mPlaylistProp.getMap(j);
-
-                        PlaylistItem newPlayListItem = Util.getPlaylistItem((playlistItem));
-                        playlist.add(newPlayListItem);
-                        j++;
-                    }
-                }
-
-                configBuilder.playlist(playlist);
-            }
-
-            // Legacy
-            if (prop.hasKey("autostart")) {
-                boolean autostart = prop.getBoolean("autostart");
-                configBuilder.autostart(autostart);
-            }
-
-            // Legacy
-            if (prop.hasKey("nextUpStyle")) {
-                ReadableMap nextUpStyle = prop.getMap("nextUpStyle");
-                if (nextUpStyle != null && nextUpStyle.hasKey("offsetSeconds")
-                        && nextUpStyle.hasKey("offsetPercentage")) {
-                    int offsetSeconds = prop.getInt("offsetSeconds");
-                    int offsetPercentage = prop.getInt("offsetPercentage");
-                    configBuilder.nextUpOffset(offsetSeconds).nextUpOffsetPercentage(offsetPercentage);
-                }
-            }
-
-            // Legacy
-            if (prop.hasKey("repeat")) {
-                boolean repeat = prop.getBoolean("repeat");
-                configBuilder.repeat(repeat);
-            }
-
-            // Legacy
-            if (prop.hasKey("styling")) {
-                ReadableMap styling = prop.getMap("styling");
-                if (styling != null) {
-                    if (styling.hasKey("displayDescription")) {
-                        boolean displayDescription = styling.getBoolean("displayDescription");
-                        configBuilder.displayDescription(displayDescription);
-                    }
-
-                    if (styling.hasKey("displayTitle")) {
-                        boolean displayTitle = styling.getBoolean("displayTitle");
-                        configBuilder.displayTitle(displayTitle);
-                    }
-
-                    if (styling.hasKey("colors")) {
-                        mColors = styling.getMap("colors");
-                    }
-                }
-            }
-
-            // Legacy
-            if (prop.hasKey("advertising")) {
-                ReadableMap ads = prop.getMap("advertising");
-                AdvertisingConfig advertisingConfig = RNJWPlayerAds.getAdvertisingConfig(ads);
-                if (advertisingConfig != null) {
-                    configBuilder.advertisingConfig(advertisingConfig);
-                }
-            }
-
-            // Legacy
-            if (prop.hasKey("stretching")) {
-                String stretching = prop.getString("stretching");
-                configBuilder.stretching(stretching);
-            }
-
-            // Legacy
-            // this isn't the ideal way to do controls...
-            // Better to just expose the `.setControls` method
-            if (prop.hasKey("controls")) {
-                boolean controls = prop.getBoolean("controls");
-                if (!controls) {
-                    UiConfig uiConfig = new UiConfig.Builder().hideAllControls().build();
-                    configBuilder.uiConfig(uiConfig);
-                }
-            }
-
-            // Legacy
-            if (prop.hasKey("hideUIGroups")) {
-                ReadableArray uiGroupsArray = prop.getArray("hideUIGroups");
-                UiConfig.Builder hideConfigBuilder = new UiConfig.Builder().displayAllControls();
-                for (int i = 0; i < uiGroupsArray.size(); i++) {
-                    if (uiGroupsArray.getType(i) == ReadableType.String) {
-                        UiGroup uiGroup = GROUP_TYPES.get(uiGroupsArray.getString(i));
-                        if (uiGroup != null) {
-                            hideConfigBuilder.hide(uiGroup);
-                        }
-                    }
-                }
-                UiConfig hideJwControlbarUiConfig = hideConfigBuilder.build();
-                configBuilder.uiConfig(hideJwControlbarUiConfig);
-            }
+            configurePlaylist(configBuilder, prop);
+            configureBasicSettings(configBuilder, prop);
+            configureStyling(configBuilder, prop);
+            configureAdvertising(configBuilder, prop);
+            configureUI(configBuilder, prop);
         }
 
         Context simpleContext = getNonBuggyContext(getReactContext(), getAppContext());
 
+        // Ensure clean state before creating new player view
         this.destroyPlayer();
 
+        // Create new player view
         mPlayerView = new RNJWPlayer(simpleContext);
-
         mPlayerView.setFocusable(true);
         mPlayerView.setFocusableInTouchMode(true);
 
-        setLayoutParams(
-                new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        // Set layout parameters
+        setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 
+                ViewGroup.LayoutParams.MATCH_PARENT));
         mPlayerView.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.MATCH_PARENT));
+        
+        // Add to view hierarchy - React Native will handle layout
         addView(mPlayerView);
 
-        // Ensure we have a valid state before applying to the player
-        registry.setCurrentState(Lifecycle.State.STARTED);
-
+        // Get player instance
         mPlayer = mPlayerView.getPlayer(this);
 
-        if (prop.hasKey("controls")) { // Hack for controls hiding not working right away
+        // Apply view-specific props
+        if (prop.hasKey("controls")) {
             mPlayerView.getPlayer().setControls(prop.getBoolean("controls"));
         }
 
@@ -1069,7 +1297,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
 
         if (prop.hasKey("portraitOnExitFullScreen")) {
-            portraitOnExitFullScreen = prop.getBoolean("fullScreenOnLandscape");
+            portraitOnExitFullScreen = prop.getBoolean("portraitOnExitFullScreen");
         }
 
         if (prop.hasKey("playerInModal")) {
@@ -1081,6 +1309,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             mPlayerView.exitFullScreenOnPortrait = exitFullScreenOnPortrait;
         }
 
+        // Setup player with config
         if (isJwConfig) {
             mPlayer.setup(jwConfig);
         } else {
@@ -1088,6 +1317,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             mPlayer.setup(playerConfig);
         }
 
+        // Configure PiP if enabled
         if (mActivity != null && prop.hasKey("pipEnabled")) {
             boolean pipEnabled = prop.getBoolean("pipEnabled");
             if (pipEnabled) {
@@ -1099,68 +1329,73 @@ public class RNJWPlayerView extends RelativeLayout implements
             }
         }
 
-        // Legacy
-        // This isn't the ideal way to do this on Android. All drawables/colors/themes shoudld
-        // be targed using styling. See `https://docs.jwplayer.com/players/docs/android-styling-guide`
-        // for more information on how best to override the JWP styles using XML. If you are unsure of a
-        // color/drawable/theme, open an `Ask` issue.
-        if (mColors != null) {
-            if (mColors.hasKey("backgroundColor")) {
-                mPlayerView.setBackgroundColor(Color.parseColor("#" + mColors.getString("backgroundColor")));
-            }
+        // Legacy styling support
+        // NOTE: This isn't the ideal way to do this on Android. All drawables/colors/themes should
+        // be targeted using styling. See https://docs.jwplayer.com/players/docs/android-styling-guide
+        applyLegacyStyling();
 
-            if (mColors.hasKey("buttons")) {
-
-            }
-
-            if (mColors.hasKey("timeslider")) {
-                CueMarkerSeekbar seekBar = findViewById(com.longtailvideo.jwplayer.R.id.controlbar_seekbar);
-                ReadableMap timeslider = mColors.getMap("timeslider");
-                if (timeslider != null) {
-                    LayerDrawable progressDrawable = (LayerDrawable) seekBar.getProgressDrawable();
-
-                    if (timeslider.hasKey("progress")) {
-                        // seekBar.getProgressDrawable().setColorFilter(Color.parseColor("#" +
-                        // timeslider.getString("progress")), PorterDuff.Mode.SRC_IN);
-                        Drawable processDrawable = progressDrawable.findDrawableByLayerId(android.R.id.progress);
-                        processDrawable.setColorFilter(Color.parseColor("#" + timeslider.getString("progress")),
-                                PorterDuff.Mode.SRC_IN);
-                    }
-
-                    if (timeslider.hasKey("buffer")) {
-                        Drawable secondaryProgressDrawable = progressDrawable
-                                .findDrawableByLayerId(android.R.id.secondaryProgress);
-                        secondaryProgressDrawable.setColorFilter(Color.parseColor("#" + timeslider.getString("buffer")),
-                                PorterDuff.Mode.SRC_IN);
-                    }
-
-                    if (timeslider.hasKey("rail")) {
-                        Drawable backgroundDrawable = progressDrawable.findDrawableByLayerId(android.R.id.background);
-                        backgroundDrawable.setColorFilter(Color.parseColor("#" + timeslider.getString("rail")),
-                                PorterDuff.Mode.SRC_IN);
-                    }
-
-                    if (timeslider.hasKey("thumb")) {
-                        seekBar.getThumb().setColorFilter(Color.parseColor("#" + timeslider.getString("thumb")),
-                                PorterDuff.Mode.SRC_IN);
-                    }
-                }
-            }
-        }
-
-        // Needed to handle volume control
+        // Setup audio
         audioManager = (AudioManager) simpleContext.getSystemService(Context.AUDIO_SERVICE);
 
         if (prop.hasKey("backgroundAudioEnabled")) {
             backgroundAudioEnabled = prop.getBoolean("backgroundAudioEnabled");
         }
 
-        setupPlayerView(backgroundAudioEnabled);
+        setupPlayerView(backgroundAudioEnabled, playlistItemCallbackEnabled);
 
         if (backgroundAudioEnabled) {
-            audioManager = (AudioManager) simpleContext.getSystemService(Context.AUDIO_SERVICE);
             mMediaServiceController = new MediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
                     .build();
+        }
+    }
+
+    /**
+     * Applies legacy color/styling customizations.
+     * Extracted to separate method for clarity.
+     */
+    private void applyLegacyStyling() {
+        if (mColors == null) {
+            return;
+        }
+
+        if (mColors.hasKey("backgroundColor")) {
+            mPlayerView.setBackgroundColor(Color.parseColor("#" + mColors.getString("backgroundColor")));
+        }
+
+        if (mColors.hasKey("timeslider")) {
+            CueMarkerSeekbar seekBar = findViewById(com.longtailvideo.jwplayer.R.id.controlbar_seekbar);
+            ReadableMap timeslider = mColors.getMap("timeslider");
+            if (timeslider != null && seekBar != null) {
+                LayerDrawable progressDrawable = (LayerDrawable) seekBar.getProgressDrawable();
+
+                if (timeslider.hasKey("progress")) {
+                    Drawable processDrawable = progressDrawable.findDrawableByLayerId(android.R.id.progress);
+                    processDrawable.setColorFilter(
+                            Color.parseColor("#" + timeslider.getString("progress")),
+                            PorterDuff.Mode.SRC_IN);
+                }
+
+                if (timeslider.hasKey("buffer")) {
+                    Drawable secondaryProgressDrawable = progressDrawable
+                            .findDrawableByLayerId(android.R.id.secondaryProgress);
+                    secondaryProgressDrawable.setColorFilter(
+                            Color.parseColor("#" + timeslider.getString("buffer")),
+                            PorterDuff.Mode.SRC_IN);
+                }
+
+                if (timeslider.hasKey("rail")) {
+                    Drawable backgroundDrawable = progressDrawable.findDrawableByLayerId(android.R.id.background);
+                    backgroundDrawable.setColorFilter(
+                            Color.parseColor("#" + timeslider.getString("rail")),
+                            PorterDuff.Mode.SRC_IN);
+                }
+
+                if (timeslider.hasKey("thumb")) {
+                    seekBar.getThumb().setColorFilter(
+                            Color.parseColor("#" + timeslider.getString("thumb")),
+                            PorterDuff.Mode.SRC_IN);
+                }
+            }
         }
     }
 
