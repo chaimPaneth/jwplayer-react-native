@@ -554,17 +554,7 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
 
     @ReactMethod
     public void resolveNextPlaylistItem(final int reactTag, final ReadableMap playlistItem) {
-        JWLog.d(TAG, "resolveNextPlaylistItem(reactTag=" + reactTag + ", playlistItem=" + JWLog.safe(playlistItem) + ")");
-        new Handler(Looper.getMainLooper()).post(() -> {
-            RNJWPlayerView playerView = getPlayerView(reactTag);
-            if (playerView != null && playerView.mPlayerView != null) {
-                playerView.resolveNextPlaylistItem(playlistItem);
-            }
-        });
-    }
-
-    @ReactMethod
-    public void resolveNextPlaylistItem(final int reactTag, final ReadableMap playlistItem) {
+        JWLog.d(TAG, "resolveNextPlaylistItem(reactTag=" + reactTag + ", playlistItem=" + JWLog.safe(playlistItem) + ")");        
         new Handler(Looper.getMainLooper()).post(() -> {
             RNJWPlayerView playerView = getPlayerView(reactTag);
             if (playerView != null && playerView.mPlayerView != null) {

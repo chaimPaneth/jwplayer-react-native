@@ -994,7 +994,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             if (prop.hasKey("license")) {
                 new LicenseUtil().setLicenseKey(getReactContext(), prop.getString("license"));
             } else {
-                Log.e(TAG, "JW SDK license not set");
+                JWLog.e(TAG, "JW SDK license not set");
             }
 
             // First time setup - need to create player view
@@ -1006,12 +1006,12 @@ public class RNJWPlayerView extends RelativeLayout implements
             
             // Check if we need full player recreation (rare cases only)
             if (requiresPlayerRecreation(prop)) {
-                Log.d(TAG, "Player recreation required - destroying and recreating player view");
+                JWLog.d(TAG, "Player recreation required - destroying and recreating player view");
                 this.destroyPlayer();
                 this.createPlayerView(prop);
             } else {
                 // Normal case: reconfigure existing player without recreation
-                Log.d(TAG, "Reconfiguring existing player without recreation");
+                JWLog.d(TAG, "Reconfiguring existing player without recreation");
                 this.reconfigurePlayer(prop);
             }
         }
@@ -1055,7 +1055,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      */
     private void reconfigurePlayer(ReadableMap prop) {
         if (mPlayer == null) {
-            Log.e(TAG, "Cannot reconfigure - player is null");
+            JWLog.e(TAG, "Cannot reconfigure - player is null");
             return;
         }
 
@@ -1121,7 +1121,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 isJwConfig = true;
                 return jwConfig;  // Return directly if valid JW config
             } catch (Exception ex) {
-                Log.d(TAG, "Not a JW config format, using legacy builder");
+                JWLog.d(TAG, "Not a JW config format, using legacy builder");
                 isJwConfig = false;
             }
         }
