@@ -4,7 +4,7 @@
 #import "RCTViewManager.h"
 #endif
 
-#import <JWPlayerKit/JWPlayerKit-swift.h>
+#import <JWPlayerKit/JWPlayerKit-Swift.h>
 
 #import "RCTUIManager.h"
 
@@ -135,6 +135,8 @@ RCT_EXTERN_METHOD(quite)
 RCT_EXTERN_METHOD(reset)
 
 RCT_EXTERN_METHOD(loadPlaylist: (nonnull NSNumber *)reactTag: (nonnull NSArray *)playlist)
+
+RCT_EXTERN_METHOD(recreatePlayerWithConfig: (nonnull NSNumber *)reactTag: (nonnull NSDictionary *)config)
 
 RCT_EXTERN_METHOD(loadPlaylistWithUrl: (nonnull NSNumber *)reactTag: (nonnull NSString *)playlist)
 

@@ -246,7 +246,7 @@ class RNJWPlayerViewManager: RCTViewManager {
             }
         }
     }
-
+    
 #if USE_GOOGLE_CAST
     @objc func setUpCastController(_ reactTag: NSNumber) {
         DispatchQueue.main.async {
@@ -548,10 +548,25 @@ class RNJWPlayerViewManager: RCTViewManager {
                 } else if let playerViewController = view.playerViewController {
                     playerViewController.player.loadPlaylist(items: playlistArray)
                 }
-            }
+            } else if let playlistString = playlist as? String {
+                loadPlaylistWithUrl(reactTag, playlist)
+            }            
         }
     }
     
+    @objc func recreatePlayerWithConfig(_ reactTag: NSNumber, _ config: NSDictionary) {
+        DispatchQueue.main.async {
+            guard let view = self.bridge?.uiManager.view(
+                forReactTag: reactTag
+            ) as? RNJWPlayerView else {
+                print("Invalid view returned from registry, expecting RNJWPlayerView")
+                return
+            }
+            
+            view.recreatePlayerWithConfig(config as? [String: Any] ?? [:])
+        }
+    }
+
     @objc func loadPlaylistWithUrl(_ reactTag: NSNumber, _ playlistString: String) {
         DispatchQueue.main.async {
             guard let view = self.getPlayerView(reactTag: reactTag) else {

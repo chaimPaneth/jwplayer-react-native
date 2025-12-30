@@ -1,5 +1,7 @@
 package com.jwplayer.rnjwplayer;
 
+import android.util.Log;
+
 import android.os.Handler;
 import android.os.Looper;
 
@@ -21,7 +23,9 @@ import com.facebook.react.uimanager.UIManagerModule;
 import com.facebook.react.uimanager.common.UIManagerType;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.PlayerState;
+import com.jwplayer.pub.api.UiGroup;
 import com.jwplayer.pub.api.configuration.PlayerConfig;
+import com.jwplayer.pub.api.configuration.UiConfig;
 import com.jwplayer.pub.api.media.adaptive.QualityLevel;
 import com.jwplayer.pub.api.media.audio.AudioTrack;
 import com.jwplayer.rnjwplayer.utils.JWLog;
@@ -117,6 +121,21 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         return null;
     }
 
+    /**
+     * Creates a UiConfig that ensures PLAYER_CONTROLS_CONTAINER is always shown.
+     * If controls are not shown, the PLAYER_CONTROLS_CONTAINER UI Group is not displayed.
+     * This logic ensures that the PLAYER_CONTROLS_CONTAINER UI Group is displayed regardless if controls are shown or not.
+     * There is no way to recover controls if you do not show this UiGroup.
+     * But you are able to hide the controls still if it is shown.
+     */
+    private UiConfig createUiConfigWithControlsContainer(JWPlayer player, UiConfig originalUiConfig) {
+        if (!player.getControls()) {
+            return new UiConfig.Builder(originalUiConfig).show(UiGroup.PLAYER_CONTROLS_CONTAINER).build();
+        } else {
+            return originalUiConfig;
+        }
+    }
+
     @ReactMethod
     public void loadPlaylist(final int reactTag, final ReadableArray playlistItems) {
         JWLog.d(TAG, "loadPlaylist(reactTag=" + reactTag + ", itemsLength=" + (playlistItems != null ? playlistItems.size() : -1) + ")");
@@ -126,6 +145,8 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 JWPlayer player = playerView.mPlayerView.getPlayer();
 
                 PlayerConfig oldConfig = player.getConfig();
+                boolean wasFullscreen = player.getFullscreen();
+                UiConfig uiConfig = createUiConfigWithControlsContainer(player, oldConfig.getUiConfig());
                 PlayerConfig config = new PlayerConfig.Builder()
                         .autostart(oldConfig.getAutostart())
                         .nextUpOffset(oldConfig.getNextUpOffset())
@@ -135,7 +156,7 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                         .displayTitle(oldConfig.getDisplayTitle())
                         .advertisingConfig(oldConfig.getAdvertisingConfig())
                         .stretching(oldConfig.getStretching())
-                        .uiConfig(oldConfig.getUiConfig())
+                        .uiConfig(uiConfig)
                         .playlist(Util.createPlaylist(playlistItems))
                         .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
                         .preload(oldConfig.getPreload())
@@ -145,6 +166,11 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                         .build();
 
                 player.setup(config);
+                // if the player was fullscreen, set it to fullscreen again as the player is recreated
+                // The fullscreen view is still active but the internals don't know it is
+                if (wasFullscreen) {
+                    player.setFullscreen(true, true);
+                }
             }
         });
     }
@@ -158,6 +184,8 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 JWPlayer player = playerView.mPlayerView.getPlayer();
 
                 PlayerConfig oldConfig = player.getConfig();
+                boolean wasFullscreen = player.getFullscreen();
+                UiConfig uiConfig = createUiConfigWithControlsContainer(player, oldConfig.getUiConfig());
                 PlayerConfig config = new PlayerConfig.Builder()
                         .autostart(oldConfig.getAutostart())
                         .nextUpOffset(oldConfig.getNextUpOffset())
@@ -167,7 +195,7 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                         .displayTitle(oldConfig.getDisplayTitle())
                         .advertisingConfig(oldConfig.getAdvertisingConfig())
                         .stretching(oldConfig.getStretching())
-                        .uiConfig(oldConfig.getUiConfig())
+                        .uiConfig(uiConfig)
                         .playlistUrl(playlistUrl)
                         .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
                         .preload(oldConfig.getPreload())
@@ -177,6 +205,11 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                         .build();
 
                 player.setup(config);
+                // if the player was fullscreen, set it to fullscreen again as the player is recreated
+                // The fullscreen view is still active but the internals don't know it is
+                if (wasFullscreen) {
+                    player.setFullscreen(true, true);
+                }
             }
         });
     }
@@ -526,6 +559,41 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
             RNJWPlayerView playerView = getPlayerView(reactTag);
             if (playerView != null && playerView.mPlayerView != null) {
                 playerView.resolveNextPlaylistItem(playlistItem);
+            }
+        });
+    }
+
+    @ReactMethod
+    public void resolveNextPlaylistItem(final int reactTag, final ReadableMap playlistItem) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            RNJWPlayerView playerView = getPlayerView(reactTag);
+            if (playerView != null && playerView.mPlayerView != null) {
+                playerView.resolveNextPlaylistItem(playlistItem);
+            }
+        });
+    }
+
+    @ReactMethod
+    /**
+     * Reconfigures or recreates the player with a new configuration.
+     * 
+     * This method intelligently determines whether to:
+     * 1. Reconfigure the existing player (preferred, ~90% of cases)
+     * 2. Recreate the player (only when necessary, e.g., license changes)
+     * 
+     * Note: Despite the name "recreate", this method usually does NOT recreate the player.
+     * It follows the JWPlayer SDK's design intent of reusing player instances via setup() calls.
+     * 
+     * This provides API parity with iOS while being more efficient on Android.
+     */
+    public void recreatePlayerWithConfig(final int reactTag, final ReadableMap config) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            RNJWPlayerView playerView = getPlayerView(reactTag);
+            if (playerView != null) {
+                // Delegate to setConfig() which intelligently handles reconfiguration vs recreation
+                playerView.setConfig(config);
+            } else {
+                Log.e("RNJWPlayer", "recreatePlayerWithConfig: Player view not found for tag " + reactTag);
             }
         });
     }
