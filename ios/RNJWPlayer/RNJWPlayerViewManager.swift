@@ -548,9 +548,7 @@ class RNJWPlayerViewManager: RCTViewManager {
                 } else if let playerViewController = view.playerViewController {
                     playerViewController.player.loadPlaylist(items: playlistArray)
                 }
-            } else if let playlistString = playlist as? String {
-                loadPlaylistWithUrl(reactTag, playlist)
-            }            
+            }          
         }
     }
     
