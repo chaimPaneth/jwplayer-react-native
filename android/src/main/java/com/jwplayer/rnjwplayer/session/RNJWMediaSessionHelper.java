@@ -664,11 +664,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     JWLog.d(TAG, "AUDIOFOCUS_LOSS: Clearing Android Auto flag - this is a disconnect (time=" + timeSinceLastRequest + "ms)");
                     resetAndroidAutoFlag();
                 }
-                
-                // Skip pause during Android Auto handoff - focus will be regained immediately
+
+                // Ignore focus loss only during a *short* Android Auto handoff window.
+                // If we ignore all focus losses while AA is connected, the user may be unable to pause.
                 if (isPlayingFromAndroidAuto) {
-                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: Ignoring during Android Auto handoff, keeping playing state");
-                    return;
+                    if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
+                        JWLog.d(TAG, "AUDIOFOCUS_LOSS: Ignoring during Android Auto handoff window (" + timeSinceLastRequest + "ms), keeping playing state");
+                        return;
+                    }
+
+                    // Not a handoff anymore — treat as real focus loss and clear the AA flag.
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: AA flag set but outside handoff window (" + timeSinceLastRequest + "ms) — clearing flag and handling focus loss");
+                    resetAndroidAutoFlag();
                 }
                 
                 // Ignore focus loss if it happens too soon after requesting focus
@@ -692,11 +699,17 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: Clearing Android Auto flag - this is a disconnect (time=" + timeSinceLastRequest + "ms)");
                     resetAndroidAutoFlag();
                 }
-                
-                // Skip pause during Android Auto handoff
+
+                // Ignore transient focus loss only during a *short* Android Auto handoff window.
                 if (isPlayingFromAndroidAuto) {
-                    JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: Ignoring during Android Auto handoff");
-                    return;
+                    if (timeSinceLastRequest < FOCUS_LOSS_IGNORE_WINDOW_MS) {
+                        JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: Ignoring during Android Auto handoff window (" + timeSinceLastRequest + "ms)");
+                        return;
+                    }
+
+                    // Not a handoff anymore — clear the flag so pause behavior works normally.
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS_TRANSIENT: AA flag set but outside handoff window (" + timeSinceLastRequest + "ms) — clearing flag and handling focus loss");
+                    resetAndroidAutoFlag();
                 }
                 
                 // Also ignore transient loss if too soon
