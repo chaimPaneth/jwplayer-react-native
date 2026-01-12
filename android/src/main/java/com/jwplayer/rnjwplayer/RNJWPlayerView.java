@@ -1328,6 +1328,8 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         Context simpleContext = getNonBuggyContext(getReactContext(), getAppContext());
 
+        PlaybackManager.getInstance().stopAndCleanupCurrentPlayer();
+
         // Ensure clean state before creating new player view
         this.destroyPlayer();
 
@@ -1346,6 +1348,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         
         // Add to view hierarchy - React Native will handle layout
         addView(mPlayerView);
+
+        // Ensure we have a valid state before applying to the player
+        registry.setCurrentState(registry.getCurrentState()); // This is a hack to ensure player and view know the lifecycle state
 
         // Get player instance
         mPlayer = mPlayerView.getPlayer(this);
