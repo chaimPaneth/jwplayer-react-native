@@ -1746,13 +1746,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             if (handoffDuration > ANDROID_AUTO_HANDOFF_TIMEOUT_MS) {
                 JWLog.d(TAG, "performPause: Handoff flag timeout (" + handoffDuration + "ms) - clearing and allowing pause");
                 resetAndroidAutoFlag();
+            } else {
+                // Skip pause during Android Auto handoff
+                JWLog.d(TAG, "performPause: Ignoring during Android Auto handoff");
+                return;
             }
-        }
-        
-        // Skip pause during Android Auto handoff
-        if (isPlayingFromAndroidAuto) {
-            JWLog.d(TAG, "performPause: Ignoring during Android Auto handoff");
-            return;
         }
         
         try {
