@@ -1366,6 +1366,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         // Get player instance
         mPlayer = mPlayerView.getPlayer(this);
 
+        // Register this new player view as the active player
+        PlaybackManager.getInstance().setActivePlayer(mPlayer, this);
+
         // Apply view-specific props
         if (prop.hasKey("controls")) {
             mPlayerView.getPlayer().setControls(prop.getBoolean("controls"));

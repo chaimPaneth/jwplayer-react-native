@@ -15,7 +15,7 @@ public final class JWLog {
     public enum Mode { ALL, ERROR, DISABLED }
 
     // Default ON for easier debugging; toggle in app init for prod if desired
-    private static volatile Mode MODE = Mode.ERROR;
+    private static volatile Mode MODE = Mode.ALL;
 
     static { Log.i("JWLog", "JWLog initialized (mode=" + MODE + ")"); }
 

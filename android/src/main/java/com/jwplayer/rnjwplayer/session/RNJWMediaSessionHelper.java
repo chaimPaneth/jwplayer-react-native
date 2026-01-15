@@ -1184,6 +1184,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // This prevents audio focus loss from pausing playback during handoff
         if (externalMediaId != null) {
             isPlayingFromAndroidAuto = true;
+            androidAutoHandoffStartTime = System.currentTimeMillis();
             lastFocusRequestTime = System.currentTimeMillis();
             JWLog.d(TAG, "onPlaylistItem: Marked as Android Auto handoff (will ignore AUDIOFOCUS_LOSS for " + FOCUS_LOSS_IGNORE_WINDOW_MS + "ms)");
         }

@@ -300,6 +300,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         try {
             // If a UI player is currently active, do not create a headless/background player
             if (PlaybackManager.getInstance().isUIActive()) {
+                JWLog.w(TAG, "UI player is active, skipping background player creation");
                 return;
             }
             // Ensure no other player is active and wait for cleanup to finish
