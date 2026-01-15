@@ -1005,6 +1005,40 @@ public class RNJWPlayerView extends RelativeLayout implements
                 mConfig = prop;
                 return;
             }
+
+            // Only playlist changed -> update config without stop/recreate
+            if (mConfig != null && isOnlyDiff(prop, "playlist") && mPlayer != null) {
+                JWLog.d(TAG, "Playlist-only change detected -> applying fast update");
+                
+                // IMPORTANT: ensure mPlaylistProp is updated from NEW prop
+                if (prop.hasKey("playlist")) {
+                    mPlaylistProp = prop.getArray("playlist");
+                }
+
+                PlayerConfig oldConfig = mPlayer.getConfig();
+                PlayerConfig config = new PlayerConfig.Builder()
+                        .autostart(oldConfig.getAutostart())
+                        .nextUpOffset(oldConfig.getNextUpOffset())
+                        .repeat(oldConfig.getRepeat())
+                        .relatedConfig(oldConfig.getRelatedConfig())
+                        .displayDescription(oldConfig.getDisplayDescription())
+                        .displayTitle(oldConfig.getDisplayTitle())
+                        .advertisingConfig(oldConfig.getAdvertisingConfig())
+                        .stretching(oldConfig.getStretching())
+                        .uiConfig(oldConfig.getUiConfig())
+                        .playlist(Util.createPlaylist(mPlaylistProp))
+                        .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
+                        .preload(oldConfig.getPreload())
+                        .useTextureView(oldConfig.useTextureView())
+                        .thumbnailPreview(oldConfig.getThumbnailPreview())
+                        .mute(oldConfig.getMute())
+                        .build();
+
+                mPlayer.setup(config);
+
+                mConfig = prop;
+                return;
+            }
             
             // Check if we need full player recreation (rare cases only)
             if (requiresPlayerRecreation(prop)) {
@@ -1137,6 +1171,26 @@ public class RNJWPlayerView extends RelativeLayout implements
         configureStyling(configBuilder, prop);
         configureAdvertising(configBuilder, prop);
         configureUI(configBuilder, prop);
+
+        // Preserve important settings that RN props may not include every time
+        if (oldConfig != null) {
+            // Only copy if props did NOT specify them explicitly (so props win)
+            // Note: these keys are not currently supported in legacy props, so we always preserve.
+
+            configBuilder
+                .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
+                .preload(oldConfig.getPreload())
+                .useTextureView(oldConfig.useTextureView())
+                .thumbnailPreview(oldConfig.getThumbnailPreview())
+                .mute(oldConfig.getMute());
+
+            // relatedConfig / nextUpOffset also need preserving if not driven by props
+            configBuilder.relatedConfig(oldConfig.getRelatedConfig());
+
+            // If your legacy props don't set nextUpOffset directly (only nextUpStyle),
+            // preserving nextUpOffset can prevent resets:
+            configBuilder.nextUpOffset(oldConfig.getNextUpOffset());
+        }
         
         return configBuilder.build();
     }
@@ -1215,8 +1269,8 @@ public class RNJWPlayerView extends RelativeLayout implements
             ReadableMap nextUpStyle = prop.getMap("nextUpStyle");
             if (nextUpStyle != null && nextUpStyle.hasKey("offsetSeconds")
                     && nextUpStyle.hasKey("offsetPercentage")) {
-                int offsetSeconds = prop.getInt("offsetSeconds");
-                int offsetPercentage = prop.getInt("offsetPercentage");
+                int offsetSeconds = nextUpStyle.getInt("offsetSeconds");
+                int offsetPercentage = nextUpStyle.getInt("offsetPercentage");
                 configBuilder.nextUpOffset(offsetSeconds).nextUpOffsetPercentage(offsetPercentage);
             }
         }
