@@ -747,6 +747,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     @Override
     public void onBeforeNextPlaylistItem(PlaylistItemDecision playlistItemDecision, PlaylistItem nextItem, int indexOfNextItem) {
+        JWLog.d(TAG, "onBeforeNextPlaylistItem(playlistItemDecision=" + JWLog.safe(playlistItemDecision) + ", nextItem=" + JWLog.safe(nextItem) + ", indexOfNextItem=" + indexOfNextItem + ")");
         WritableMap event = Arguments.createMap();
         Gson gson = new Gson();
         event.putString("message", "onBeforeNextPlaylistItem");
@@ -973,6 +974,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * But you are able to hide the controls still if it is shown.
      */
     private UiConfig createUiConfigWithControlsContainer(JWPlayer player, UiConfig originalUiConfig) {
+        JWLog.d(TAG, "createUiConfigWithControlsContainer(player=" + JWLog.safe(player) + ", originalUiConfig=" + JWLog.safe(originalUiConfig) + ")");
         if (!player.getControls()) {
             return new UiConfig.Builder(originalUiConfig).show(UiGroup.PLAYER_CONTROLS_CONTAINER).build();
         } else {
@@ -1027,6 +1029,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * so we only recreate for critical changes like license updates.
      */
     private boolean requiresPlayerRecreation(ReadableMap prop) {
+        JWLog.d(TAG, "requiresPlayerRecreation(prop=" + JWLog.safe(prop) + ")");
         if (mConfig == null || mPlayer == null) {
             return true;
         }
@@ -1054,6 +1057,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * Based on the pattern used in loadPlaylist() and loadPlaylistWithUrl().
      */
     private void reconfigurePlayer(ReadableMap prop) {
+        JWLog.d(TAG, "reconfigurePlayer(prop=" + JWLog.safe(prop) + ")");
         if (mPlayer == null) {
             JWLog.e(TAG, "Cannot reconfigure - player is null");
             return;
@@ -1106,6 +1110,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * This ensures smooth transitions when reconfiguring the player.
      */
     private PlayerConfig buildPlayerConfig(ReadableMap prop, PlayerConfig oldConfig) {
+        JWLog.d(TAG, "buildPlayerConfig(prop=" + JWLog.safe(prop) + ", oldConfig=" + JWLog.safe(oldConfig) + ")");
         PlayerConfig.Builder configBuilder = new PlayerConfig.Builder();
         
         // Try to parse as JW config first
@@ -1182,6 +1187,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void configurePlaylist(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        JWLog.d(TAG, "configurePlaylist(configBuilder=" + JWLog.safe(configBuilder) + ", prop=" + JWLog.safe(prop) + ")");
         if (playlistNotTheSame(prop)) {
             List<PlaylistItem> playlist = new ArrayList<>();
             mPlaylistProp = prop.getArray("playlist");
@@ -1199,6 +1205,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void configureBasicSettings(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        JWLog.d(TAG, "configureBasicSettings(configBuilder=" + JWLog.safe(configBuilder) + ", prop=" + JWLog.safe(prop) + ")");
         if (prop.hasKey("autostart")) {
             boolean autostart = prop.getBoolean("autostart");
             configBuilder.autostart(autostart);
@@ -1226,6 +1233,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void configureStyling(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        JWLog.d(TAG, "configureStyling(configBuilder=" + JWLog.safe(configBuilder) + ", prop=" + JWLog.safe(prop) + ")");
         if (prop.hasKey("styling")) {
             ReadableMap styling = prop.getMap("styling");
             if (styling != null) {
@@ -1247,6 +1255,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void configureAdvertising(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        JWLog.d(TAG, "configureAdvertising(configBuilder=" + JWLog.safe(configBuilder) + ", prop=" + JWLog.safe(prop) + ")");
         if (prop.hasKey("advertising")) {
             ReadableMap ads = prop.getMap("advertising");
             AdvertisingConfig advertisingConfig = RNJWPlayerAds.getAdvertisingConfig(ads);
@@ -1257,6 +1266,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     private void configureUI(PlayerConfig.Builder configBuilder, ReadableMap prop) {
+        JWLog.d(TAG, "configureUI(configBuilder=" + JWLog.safe(configBuilder) + ", prop=" + JWLog.safe(prop) + ")");
         // Handle controls property - default to true if not specified
         boolean controls = true; // Default to showing controls
         if (prop.hasKey("controls")) {
@@ -1299,6 +1309,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      * Note: This method calls destroyPlayer() first to ensure clean state.
      */
     private void createPlayerView(ReadableMap prop) {
+        JWLog.d(TAG, "createPlayerView(prop=" + JWLog.safe(prop) + ")");
         PlayerConfig.Builder configBuilder = new PlayerConfig.Builder();
 
         JSONObject obj;
