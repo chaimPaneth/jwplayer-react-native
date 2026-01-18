@@ -1,5 +1,9 @@
 package com.jwplayer.rnjwplayer.utils;
 
+import com.facebook.react.bridge.ReadableArray;
+import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.ReadableType;
+
 import android.util.Log;
 
 /**
@@ -15,7 +19,7 @@ public final class JWLog {
     public enum Mode { ALL, ERROR, DISABLED }
 
     // Default ON for easier debugging; toggle in app init for prod if desired
-    private static volatile Mode MODE = Mode.ALL;
+    private static volatile Mode MODE = Mode.ERROR;
 
     static { Log.i("JWLog", "JWLog initialized (mode=" + MODE + ")"); }
 
@@ -59,7 +63,107 @@ public final class JWLog {
     // ---- Shared helper formatting utilities (moved from RNJWMediaSessionHelper) ----
     public static String safe(Object o) {
         if (o == null) return "null";
-        try { return String.valueOf(o); } catch (Throwable t) { return o.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(o)); }
+
+        // Special-case React Native types so logs don't leak secrets (license, tokens, auth urls, etc.)
+        try {
+            if (o instanceof ReadableMap) {
+                return safeReadableMap((ReadableMap) o);
+            }
+            if (o instanceof ReadableArray) {
+                return safeReadableArray((ReadableArray) o);
+            }
+        } catch (Throwable ignore) {
+            // fall through to default
+        }
+
+        try { return String.valueOf(o); }
+        catch (Throwable t) { return o.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(o)); }
+    }
+
+    private static boolean isSensitiveKey(String key) {
+        if (key == null) return false;
+        String k = key.toLowerCase();
+        return k.equals("license")
+                || k.contains("token")
+                || k.contains("secret")
+                || k.contains("password")
+                || k.contains("authorization")
+                || k.contains("authurl")
+                || k.equals("authurl")
+                || k.contains("apikey")
+                || k.contains("api_key")
+                || k.contains("client_secret")
+                || k.contains("refresh")
+                || k.contains("session");
+    }
+
+    private static String redact(String value) {
+        if (value == null) return "REDACTED";
+        try {
+            int n = value.length();
+            if (n <= 6) return "REDACTED";
+            // Keep only a tiny tail for debugging uniqueness without leaking the value
+            String tail = value.substring(Math.max(0, n - 4));
+            return "REDACTED(*" + n + ",.." + tail + ")";
+        } catch (Throwable t) {
+            return "REDACTED";
+        }
+    }
+
+    private static String safeReadableMap(ReadableMap map) {
+        if (map == null) return "ReadableMap{null}";
+        StringBuilder sb = new StringBuilder("ReadableMap{");
+        try {
+            java.util.HashMap<String, Object> hm = map.toHashMap();
+            int count = 0;
+            for (String key : hm.keySet()) {
+                if (count++ > 0) sb.append(", ");
+                Object v = hm.get(key);
+                sb.append(key).append("=");
+
+                if (isSensitiveKey(key)) {
+                    sb.append(redact(v != null ? String.valueOf(v) : null));
+                    continue;
+                }
+
+                if (v == null) {
+                    sb.append("null");
+                } else if (v instanceof String) {
+                    String s = (String) v;
+                    // Keep strings short to avoid log spam
+                    if (s.length() > 120) s = s.substring(0, 120) + "…";
+                    sb.append("\"").append(s).append("\"");
+                } else if (v instanceof Number || v instanceof Boolean) {
+                    sb.append(String.valueOf(v));
+                } else if (v instanceof java.util.Map) {
+                    sb.append("{…}");
+                } else if (v instanceof java.util.List) {
+                    sb.append("[…]");
+                } else {
+                    sb.append(v.getClass().getSimpleName());
+                }
+            }
+        } catch (Throwable t) {
+            sb.append("error=").append(t.getClass().getSimpleName());
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private static String safeReadableArray(ReadableArray arr) {
+        if (arr == null) return "ReadableArray{null}";
+        try {
+            int n = arr.size();
+            // Don't dump contents; just size + a small peek at first element type
+            String first = "empty";
+            if (n > 0) {
+                ReadableType t = arr.getType(0);
+                first = (t != null ? t.name() : "unknown");
+            }
+            return "ReadableArray{size=" + n + ", firstType=" + first + "}";
+        } catch (Throwable t) {
+            return "ReadableArray{error}";
+        }
     }
 
     public static String id(Object o) {
