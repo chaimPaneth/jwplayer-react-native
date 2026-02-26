@@ -325,6 +325,12 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
     override func jwplayer(_ player:JWPlayer, isPlayingWithReason reason:JWPlayReason) {
         super.jwplayer(player, isPlayingWithReason:reason)
 
+        // Explicitly sync MPNowPlayingInfoCenter playback state so the CarPlay
+        // Now Playing button updates when play is triggered from the phone UI.
+        // On simulator the audio session doesn't fully activate, so iOS never
+        // infers the playing state on its own — this is the required explicit signal.
+        MPNowPlayingInfoCenter.default().playbackState = .playing
+
         parentView?.onPlay?([:])
 
         parentView?.userPaused = false
@@ -338,6 +344,10 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
     override func jwplayer(_ player:JWPlayer, didPauseWithReason reason:JWPauseReason) {
         super.jwplayer(player, didPauseWithReason:reason)
+
+        // Mirror the explicit state sync from isPlayingWithReason above.
+        MPNowPlayingInfoCenter.default().playbackState = .paused
+
         parentView?.onPause?([:])
 
         if let wasInterrupted = parentView?.wasInterrupted {
