@@ -487,15 +487,24 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             
             // Update MediaSession to stopped state
             if (sharedMediaSession != null && sharedMediaSession.isActive()) {
-                sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+                PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
                     .setState(PlaybackStateCompat.STATE_STOPPED, 0, 1.0f)
                     .setActions(PlaybackStateCompat.ACTION_PLAY | 
                                PlaybackStateCompat.ACTION_PAUSE | 
                                PlaybackStateCompat.ACTION_STOP |
                                PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
                                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
-                               PlaybackStateCompat.ACTION_SEEK_TO)
-                    .build());
+                               PlaybackStateCompat.ACTION_SEEK_TO);
+                // Preserve custom actions (e.g. Android Auto speed button)
+                try {
+                    PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
+                    if (existing != null) {
+                        for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
+                            builder.addCustomAction(ca);
+                        }
+                    }
+                } catch (Exception ignored) {}
+                sharedMediaSession.setPlaybackState(builder.build());
             }
             
             JWLog.d(TAG, "📱 JAVA: stopAndCleanup completed successfully");
@@ -645,13 +654,22 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 
                 // Update session state to indicate transfer with current position
                 if (sharedMediaSession != null) {
-                    sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+                    PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
                         .setState(PlaybackStateCompat.STATE_PAUSED, currentPositionMs, 1.0f)
                         .setActions(PlaybackStateCompat.ACTION_PLAY | 
                                    PlaybackStateCompat.ACTION_PAUSE | 
                                    PlaybackStateCompat.ACTION_STOP |
-                                   PlaybackStateCompat.ACTION_SEEK_TO)
-                        .build());
+                                   PlaybackStateCompat.ACTION_SEEK_TO);
+                    // Preserve custom actions (e.g. Android Auto speed button)
+                    try {
+                        PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
+                        if (existing != null) {
+                            for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
+                                builder.addCustomAction(ca);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                    sharedMediaSession.setPlaybackState(builder.build());
                 }
             } catch (Exception e) {
                 JWLog.e(TAG, "Error during background player transfer", e);
@@ -721,6 +739,16 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                                     uiPlayer.setup(cfg);
                                     // Explicitly start playback for immediate response from AA (in case autostart is gated)
                                     try { uiPlayer.play(); } catch (Exception ignored) {}
+                                    // Re-apply persisted playback speed — setup() resets to 1x
+                                    try {
+                                        float savedSpeed = RNJWMediaSessionHelper.currentSpeed;
+                                        if (savedSpeed != 1.0f && savedSpeed > 0f) {
+                                            uiPlayer.setPlaybackRate(savedSpeed);
+                                            JWLog.d(TAG, "📱 JAVA: Restored playback speed to " + savedSpeed + "x on UI player");
+                                        }
+                                    } catch (Exception speedEx) {
+                                        JWLog.w(TAG, "📱 JAVA: Failed to restore UI player speed: " + speedEx.getMessage());
+                                    }
                                 } catch (Exception e) {
                                     JWLog.w(TAG, "UI player load failed: " + e.getMessage());
                                     fallbackToReactNative(mediaId, uiPlayer);
@@ -815,6 +843,29 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 JWLog.d(TAG, "📱 JAVA: Background player created successfully");
                 if (autoStartEnabled) {
                     startAutostartChain();
+                }
+                // Re-apply persisted playback speed to the new player instance.
+                // JWPlayer.setup() resets speed to 1x, but the user's last chosen
+                // speed is preserved in the static RNJWMediaSessionHelper.currentSpeed.
+                try {
+                    float savedSpeed = RNJWMediaSessionHelper.currentSpeed;
+                    if (savedSpeed != 1.0f && savedSpeed > 0f) {
+                        final float speedToApply = savedSpeed;
+                        final JWPlayer player = backgroundPlayer;
+                        // Delay slightly to ensure player is initialized after setup()
+                        mainHandler.postDelayed(() -> {
+                            try {
+                                if (player != null) {
+                                    player.setPlaybackRate(speedToApply);
+                                    JWLog.d(TAG, "📱 JAVA: Restored playback speed to " + speedToApply + "x on new background player");
+                                }
+                            } catch (Exception e) {
+                                JWLog.w(TAG, "📱 JAVA: Failed to restore playback speed: " + e.getMessage());
+                            }
+                        }, 300);
+                    }
+                } catch (Exception speedEx) {
+                    JWLog.w(TAG, "📱 JAVA: Error reading saved speed: " + speedEx.getMessage());
                 }
             } else {
                 JWLog.e(TAG, "📱 JAVA: Failed to create background player");
@@ -1010,15 +1061,25 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 long position = (long)(backgroundPlayer.getPosition() * 1000); // Convert to milliseconds
                 // Keep MediaSession playback state in sync when available
                 if (sharedMediaSession != null) {
-                    sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
-                        .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, position, isPlaying ? 1.0f : 0.0f)
+                    float speed = isPlaying ? RNJWMediaSessionHelper.currentSpeed : 0.0f;
+                    PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
+                        .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, position, speed)
                         .setActions(PlaybackStateCompat.ACTION_PLAY | 
                                    PlaybackStateCompat.ACTION_PAUSE | 
                                    PlaybackStateCompat.ACTION_STOP |
                                    PlaybackStateCompat.ACTION_SEEK_TO |
                                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                                   PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
-                        .build());
+                                   PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS);
+                    // Preserve custom actions (e.g. Android Auto speed button)
+                    try {
+                        PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
+                        if (existing != null) {
+                            for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
+                                builder.addCustomAction(ca);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                    sharedMediaSession.setPlaybackState(builder.build());
                 }
 
                 saveCurrentSeekPosition();
@@ -1352,15 +1413,24 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 }
             }
             
-            sharedMediaSession.setPlaybackState(new PlaybackStateCompat.Builder()
+            PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
                 .setState(PlaybackStateCompat.STATE_STOPPED, positionMs, 1.0f)
                 .setActions(PlaybackStateCompat.ACTION_PLAY | 
                            PlaybackStateCompat.ACTION_PAUSE | 
                            PlaybackStateCompat.ACTION_STOP |
                            PlaybackStateCompat.ACTION_SEEK_TO |
                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                           PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS)
-                .build());
+                           PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS);
+            // Preserve custom actions (e.g. Android Auto speed button)
+            try {
+                PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
+                if (existing != null) {
+                    for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
+                        builder.addCustomAction(ca);
+                    }
+                }
+            } catch (Exception ignored) {}
+            sharedMediaSession.setPlaybackState(builder.build());
         } catch (Exception e) {
             JWLog.e(TAG, "Error updating MediaSession metadata", e);
         }

@@ -87,6 +87,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
 
+    // Playback speed set via Android Auto custom action (persists across instance recreation)
+    public static float currentSpeed = 1.0f;
+
     // Pending seek info
     private static Long pendingSeekMs = null;
     private static boolean pendingSeekApplied = false;
@@ -250,6 +253,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 JWLog.w(TAG, "mediaSessionCallback onMediaButtonEvent error: " + ex.getMessage());
             }
             return super.onMediaButtonEvent(mediaButtonIntent);
+        }
+
+        @Override
+        public void onCustomAction(String action, android.os.Bundle extras) {
+            JWLog.d(TAG, "mediaSessionCallback.onCustomAction(action=" + action + ")");
+            // Delegate speed control back to MediaBrowserService which owns the speed state
+            if ("com.mediabrowser.ACTION_CHANGE_SPEED".equals(action)) {
+                try {
+                    Class<?> serviceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                    Object instance = serviceClass.getMethod("getInstance").invoke(null);
+                    if (instance != null) {
+                        serviceClass.getMethod("handleSpeedAction").invoke(instance);
+                    }
+                } catch (Exception e) {
+                    JWLog.w(TAG, "onCustomAction: delegation to MediaBrowserService failed: " + e.getMessage());
+                }
+            }
         }
     };
 
@@ -471,11 +491,41 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
 
-        float speed = (state == PlaybackStateCompat.STATE_PLAYING) ? 1.0f : 0.0f;
+        float speed = (state == PlaybackStateCompat.STATE_PLAYING) ? currentSpeed : 0.0f;
 
         PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
                 .setState(state, positionMs, speed)
                 .setActions(actions);
+
+        // Preserve any custom actions already registered on the session (e.g. the Android Auto
+        // speed control button set by MediaBrowserService). Without this, every JWPlayer state
+        // update overwrites the PlaybackStateCompat from scratch, stripping the custom actions
+        // and causing the speed button to disappear from the Android Auto UI.
+        boolean hasCustomActions = false;
+        try {
+            PlaybackStateCompat existingState =
+                    this.mediaSessionStateProvider.mediaSessionCompat.getController().getPlaybackState();
+            if (existingState != null) {
+                for (PlaybackStateCompat.CustomAction ca : existingState.getCustomActions()) {
+                    builder.addCustomAction(ca);
+                    hasCustomActions = true;
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // Fallback: if no custom actions were found on the session (e.g. they were wiped
+        // during a media-switch destroy/recreate cycle), ask MediaBrowserService directly
+        // for the current speed custom action.
+        if (!hasCustomActions) {
+            try {
+                Class<?> mbsClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                java.lang.reflect.Method getAction = mbsClass.getMethod("getSpeedCustomAction");
+                Object actionObj = getAction.invoke(null);
+                if (actionObj instanceof PlaybackStateCompat.CustomAction) {
+                    builder.addCustomAction((PlaybackStateCompat.CustomAction) actionObj);
+                }
+            } catch (Exception ignored) {}
+        }
 
         try {
             this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(builder.build());
@@ -884,6 +934,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
                         .setState(PlaybackStateCompat.STATE_NONE, 0L, 0f)
                         .setActions(0L);
+                // Preserve custom actions (like Android Auto speed button set by
+                // MediaBrowserService) so they survive the helper destroy/recreate
+                // cycle during media switches.  Without this, the speed custom action
+                // is wiped and the next RNJWMediaSessionHelper instance finds nothing
+                // to carry forward, causing the speed button to disappear from AA UI.
+                try {
+                    PlaybackStateCompat existingState =
+                            this.mediaSessionStateProvider.mediaSessionCompat.getController().getPlaybackState();
+                    if (existingState != null) {
+                        for (PlaybackStateCompat.CustomAction ca : existingState.getCustomActions()) {
+                            stateBuilder.addCustomAction(ca);
+                        }
+                    }
+                } catch (Exception caEx) {
+                    JWLog.w(TAG, "softCleanup: preserving custom actions failed " + caEx.getMessage());
+                }
                 this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(stateBuilder.build());
             } catch (Exception ex) {
                 JWLog.w(TAG, "softCleanup: setPlaybackState failed " + ex.getMessage());
@@ -1085,7 +1151,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             positionMs = 0L;
         }
 
-        float speed = (playbackState == PlaybackStateCompat.STATE_PLAYING) ? 1.0F : 0.0F;
+        float speed = (playbackState == PlaybackStateCompat.STATE_PLAYING) ? currentSpeed : 0.0F;
         playbackStateBuilder.builder
             .setState(playbackState, positionMs, speed);
 
@@ -2229,6 +2295,26 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             } catch (Exception e) {
                 JWLog.e(TAG, "Error in static handleSeekTo", e);
                 return false;
+            }
+        }
+        return false;
+    }
+
+    public static boolean handleSetSpeed(float speed) {
+        JWLog.d(TAG, "handleSetSpeed(speed=" + speed + ") activeInstance=" + (activeInstance != null));
+        currentSpeed = speed;
+        if (activeInstance != null) {
+            try {
+                JWPlayer player = activeInstance.jwPlayer;
+                if (player == null && activeInstance.serviceMediaApi != null) {
+                    player = activeInstance.serviceMediaApi.getPlayer();
+                }
+                if (player != null) {
+                    player.setPlaybackRate(speed);
+                    return true;
+                }
+            } catch (Exception e) {
+                JWLog.e(TAG, "Error in static handleSetSpeed", e);
             }
         }
         return false;
