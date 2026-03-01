@@ -491,6 +491,27 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
 
+        // Detect speed drift: if the in-app UI changed JWPlayer's rate directly
+        // (bypassing MediaBrowserService.setPlaybackSpeed), our stored currentSpeed
+        // is stale.  Read the actual player rate and, when it differs, update both
+        // the stored value AND the AA speed custom-action icon so that the Android
+        // Auto UI stays in sync — entirely within the library, no app code needed.
+        if (state == PlaybackStateCompat.STATE_PLAYING && player != null) {
+            try {
+                float actualRate = (float) player.getPlaybackRate();
+                if (actualRate > 0 && Math.abs(actualRate - currentSpeed) > 0.01f) {
+                    JWLog.d(TAG, "updatePlaybackState: speed drift detected — actual=" + actualRate + " stored=" + currentSpeed + "; syncing");
+                    currentSpeed = actualRate;
+                    // Tell MediaBrowserService to refresh the custom action icon/label
+                    try {
+                        Class<?> mbsClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                        java.lang.reflect.Method setSpeed = mbsClass.getMethod("setPlaybackSpeedFromSync", float.class);
+                        setSpeed.invoke(null, actualRate);
+                    } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
+        }
+
         float speed = (state == PlaybackStateCompat.STATE_PLAYING) ? currentSpeed : 0.0f;
 
         PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
@@ -2318,5 +2339,33 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
         return false;
+    }
+
+    /**
+     * Returns the actual playback rate from the active JWPlayer instance.
+     * Falls back to the stored {@link #currentSpeed} if no player is available.
+     * Called by MediaBrowserService.getPlaybackSpeed() so that JS always receives
+     * the real rate — even if it was changed from the in-app UI without going
+     * through the vehicle-aware wrapper.
+     */
+    public static float getActualPlaybackRate() {
+        if (activeInstance != null) {
+            try {
+                JWPlayer player = activeInstance.jwPlayer;
+                if (player == null && activeInstance.serviceMediaApi != null) {
+                    player = activeInstance.serviceMediaApi.getPlayer();
+                }
+                if (player != null) {
+                    float rate = (float) player.getPlaybackRate();
+                    if (rate > 0) {
+                        currentSpeed = rate; // keep stored value in sync
+                        return rate;
+                    }
+                }
+            } catch (Exception e) {
+                JWLog.w(TAG, "getActualPlaybackRate: failed " + e.getMessage());
+            }
+        }
+        return currentSpeed;
     }
 }

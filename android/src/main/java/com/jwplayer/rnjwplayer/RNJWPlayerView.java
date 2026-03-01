@@ -2220,6 +2220,19 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onPlaybackRateChanged(PlaybackRateChangedEvent playbackRateChangedEvent) {
         JWLog.d(TAG, "onPlaybackRateChanged(rate=" + playbackRateChangedEvent.getPlaybackRate() + ")");
+
+        // Keep MediaSession speed in sync so Android Auto icon updates immediately
+        // when speed is changed from the phone app UI (which bypasses MediaBrowserService).
+        float newRate = (float) playbackRateChangedEvent.getPlaybackRate();
+        if (newRate > 0) {
+            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.currentSpeed = newRate;
+            try {
+                Class<?> mbsClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                java.lang.reflect.Method setSpeed = mbsClass.getMethod("setPlaybackSpeedFromSync", float.class);
+                setSpeed.invoke(null, newRate);
+            } catch (Exception ignored) {}
+        }
+
         WritableMap event = Arguments.createMap();
         event.putString("message", "onRateChanged");
         event.putDouble("rate", playbackRateChangedEvent.getPlaybackRate());
