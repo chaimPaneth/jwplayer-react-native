@@ -486,25 +486,28 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             }
             
             // Update MediaSession to stopped state
-            if (sharedMediaSession != null && sharedMediaSession.isActive()) {
-                PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
-                    .setState(PlaybackStateCompat.STATE_STOPPED, 0, 1.0f)
-                    .setActions(PlaybackStateCompat.ACTION_PLAY | 
-                               PlaybackStateCompat.ACTION_PAUSE | 
-                               PlaybackStateCompat.ACTION_STOP |
-                               PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                               PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
-                               PlaybackStateCompat.ACTION_SEEK_TO);
-                // Preserve custom actions (e.g. Android Auto speed button)
+            if (sharedMediaSession != null) {
                 try {
-                    PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
-                    if (existing != null) {
-                        for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
-                            builder.addCustomAction(ca);
+                    PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
+                        .setState(PlaybackStateCompat.STATE_NONE, 0, 1.0f)
+                        .setActions(0L);
+                    // Preserve custom actions (e.g. Android Auto speed button)
+                    try {
+                        PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
+                        if (existing != null) {
+                            for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
+                                builder.addCustomAction(ca);
+                            }
                         }
-                    }
-                } catch (Exception ignored) {}
-                sharedMediaSession.setPlaybackState(builder.build());
+                    } catch (Exception ignored) {}
+                    sharedMediaSession.setPlaybackState(builder.build());
+
+                    sharedMediaSession.setMetadata(null);
+                    sharedMediaSession.setActive(false);
+                    JWLog.d(TAG, "📱 JAVA: MediaSession deactivated (active=false, actions=0, metadata=null)");
+                } catch (Exception sessionEx) {
+                    JWLog.w(TAG, "📱 JAVA: Error deactivating MediaSession: " + sessionEx.getMessage());
+                }
             }
             
             JWLog.d(TAG, "📱 JAVA: stopAndCleanup completed successfully");
@@ -1126,10 +1129,15 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             if (mediaSessionHelper != null) {
                 JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Detaching old player from media session (lightweight)");
                 try {
-                    mediaSessionHelper.detachPlayerOnly();
-                    JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Media session helper detach completed");
+                    // Use full cleanup() instead of detachPlayerOnly() so that:
+                    // 1. MediaSession is deactivated (setActive(false))
+                    // 2. Audio focus is released
+                    // 3. activeInstance is nulled (prevents zombie delegation)
+                    // 4. Notification is cancelled
+                    mediaSessionHelper.cleanup();
+                    JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Media session helper cleanup completed");
                 } catch (Exception e) {
-                    JWLog.w(TAG, "🎵 JWPlayerNativePlaybackHandler: Error detaching media session helper: " + e.getMessage());
+                    JWLog.w(TAG, "🎵 JWPlayerNativePlaybackHandler: Error cleaning up media session helper: " + e.getMessage());
                 }
                 mediaSessionHelper = null;
             }
@@ -1168,6 +1176,20 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     private boolean requestAudioFocus() {
         JWLog.d(TAG, "📱 JAVA: requestAudioFocus called - current hasAudioFocus: " + hasAudioFocus);
+
+        // Delegate to RNJWMediaSessionHelper if available (single audio focus owner)
+        if (mediaSessionHelper != null) {
+            JWLog.d(TAG, "📱 JAVA: Delegating audio focus request to RNJWMediaSessionHelper");
+            boolean granted = mediaSessionHelper.requestAudioFocusForPlayback();
+            synchronized (focusLock) {
+                hasAudioFocus = granted;
+                playbackNowAuthorized = granted;
+            }
+            return granted;
+        }
+        
+        // Fallback: manage our own focus if helper is not yet attached
+        JWLog.d(TAG, "📱 JAVA: No mediaSessionHelper - managing audio focus directly (fallback)");
 
         if (audioManager == null) {
             audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
@@ -1237,8 +1259,19 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     private void releaseAudioFocus() {
         JWLog.d(TAG, "releaseAudioFocus()");
+
+        // Delegate to RNJWMediaSessionHelper if available (single audio focus owner)
+        if (mediaSessionHelper != null) {
+            JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Delegating audio focus release to RNJWMediaSessionHelper");
+            mediaSessionHelper.releaseAudioFocus();
+            hasAudioFocus = false;
+            playbackNowAuthorized = false;
+            return;
+        }
+        
+        // Fallback: release our own focus if helper is not attached
         if (audioManager != null && hasAudioFocus) {
-            JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Releasing audio focus");
+            JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Releasing audio focus (fallback)");
             
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && focusRequest != null) {
                 audioManager.abandonAudioFocusRequest(focusRequest);
