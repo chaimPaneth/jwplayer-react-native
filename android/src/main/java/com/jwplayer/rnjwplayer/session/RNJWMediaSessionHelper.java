@@ -348,6 +348,74 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         this.setupServiceMediaApi(serviceMediaApi);
     }
 
+    /**
+     * Called by MediaBrowserService (via reflection) when a new MediaSession singleton
+     * was created after the previous one was released.  Re-points this helper at the
+     * new session and re-pushes the current metadata & playback state so Android Auto
+     * sees the currently-playing track immediately.
+     */
+    public static void refreshSessionReference() {
+        JWLog.d(TAG, "refreshSessionReference() activeInstance=" + (activeInstance != null));
+        if (activeInstance == null) {
+            JWLog.d(TAG, "refreshSessionReference: no active instance — nothing to refresh");
+            return;
+        }
+
+        RNJWMediaSessionHelper self = activeInstance;
+        if (self.context == null) {
+            JWLog.w(TAG, "refreshSessionReference: context is null");
+            return;
+        }
+
+        // Get the (possibly new) singleton
+        MediaSessionCompat newSession = MediaSessionSingleton.getInstance(self.context);
+
+        // Check if the reference actually changed
+        MediaSessionCompat currentSession = (self.mediaSessionStateProvider != null)
+                ? self.mediaSessionStateProvider.mediaSessionCompat : null;
+        if (currentSession == newSession) {
+            JWLog.d(TAG, "refreshSessionReference: session reference unchanged — re-pushing state");
+        } else {
+            JWLog.d(TAG, "refreshSessionReference: session reference CHANGED — updating provider");
+            self.mediaSessionStateProvider = new MediaSessionStateProvider(newSession);
+            try {
+                newSession.setCallback(self.mediaSessionCallback);
+            } catch (Exception e) {
+                JWLog.w(TAG, "refreshSessionReference: failed to set callback: " + e.getMessage());
+            }
+        }
+
+        // Re-push current metadata from the player
+        try {
+            if (self.jwPlayer != null) {
+                PlaylistItem item = self.jwPlayer.getPlaylistItem();
+                if (item != null) {
+                    self.updatePlaylistItem(item);
+                    JWLog.d(TAG, "refreshSessionReference: metadata re-pushed (title=" + item.getTitle() + ")");
+                }
+            }
+        } catch (Exception e) {
+            JWLog.w(TAG, "refreshSessionReference: metadata push failed: " + e.getMessage());
+        }
+
+        // Re-push current playback state
+        try {
+            if (self.jwPlayer != null) {
+                PlayerState ps = self.jwPlayer.getState();
+                int pbState = PlaybackStateCompat.STATE_NONE;
+                if (ps == PlayerState.PLAYING) pbState = PlaybackStateCompat.STATE_PLAYING;
+                else if (ps == PlayerState.PAUSED) pbState = PlaybackStateCompat.STATE_PAUSED;
+                else if (ps == PlayerState.BUFFERING) pbState = PlaybackStateCompat.STATE_BUFFERING;
+                else if (ps == PlayerState.IDLE) pbState = PlaybackStateCompat.STATE_STOPPED;
+
+                self.updatePlaybackState(self.jwPlayer, pbState);
+                JWLog.d(TAG, "refreshSessionReference: playback state re-pushed (state=" + pbState + ")");
+            }
+        } catch (Exception e) {
+            JWLog.w(TAG, "refreshSessionReference: state push failed: " + e.getMessage());
+        }
+    }
+
     final void setupServiceMediaApi(ServiceMediaApi serviceMediaApi) {
         JWLog.d(TAG, "setupServiceMediaApi(serviceMediaApi=" + JWLog.id(serviceMediaApi) + ")");
         this.cleanup();
