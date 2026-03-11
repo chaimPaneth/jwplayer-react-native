@@ -548,6 +548,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 PlaybackStateCompat.ACTION_PLAY_PAUSE |
                 PlaybackStateCompat.ACTION_STOP |
                 PlaybackStateCompat.ACTION_SEEK_TO |
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
                 PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID;
 
         if (serviceMediaApi != null) {
@@ -1211,7 +1213,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         PlaybackStateCompatWrapper currentPlaybackState = this.mediaSessionStateProvider.getPlaybackState();
         PlaybackStateCompatWrapper.Builder playbackStateBuilder = new PlaybackStateCompatWrapper.Builder(currentPlaybackState);
         long notificationCapabilities = this.serviceMediaApi.getNotificationCapabilities();
-        playbackStateBuilder.builder.setActions(notificationCapabilities | PlaybackStateCompat.ACTION_SEEK_TO);
+        playbackStateBuilder.builder.setActions(
+            notificationCapabilities | 
+            PlaybackStateCompat.ACTION_SEEK_TO | 
+            PlaybackStateCompat.ACTION_SKIP_TO_NEXT | 
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS);
         byte playbackState = 0;
         switch (playerState) {
             case PLAYING:
@@ -1731,9 +1737,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             PlaybackStateCompatWrapper.Builder stateBuilder = new PlaybackStateCompatWrapper.Builder(capsWrapper);
 
             // Include seek actions so progress bar remains interactive
-            long actions = PlaybackStateCompat.ACTION_PLAY
-                    | PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID
-                    | PlaybackStateCompat.ACTION_SEEK_TO;
+            long actions = PlaybackStateCompat.ACTION_PLAY |
+                    PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID |
+                    PlaybackStateCompat.ACTION_SEEK_TO |
+                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
+                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS;
 
             if (this.serviceMediaApi != null) {
                 try {
