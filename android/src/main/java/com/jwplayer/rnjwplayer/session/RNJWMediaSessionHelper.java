@@ -201,6 +201,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         @Override
+        public void onPlayFromSearch(String query, Bundle extras) {
+            JWLog.d(TAG, "mediaSessionCallback.onPlayFromSearch(query=" + query + ")");
+            delegateSearchToMediaBrowserService(query, extras, "play");
+        }
+
+        @Override
+        public void onPrepareFromSearch(String query, Bundle extras) {
+            JWLog.d(TAG, "mediaSessionCallback.onPrepareFromSearch(query=" + query + ")");
+            delegateSearchToMediaBrowserService(query, extras, "prepare");
+        }
+
+        @Override
         public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
             JWLog.d(TAG, "mediaSessionCallback.onMediaButtonEvent(intent=" + JWLog.intentInfo(mediaButtonIntent) + ")");
             // Let existing fallback also run; just return super after we optionally process
@@ -2184,6 +2196,33 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         return lastKnownDurationMs;
+    }
+
+    /**
+     * Delegate voice search callbacks back to MediaBrowserService which owns
+     * the sendSearchQueryToJS logic.  Called from our mediaSessionCallback when
+     * RNJWMediaSessionHelper has taken over the MediaSession callback.
+     */
+    private void delegateSearchToMediaBrowserService(String query, Bundle extras, String action) {
+        try {
+            Class<?> serviceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+            // sendSearchQueryToJS is a private instance method; call the static
+            // helper that MediaBrowserService exposes for cross-package delegation.
+            // Fallback: get the running service instance from the singleton pattern.
+            java.lang.reflect.Method getInstanceMethod = serviceClass.getDeclaredMethod("getInstance");
+            Object serviceInstance = getInstanceMethod.invoke(null);
+            if (serviceInstance != null) {
+                java.lang.reflect.Method sendMethod = serviceClass.getDeclaredMethod(
+                        "sendSearchQueryToJS", String.class, Bundle.class, String.class);
+                sendMethod.setAccessible(true);
+                sendMethod.invoke(serviceInstance, query, extras, action);
+                JWLog.d(TAG, "delegateSearchToMediaBrowserService: delegated query=\"" + query + "\" action=" + action);
+            } else {
+                JWLog.w(TAG, "delegateSearchToMediaBrowserService: MediaBrowserService instance is null");
+            }
+        } catch (Exception e) {
+            JWLog.e(TAG, "delegateSearchToMediaBrowserService: reflection failed – " + e.getMessage(), e);
+        }
     }
 
     /**

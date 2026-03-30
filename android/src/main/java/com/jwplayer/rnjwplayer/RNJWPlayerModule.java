@@ -247,6 +247,12 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
+    public void setPendingPlayFromSearch() {
+        JWLog.d(TAG, "setPendingPlayFromSearch() called from JS");
+        PlaybackManager.getInstance().setPendingPlayFromSearch(true);
+    }
+
+    @ReactMethod
     public void togglePIP(final int reactTag) {
         JWLog.d(TAG, "togglePIP(reactTag=" + reactTag + ")");
         new Handler(Looper.getMainLooper()).post(() -> {

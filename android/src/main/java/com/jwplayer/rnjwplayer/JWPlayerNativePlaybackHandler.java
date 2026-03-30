@@ -809,7 +809,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     JWLog.d(TAG, "📱 JAVA: Starting background playback for new media");
                     startBackgroundPlayback(post, title, subtitle);
                 } else {
-                    JWLog.w(TAG, "📱 JAVA: No valid URLs found for playback");
+                    JWLog.w(TAG, "📱 JAVA: No valid URLs found for playback – falling back to React Native dispatch");
+                    dispatchMediaItemToReactNative(mediaId);
                 }
             } else {
                 updateMediaSessionMetadata(title, subtitle, artworkUrl, null);

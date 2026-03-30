@@ -17,6 +17,8 @@ public class PlaybackManager {
     private volatile boolean uiInBackground = false;
     // Track whether the app is currently in Android Picture-in-Picture (PiP)
     private volatile boolean pipActive = false;
+    // Flag: onPlayFromSearch was triggered – the next onReady() should auto-play
+    private volatile boolean pendingPlayFromSearch = false;
 
     private static final String TAG = "PlaybackManager";
 
@@ -28,6 +30,28 @@ public class PlaybackManager {
             instance = new PlaybackManager();
         }
         return instance;
+    }
+
+    /**
+     * Called from MediaBrowserService.onPlayFromSearch to signal that the
+     * next player that becomes ready should auto-play.
+     */
+    public void setPendingPlayFromSearch(boolean pending) {
+        JWLog.d(TAG, "setPendingPlayFromSearch(" + pending + ")");
+        this.pendingPlayFromSearch = pending;
+    }
+
+    /**
+     * Atomically reads and clears the pendingPlayFromSearch flag.
+     * Called from RNJWPlayerView.onReady() / JWPlayerNativePlaybackHandler.onReady().
+     */
+    public boolean consumePendingPlayFromSearch() {
+        boolean was = this.pendingPlayFromSearch;
+        if (was) {
+            this.pendingPlayFromSearch = false;
+            JWLog.d(TAG, "consumePendingPlayFromSearch() → true (consumed)");
+        }
+        return was;
     }
 
     public void setActivePlayer(JWPlayer player, Object handler) {

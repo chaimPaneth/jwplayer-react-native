@@ -2196,6 +2196,16 @@ public class RNJWPlayerView extends RelativeLayout implements
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topOnPlayerReady", event);
 
         updateWakeLock(true);
+
+        // Auto-play when the user triggered "Play <query>" via Android Auto voice
+        if (PlaybackManager.getInstance().consumePendingPlayFromSearch()) {
+            JWLog.d(TAG, "onReady() → pendingPlayFromSearch consumed – calling mPlayer.play()");
+            if (mPlayer != null) {
+                mPlayer.play();
+            } else {
+                JWLog.w(TAG, "onReady() → pendingPlayFromSearch but mPlayer is null!");
+            }
+        }
     }
 
     @Override
