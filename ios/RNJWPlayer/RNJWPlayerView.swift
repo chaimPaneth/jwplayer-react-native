@@ -1256,6 +1256,10 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         }
 
         self.presentPlayerViewController(configuration: playerConfig)
+
+        if let autostart = config["autostart"] as? Bool, autostart, !userPaused {
+            playerViewController.player.play()
+        }
     }
 
     func dismissPlayerViewController() {
@@ -1869,17 +1873,15 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
         var somethingChanged:Bool = false
 
-        if !(category == audioCategory) || (categoryOptions != nil && !categoryOptions!.elementsEqual(audioCategoryOptions)) {
+        let categoryChanged = !(category == audioCategory) || (categoryOptions != nil && !categoryOptions!.elementsEqual(audioCategoryOptions))
+        let modeChanged = !(mode == audioMode)
+
+        if categoryChanged || modeChanged {
             somethingChanged = true
             audioCategory = category
             audioCategoryOptions = categoryOptions
-            self.setCategory(categoryName: category, categoryOptions:categoryOptions)
-        }
-
-        if !(mode == audioMode) {
-            somethingChanged = true
             audioMode = mode
-            self.setMode(modeName: mode)
+            self.setCategoryWithMode(categoryName: category, categoryOptions: categoryOptions, modeName: mode)
         }
 
         if somethingChanged {
@@ -2000,6 +2002,58 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             print("setCategory - success")
         } catch {
             print("setCategory - error: @%@", error)
+        }
+    }
+
+    func setCategoryWithMode(categoryName:String!, categoryOptions:[String]!, modeName:String!) {
+        if (audioSession == nil) {
+            audioSession = AVAudioSession.sharedInstance()
+        }
+
+        var category:AVAudioSession.Category = .playback
+        if categoryName != nil {
+            if categoryName.isEqual("Ambient") { category = .ambient }
+            else if categoryName.isEqual("SoloAmbient") { category = .soloAmbient }
+            else if categoryName.isEqual("Playback") { category = .playback }
+            else if categoryName.isEqual("Record") { category = .record }
+            else if categoryName.isEqual("PlayAndRecord") { category = .playAndRecord }
+            else if categoryName.isEqual("MultiRoute") { category = .multiRoute }
+        }
+
+        var options: AVAudioSession.CategoryOptions = []
+        if categoryOptions != nil {
+            if categoryOptions.contains("AllowAirPlay") { options.insert(.allowAirPlay) }
+            if categoryOptions.contains("AllowBluetoothA2DP") { options.insert(.allowBluetoothA2DP) }
+            if categoryOptions.contains("AllowBluetoothHFP") { options.insert(.allowBluetoothHFP) }
+            if categoryOptions.contains("DuckOthers") { options.insert(.duckOthers) }
+            if categoryOptions.contains("MixWithOthers") { options.insert(.mixWithOthers) }
+            if categoryOptions.contains("AllowBluetooth") { options.insert(.allowBluetooth) }
+            if categoryOptions.contains("InterruptSpokenAudioAndMix") { options.insert(.interruptSpokenAudioAndMixWithOthers) }
+            if categoryOptions.contains("OverrideMutedMicrophone") {
+                if #available(iOS 14.5, *) { options.insert(.overrideMutedMicrophoneInterruption) }
+            }
+        }
+
+        var mode: AVAudioSession.Mode = .default
+        if modeName != nil {
+            if modeName.isEqual("SpokenAudio") { mode = .spokenAudio }
+            else if modeName.isEqual("Default") { mode = .default }
+            else if modeName.isEqual("VoiceChat") { mode = .voiceChat }
+            else if modeName.isEqual("VideoChat") { mode = .videoChat }
+            else if modeName.isEqual("GameChat") { mode = .gameChat }
+            else if modeName.isEqual("VideoRecording") { mode = .videoRecording }
+            else if modeName.isEqual("Measurement") { mode = .measurement }
+            else if modeName.isEqual("MoviePlayback") { mode = .moviePlayback }
+            else if modeName.isEqual("VoicePrompt") {
+                if #available(iOS 12.0, *) { mode = .voicePrompt }
+            }
+        }
+
+        do {
+            try audioSession.setCategory(category, mode: mode, options: options)
+            print("setCategoryWithMode - success")
+        } catch {
+            print("setCategoryWithMode - error: @%@", error)
         }
     }
 
