@@ -1115,7 +1115,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 JWLog.w(TAG, "Failed parsing extras JSON for resume: " + e.getMessage());
             }
         }
-        return 0L;
+        return -1L; // -1 = absent/no timepoint; 0 is reserved for "resume at start"
     }
 
     /** Helper: reads a seconds value from JSON by key, accepting numbers or numeric strings. */
@@ -1564,7 +1564,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         // CRITICAL: During Android Auto handoff, completely ignore spurious 0 seeks
         // Android 12/14 emit a second seek-to-0 after the correct resume seek - this must be blocked
-        if (isPlayingFromAndroidAuto && pendingSeekMs != null && eventPositionMs == 0) {
+        // Guard: only suppress the 0 event when the RESUME TARGET itself is > 0.
+        // If target IS 0 (fresh/never-played media), position=0 is correct — don't loop.
+        if (isPlayingFromAndroidAuto && pendingSeekMs != null && pendingSeekMs > 0 && eventPositionMs == 0) {
             JWLog.d(TAG, "onSeeked: IGNORING spurious 0 seek during AA handoff (pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ")");
             // If we haven't successfully applied the pending seek yet, re-seek to the correct target
             if (!pendingSeekApplied && jwPlayer != null) {
@@ -1948,7 +1950,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void applyPendingSeekWhenReady(PlaylistItem item) {
         JWLog.d(TAG, "applyPendingSeekWhenReady(pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ", item=" + JWLog.playlistItemInfo(item) + ")");
-        if (pendingSeekMs == null || jwPlayer == null || pendingSeekApplied) return;
+        if (pendingSeekMs == null || pendingSeekMs < 0 || jwPlayer == null || pendingSeekApplied) return;
 
         // Do not block on id mismatches: items can legitimately differ across domains
         double duration = 0;
