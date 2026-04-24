@@ -130,3 +130,66 @@ dependencies {
     implementation project(':react-native-android-media-browser')
 }
 
+task verifyHostPipManifestConfigChanges {
+    group = 'verification'
+    description = 'Validates host MainActivity configChanges for PiP compatibility.'
+
+    doLast {
+        if (rootProject.hasProperty('RNJWPlayerSkipManifestCheck') && rootProject.property('RNJWPlayerSkipManifestCheck') == 'true') {
+            logger.lifecycle('[RNJWPlayer] Skipping host manifest PiP check due to RNJWPlayerSkipManifestCheck=true')
+            return
+        }
+
+        def appProject = rootProject.findProject(':app')
+        if (appProject == null) {
+            logger.warn('[RNJWPlayer] Could not find :app project. Skipping host manifest PiP check.')
+            return
+        }
+
+        def manifestFile = new File(appProject.projectDir, 'src/main/AndroidManifest.xml')
+        if (!manifestFile.exists()) {
+            logger.warn("[RNJWPlayer] Host manifest not found at ${manifestFile}. Skipping host manifest PiP check.")
+            return
+        }
+
+        def manifestText = manifestFile.getText('UTF-8')
+        def activityPattern = java.util.regex.Pattern.compile('(?is)<activity\\b[^>]*android:name\\s*=\\s*"([^"]+)"[^>]*>')
+        def matcher = activityPattern.matcher(manifestText)
+
+        String mainActivityTag = null
+        while (matcher.find()) {
+            def activityName = matcher.group(1)
+            if (activityName == '.MainActivity' || activityName.endsWith('.MainActivity')) {
+                mainActivityTag = matcher.group(0)
+                break
+            }
+        }
+
+        if (mainActivityTag == null) {
+            throw new GradleException('[RNJWPlayer] Could not find MainActivity in host AndroidManifest.xml. Ensure a MainActivity is declared under <application>.')
+        }
+
+        def configMatcher = java.util.regex.Pattern.compile('(?is)android:configChanges\\s*=\\s*"([^"]*)"').matcher(mainActivityTag)
+        def configChangesValue = configMatcher.find() ? configMatcher.group(1) : ''
+        def actualFlags = configChangesValue
+                .split('\\|')
+                .collect { it.trim() }
+                .findAll { !it.isEmpty() }
+                .toSet()
+
+        def requiredFlags = ['orientation', 'screenSize', 'smallestScreenSize', 'screenLayout'] as Set
+        def missingFlags = requiredFlags - actualFlags
+
+        if (!missingFlags.isEmpty()) {
+            throw new GradleException(
+                    "🚨 [RNJWPlayer PiP Config Error]\n" +
+                    "❌ Missing required MainActivity android:configChanges flags: ${missingFlags.join('|')}\n" +
+                    "✅ Required: orientation|screenSize|smallestScreenSize|screenLayout\n" +
+                    "📌 Current: ${configChangesValue ?: '(empty)'}\n\n" +
+                    "Fix: Update MainActivity in AndroidManifest.xml."
+            )
+        }
+    }
+}
+
+preBuild.dependsOn(verifyHostPipManifestConfigChanges)
