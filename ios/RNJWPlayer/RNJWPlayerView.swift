@@ -1730,7 +1730,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     func jwplayer(_ player:JWPlayer, didLoadPlaylist playlist:[JWPlayerItem]) {
         let playlistArray:NSMutableArray! = NSMutableArray()
 
-        for item:JWPlayerItem? in playlist {
+        for item in playlist {
 //            var file:String!
 //
 //            var sourceDict: [String: Any] = [:]
@@ -1778,7 +1778,9 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 //                "tracks": schedDict
 //            ]
 
-            playlistArray.add(item?.toJSONObject() as Any)
+            if let json = item.toJSONObject() {
+                playlistArray.add(json)
+            }
          }
 
         do {
