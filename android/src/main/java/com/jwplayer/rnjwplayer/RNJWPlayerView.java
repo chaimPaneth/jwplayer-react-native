@@ -28,6 +28,7 @@ import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -53,6 +54,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.gson.Gson;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.JsonHelper;
+import com.jwplayer.pub.api.PlayerState;
 import com.jwplayer.pub.api.UiGroup;
 import com.jwplayer.pub.api.background.MediaService;
 import com.jwplayer.pub.api.background.MediaServiceController;
@@ -243,6 +245,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     private RNJWMediaServiceController mMediaServiceController;
     private PipHandlerReceiver mReceiver = null;
+    private OnBackPressedCallback mPipBackCallback = null;
 
     // Add completion handler field
     PlaylistItemDecision itemUpdatePromise = null;
@@ -383,6 +386,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         JWLog.d(TAG, "destroyPlayer() mPlayer=" + JWLog.id(mPlayer));
         if (mPlayer != null) {
             unRegisterReceiver();
+            unregisterPipBackCallback();
 
             // Let the playback manager know this player is being destroyed.
             PlaybackManager.getInstance().clearPlayer(this);
@@ -967,6 +971,73 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
+     * Registers an OnBackPressedCallback that intercepts the back press / back gesture
+     * and routes the activity into Picture-in-Picture mode while media is playing.
+     *
+     * Why this is needed: JWPlayer SDK's registerActivityForPip() hooks into
+     * Activity.onUserLeaveHint(), which Android only fires for Home / app-switch
+     * navigation. The back gesture (or back button) does NOT fire onUserLeaveHint;
+     * it calls Activity.finish() directly. Once the activity is finishing, it is
+     * too late to enter PiP from onPause(). We must intercept the back press
+     * BEFORE the activity finishes.
+     */
+    private void registerPipBackCallback() {
+        JWLog.d(TAG, "registerPipBackCallback()");
+        if (mActivity == null || mPipBackCallback != null) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return; // PiP API requires API 26+
+        }
+        mPipBackCallback = new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (mPlayer == null || mActivity == null) {
+                    fallbackToDefaultBack();
+                    return;
+                }
+                try {
+                    if (mActivity.isInPictureInPictureMode()) {
+                        // Already in PiP — let default back behavior proceed
+                        fallbackToDefaultBack();
+                        return;
+                    }
+                    PlayerState state = mPlayer.getState();
+                    if (state == PlayerState.PLAYING || state == PlayerState.BUFFERING) {
+                        JWLog.d(TAG, "PiP back-callback: entering PiP (state=" + state + ")");
+                        mPlayer.enterPictureInPictureMode();
+                        // Do NOT call default back — activity stays alive and transitions to PiP
+                        return;
+                    }
+                } catch (Throwable t) {
+                    JWLog.w(TAG, "PiP back-callback: failed to enter PiP: " + t.getMessage());
+                }
+                fallbackToDefaultBack();
+            }
+
+            private void fallbackToDefaultBack() {
+                // Disable this callback and re-dispatch so the system performs the
+                // default back behavior (finish the activity).
+                setEnabled(false);
+                try {
+                    mActivity.getOnBackPressedDispatcher().onBackPressed();
+                } finally {
+                    setEnabled(true);
+                }
+            }
+        };
+        mActivity.getOnBackPressedDispatcher().addCallback(mActivity, mPipBackCallback);
+    }
+
+    private void unregisterPipBackCallback() {
+        JWLog.d(TAG, "unregisterPipBackCallback()");
+        if (mPipBackCallback != null) {
+            mPipBackCallback.remove();
+            mPipBackCallback = null;
+        }
+    }
+
+    /**
      * Creates a UiConfig that ensures PLAYER_CONTROLS_CONTAINER is always shown.
      * If controls are not shown, the PLAYER_CONTROLS_CONTAINER UI Group is not displayed.
      * This logic ensures that the PLAYER_CONTROLS_CONTAINER UI Group is displayed regardless if controls are shown or not.
@@ -1464,9 +1535,11 @@ public class RNJWPlayerView extends RelativeLayout implements
             if (pipEnabled) {
                 registerReceiver();
                 mPlayer.registerActivityForPip(mActivity, mActivity.getSupportActionBar());
+                registerPipBackCallback();
             } else {
                 mPlayer.deregisterActivityForPip();
                 unRegisterReceiver();
+                unregisterPipBackCallback();
             }
         }
 
