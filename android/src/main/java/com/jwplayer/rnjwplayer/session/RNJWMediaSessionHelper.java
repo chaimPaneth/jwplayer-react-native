@@ -14,8 +14,15 @@ import android.graphics.Bitmap;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.media.AudioFocusRequest;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaMetadataCompat;
@@ -87,6 +94,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private long androidAutoHandoffStartTime = 0;
     private static final long FOCUS_LOSS_IGNORE_WINDOW_MS = 1000; // 1 second
     private static final long ANDROID_AUTO_HANDOFF_TIMEOUT_MS = 5000; // 5 seconds max
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    // Flight Mode / network recovery state. Local downloaded media must bypass this guard.
+    private ConnectivityManager connectivityManager;
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private Boolean networkAvailable = null;
+    private boolean currentMediaRequiresNetwork = true;
+    private boolean pausedByUser = false;
+    private boolean pausedByNetwork = false;
+    private boolean pendingResumeAfterNetworkRecovery = false;
+    private boolean playBlockedByNetwork = false;
+    private boolean systemPauseInProgress = false;
+    private boolean recoveryNeedsPlayerReload = false;
+    private boolean networkRecoveryInProgress = false;
+    private boolean lastPlaybackWasActive = false;
+    private int networkRecoveryReloadAttempts = 0;
+    private long lastKnownRealPlaybackPositionMs = 0L;
 
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
@@ -99,9 +123,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static boolean pendingSeekApplied = false;
     private static int autoHandoffSeekAttempts = 0; // Track number of onSeeked during handoff
     private static final long SEEK_END_GUARD_MS = 500L;
+    private static final long USER_PLAYBACK_GESTURE_WINDOW_MS = 1500L;
+    private static volatile long lastUserPlaybackGestureMs = 0L;
 
     private static String externalMediaId = null;
     private static String externalSubtitle = null;
+
+    public static void noteUserPlaybackGesture(String reason) {
+        lastUserPlaybackGestureMs = SystemClock.elapsedRealtime();
+        JWLog.d(TAG, "USER_INTENT: playback gesture reason=" + reason
+                + " activeInstance=" + (activeInstance != null));
+    }
+
+    private static boolean hasRecentUserPlaybackGesture() {
+        long lastGestureMs = lastUserPlaybackGestureMs;
+        return lastGestureMs > 0L
+                && SystemClock.elapsedRealtime() - lastGestureMs <= USER_PLAYBACK_GESTURE_WINDOW_MS;
+    }
 
     // Static position cache: stores last known position per mediaId (survives instance recreation)
     // This is critical for handoff because MediaItemsStore only has the original extras bundle
@@ -327,6 +365,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // CRITICAL: Cache position in static map for handoff resume
         // This survives instance recreation and is checked before MediaItemsResumeProvider
         if (position >= 0) {
+            lastKnownRealPlaybackPositionMs = position;
             lastKnownPositionCache.put(externalMediaId, position);
             JWLog.d(TAG, "storeSeekPosition: Cached position " + position + "ms for mediaId=" + externalMediaId + " in static cache");
         }
@@ -454,6 +493,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         this.jwPlayer = serviceMediaApi.getPlayer();
         Context currentContext = this.context;
         this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
+        setupNetworkCallback();
 
         // Attach callback (was previously intentionally omitted)
         try {
@@ -913,6 +953,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
         
         try {
+            systemPauseInProgress = true;
             if (mediaSessionStateProvider != null && mediaSessionStateProvider.mediaSessionCompat != null) {
                 mediaSessionStateProvider.mediaSessionCompat
                     .getController()
@@ -923,6 +964,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         } catch (Exception ignore) {
             JWLog.w(TAG, "Error pausing after focus loss: " + ignore.getMessage());
+        } finally {
+            mainHandler.postDelayed(() -> systemPauseInProgress = false, 250);
         }
     }
 
@@ -952,6 +995,441 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "resetAndroidAutoFlag()");
         isPlayingFromAndroidAuto = false;
         androidAutoHandoffStartTime = 0;
+    }
+
+    private void setupNetworkCallback() {
+        if (networkCallback != null) return;
+
+        try {
+            connectivityManager = (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            networkAvailable = isNetworkCurrentlyAvailable();
+
+            if (connectivityManager == null) {
+                JWLog.w(TAG, "NETWORK_GUARD: ConnectivityManager unavailable; allowing playback");
+                networkAvailable = true;
+                return;
+            }
+
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    mainHandler.post(() -> handleNetworkAvailabilityChanged(isNetworkCurrentlyAvailable()));
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    mainHandler.post(() -> handleNetworkAvailabilityChanged(false));
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities networkCapabilities) {
+                    boolean reachable = networkCapabilities != null
+                            && networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                            && networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                    mainHandler.post(() -> handleNetworkAvailabilityChanged(reachable));
+                }
+            };
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                connectivityManager.registerDefaultNetworkCallback(networkCallback);
+            } else {
+                NetworkRequest request = new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+                connectivityManager.registerNetworkCallback(request, networkCallback);
+            }
+
+            JWLog.d(TAG, "NETWORK_GUARD: callback registered, available=" + networkAvailable);
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: failed to register callback: " + e.getMessage());
+            networkAvailable = true;
+            networkCallback = null;
+        }
+    }
+
+    private void teardownNetworkCallback() {
+        if (connectivityManager == null || networkCallback == null) return;
+
+        try {
+            connectivityManager.unregisterNetworkCallback(networkCallback);
+        } catch (Exception ignored) {}
+
+        networkCallback = null;
+        connectivityManager = null;
+    }
+
+    private boolean isNetworkCurrentlyAvailable() {
+        try {
+            ConnectivityManager manager = connectivityManager != null
+                    ? connectivityManager
+                    : (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) return true;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network activeNetwork = manager.getActiveNetwork();
+                if (activeNetwork == null) return false;
+                NetworkCapabilities capabilities = manager.getNetworkCapabilities(activeNetwork);
+                return capabilities != null
+                        && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+            }
+
+            NetworkInfo info = manager.getActiveNetworkInfo();
+            return info != null && info.isConnected();
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: availability check failed: " + e.getMessage());
+            return true;
+        }
+    }
+
+    private boolean isNetworkAvailableForPlayback() {
+        return networkAvailable != null ? networkAvailable.booleanValue() : isNetworkCurrentlyAvailable();
+    }
+
+    private void handleNetworkAvailabilityChanged(boolean available) {
+        Boolean previous = networkAvailable;
+        networkAvailable = available;
+
+        if (previous != null && previous.booleanValue() == available) {
+            return;
+        }
+
+        JWLog.d(TAG, "NETWORK_GUARD: network " + (available ? "available" : "unavailable")
+                + " mediaRequiresNetwork=" + currentMediaRequiresNetwork
+                + " pausedByUser=" + pausedByUser
+                + " pendingResume=" + pendingResumeAfterNetworkRecovery
+                + " lastPositionMs=" + lastKnownRealPlaybackPositionMs, true);
+
+        if (!currentMediaRequiresNetwork) {
+            return;
+        }
+
+        if (!available) {
+            long positionMs = rememberPlaybackPosition("network-lost");
+            PlayerState state = safePlayerState();
+            boolean shouldResume = shouldResumeAfterNetworkLoss(state, positionMs);
+            if (shouldResume) {
+                pendingResumeAfterNetworkRecovery = true;
+                pausedByNetwork = true;
+                playBlockedByNetwork = state != PlayerState.PLAYING && state != PlayerState.BUFFERING;
+                recoveryNeedsPlayerReload = recoveryNeedsPlayerReload || playBlockedByNetwork || isPlayerStateNeedingReload(state);
+                networkRecoveryReloadAttempts = 0;
+            }
+
+            JWLog.d(TAG, "NETWORK_GUARD: network-lost decision state=" + state
+                    + " shouldResume=" + shouldResume
+                    + " pausedByUser=" + pausedByUser
+                    + " reloadNeeded=" + recoveryNeedsPlayerReload
+                    + " lastPlaybackWasActive=" + lastPlaybackWasActive
+                    + " positionMs=" + positionMs, true);
+            return;
+        }
+
+        if (pausedByUser) {
+            if (pendingResumeAfterNetworkRecovery || pausedByNetwork || playBlockedByNetwork || networkRecoveryInProgress) {
+                JWLog.d(TAG, "NETWORK_GUARD: network restored but user pause wins; clearing recovery intent"
+                        + " pendingResume=" + pendingResumeAfterNetworkRecovery
+                        + " pausedByNetwork=" + pausedByNetwork
+                        + " playBlocked=" + playBlockedByNetwork, true);
+            }
+            pendingResumeAfterNetworkRecovery = false;
+            pausedByNetwork = false;
+            playBlockedByNetwork = false;
+            recoveryNeedsPlayerReload = false;
+            networkRecoveryInProgress = false;
+            lastPlaybackWasActive = false;
+            return;
+        }
+
+        if (pendingResumeAfterNetworkRecovery && !pausedByUser) {
+            long resumePositionMs = lastKnownRealPlaybackPositionMs;
+            boolean shouldReload = recoveryNeedsPlayerReload || isPlayerStateNeedingReload(safePlayerState());
+            pendingResumeAfterNetworkRecovery = false;
+            pausedByNetwork = false;
+            playBlockedByNetwork = false;
+
+            JWLog.d(TAG, "NETWORK_GUARD: resuming after network recovery at " + resumePositionMs + "ms", true);
+            resumeAfterNetworkRecovery(resumePositionMs, shouldReload);
+        }
+    }
+
+    private boolean shouldResumeAfterNetworkLoss(PlayerState state, long positionMs) {
+        if (pausedByUser) {
+            return false;
+        }
+
+        if (state == PlayerState.PLAYING || state == PlayerState.BUFFERING) {
+            return true;
+        }
+
+        if (pendingResumeAfterNetworkRecovery || pausedByNetwork || playBlockedByNetwork || isPlayingFromAndroidAuto) {
+            return true;
+        }
+
+        return lastPlaybackWasActive && positionMs > 0;
+    }
+
+    private boolean isPlayerStateNeedingReload(PlayerState state) {
+        return state == PlayerState.ERROR || state == PlayerState.IDLE;
+    }
+
+    private boolean tryRecreateHeadlessPlayerForRecovery(long resumePositionMs, String reason) {
+        try {
+            if (jwPlayerNativePlaybackHandler == null || !jwPlayerNativePlaybackHandler.isManagingPlayer(jwPlayer)) {
+                return false;
+            }
+
+            boolean recreating = jwPlayerNativePlaybackHandler.recreateBackgroundPlayerForNetworkRecovery(resumePositionMs, reason);
+            if (recreating) {
+                JWLog.d(TAG, "NETWORK_GUARD: delegated headless recovery recreate reason=" + reason
+                        + " resumePositionMs=" + resumePositionMs, true);
+                if (jwPlayer != null) {
+                    updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING, resumePositionMs);
+                }
+            }
+            return recreating;
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless recreate delegation failed reason=" + reason
+                    + " error=" + e.getMessage());
+            return false;
+        }
+    }
+
+    private void resumeAfterNetworkRecovery(long resumePositionMs, boolean preferReload) {
+        long safeResumePositionMs = sanitizeSeekPosition(resumePositionMs);
+        networkRecoveryInProgress = true;
+        lastPlaybackWasActive = true;
+
+        PlayerState state = safePlayerState();
+        boolean shouldReload = preferReload || isPlayerStateNeedingReload(state);
+        JWLog.d(TAG, "NETWORK_GUARD: recovery attempt state=" + state
+                + " shouldReload=" + shouldReload
+                + " resumePositionMs=" + safeResumePositionMs
+                + " reloadAttempts=" + networkRecoveryReloadAttempts, true);
+
+        if (shouldReload && reloadPlayerForNetworkRecovery(safeResumePositionMs, "network-recovery")) {
+            return;
+        }
+
+        if (safeResumePositionMs > 0) {
+            performSeekTo(safeResumePositionMs);
+        }
+        performPlay();
+        scheduleNetworkRecoveryVerification(safeResumePositionMs, "network-recovery-play");
+    }
+
+    private boolean reloadPlayerForNetworkRecovery(long resumePositionMs, String reason) {
+        if (jwPlayer == null) {
+            JWLog.w(TAG, "NETWORK_GUARD: cannot reload for recovery; jwPlayer is null reason=" + reason);
+            return false;
+        }
+
+        if (networkRecoveryReloadAttempts >= 2) {
+            if (tryRecreateHeadlessPlayerForRecovery(resumePositionMs, reason + "-headless-recreate")) {
+                return true;
+            }
+            JWLog.w(TAG, "NETWORK_GUARD: reload limit reached reason=" + reason
+                    + " resumePositionMs=" + resumePositionMs);
+            recoveryNeedsPlayerReload = true;
+            pausedByNetwork = true;
+            playBlockedByNetwork = true;
+            return false;
+        }
+
+        try {
+            PlayerConfig config = jwPlayer.getConfig();
+            if (config == null) {
+                if (tryRecreateHeadlessPlayerForRecovery(resumePositionMs, reason + "-null-config")) {
+                    return true;
+                }
+                JWLog.w(TAG, "NETWORK_GUARD: cannot reload for recovery; config is null reason=" + reason);
+                return false;
+            }
+
+            long safeResumePositionMs = sanitizeSeekPosition(resumePositionMs);
+            networkRecoveryReloadAttempts++;
+            networkRecoveryInProgress = true;
+            recoveryNeedsPlayerReload = false;
+
+            if (safeResumePositionMs > 0) {
+                pendingSeekMs = safeResumePositionMs;
+                pendingSeekApplied = false;
+                autoHandoffSeekAttempts = 0;
+                lastRequestedSeekPositionMs = safeResumePositionMs;
+            }
+
+            PlayerState stateBeforeReload = safePlayerState();
+            JWLog.d(TAG, "NETWORK_GUARD: reloading player for recovery reason=" + reason
+                    + " state=" + stateBeforeReload
+                    + " resumePositionMs=" + safeResumePositionMs
+                    + " attempt=" + networkRecoveryReloadAttempts, true);
+
+            jwPlayer.setup(config);
+            updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING, safeResumePositionMs);
+
+            mainHandler.postDelayed(() -> {
+                if (pausedByUser || !isNetworkAvailableForPlayback()) {
+                    JWLog.d(TAG, "NETWORK_GUARD: delayed recovery play skipped pausedByUser=" + pausedByUser
+                            + " networkAvailable=" + isNetworkAvailableForPlayback());
+                    networkRecoveryInProgress = false;
+                    return;
+                }
+
+                if (safeResumePositionMs > 0) {
+                    performSeekTo(safeResumePositionMs);
+                }
+                performPlay();
+                scheduleNetworkRecoveryVerification(safeResumePositionMs, reason + "-reload");
+            }, 700);
+
+            return true;
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: reload for recovery failed reason=" + reason + " error=" + e.getMessage());
+            return false;
+        }
+    }
+
+    private void scheduleNetworkRecoveryVerification(long resumePositionMs, String reason) {
+        mainHandler.postDelayed(() -> {
+            if (!networkRecoveryInProgress || pausedByUser || !isNetworkAvailableForPlayback()) {
+                return;
+            }
+
+            PlayerState state = safePlayerState();
+            boolean recovered = state == PlayerState.PLAYING || state == PlayerState.BUFFERING;
+            JWLog.d(TAG, "NETWORK_GUARD: recovery verification reason=" + reason
+                    + " state=" + state
+                    + " recovered=" + recovered
+                    + " resumePositionMs=" + resumePositionMs
+                    + " reloadAttempts=" + networkRecoveryReloadAttempts, true);
+
+            if (recovered) {
+                networkRecoveryInProgress = false;
+                return;
+            }
+
+            if (isPlayerStateNeedingReload(state) && reloadPlayerForNetworkRecovery(resumePositionMs, reason + "-verify")) {
+                return;
+            }
+
+            if (networkRecoveryReloadAttempts >= 2) {
+                if (tryRecreateHeadlessPlayerForRecovery(resumePositionMs, reason + "-headless-recreate")) {
+                    return;
+                }
+                recoveryNeedsPlayerReload = true;
+                pausedByNetwork = true;
+                playBlockedByNetwork = true;
+                networkRecoveryInProgress = false;
+                return;
+            }
+
+            if (resumePositionMs > 0) {
+                performSeekTo(resumePositionMs);
+            }
+            performPlay();
+            networkRecoveryInProgress = false;
+        }, 1600);
+    }
+
+    private boolean isLocalPlaybackSource(String source) {
+        if (source == null) return false;
+        String normalized = source.trim().toLowerCase(java.util.Locale.US);
+        return normalized.startsWith("file://")
+                || normalized.startsWith("content://")
+                || normalized.startsWith("android.resource://")
+                || normalized.startsWith("asset://")
+                || normalized.startsWith("data:");
+    }
+
+    private void updateCurrentMediaAvailability(PlaylistItem item, String reason) {
+        String source = extractPrimarySourceFile(item);
+        boolean requiresNetwork = !isLocalPlaybackSource(source);
+        currentMediaRequiresNetwork = requiresNetwork;
+        if (!requiresNetwork) {
+            pendingResumeAfterNetworkRecovery = false;
+            pausedByNetwork = false;
+            playBlockedByNetwork = false;
+            recoveryNeedsPlayerReload = false;
+            networkRecoveryInProgress = false;
+            networkRecoveryReloadAttempts = 0;
+        }
+        JWLog.d(TAG, "NETWORK_GUARD: media availability reason=" + reason
+                + " requiresNetwork=" + currentMediaRequiresNetwork
+                + " source=" + JWLog.safe(source));
+    }
+
+    private PlayerState safePlayerState() {
+        try {
+            return jwPlayer != null ? jwPlayer.getState() : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private long getCurrentPositionMs() {
+        try {
+            if (jwPlayer != null) {
+                return Math.max(0L, (long) (jwPlayer.getPosition() * 1000L));
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            if (mediaSessionStateProvider != null && mediaSessionStateProvider.mediaSessionCompat != null) {
+                PlaybackStateCompat playbackState = mediaSessionStateProvider.mediaSessionCompat.getController().getPlaybackState();
+                if (playbackState != null) {
+                    return Math.max(0L, playbackState.getPosition());
+                }
+            }
+        } catch (Exception ignored) {}
+
+        return Math.max(0L, lastKnownRealPlaybackPositionMs);
+    }
+
+    private long rememberPlaybackPosition(String reason) {
+        long positionMs = getCurrentPositionMs();
+        if (positionMs >= 0) {
+            lastKnownRealPlaybackPositionMs = positionMs;
+            storeSeekPosition(lastKnownRealPlaybackPositionMs);
+        }
+        JWLog.d(TAG, "NETWORK_GUARD: remember position reason=" + reason + " positionMs=" + lastKnownRealPlaybackPositionMs);
+        return lastKnownRealPlaybackPositionMs;
+    }
+
+    private boolean shouldBlockPlayForNetwork(String reason) {
+        if (!currentMediaRequiresNetwork || isNetworkAvailableForPlayback()) {
+            return false;
+        }
+
+        if (pausedByUser) {
+            JWLog.d(TAG, "NETWORK_GUARD: blocking offline play because user pause is active reason=" + reason
+                    + " lastPositionMs=" + lastKnownRealPlaybackPositionMs, true);
+            return true;
+        }
+
+        PlayerState state = safePlayerState();
+        if (state == PlayerState.PLAYING && lastPlaybackWasActive && !playBlockedByNetwork) {
+            JWLog.d(TAG, "NETWORK_GUARD: allowing already-playing buffered audio while offline reason=" + reason);
+            return false;
+        }
+
+        JWLog.d(TAG, "NETWORK_GUARD: blocking play reason=" + reason
+                + " state=" + state
+                + " lastPositionMs=" + lastKnownRealPlaybackPositionMs
+                + " pausedByUser=" + pausedByUser, true);
+        return true;
+    }
+
+    private void publishNetworkUnavailableState(String reason) {
+        long positionMs = rememberPlaybackPosition(reason);
+        pausedByNetwork = !pausedByUser;
+        playBlockedByNetwork = true;
+        pendingResumeAfterNetworkRecovery = !pausedByUser;
+        lastPlaybackWasActive = !pausedByUser;
+        recoveryNeedsPlayerReload = recoveryNeedsPlayerReload || isPlayerStateNeedingReload(safePlayerState());
+
+        if (jwPlayer != null) {
+            updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED, positionMs);
+        }
     }
     
     // End Audio focus management
@@ -990,6 +1468,21 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      */
     public final void detachPlayerOnly() {
         JWLog.d(TAG, "detachPlayerOnly() - lightweight cleanup for media switch");
+
+        if (activeInstance == this) {
+            activeInstance = null;
+        }
+
+        teardownNetworkCallback();
+
+        if (mediaButtonFallbackReceiver != null) {
+            try {
+                context.unregisterReceiver(mediaButtonFallbackReceiver);
+            } catch (Exception unregEx) {
+                JWLog.w(TAG, "detachPlayerOnly() - failed to unregister fallback receiver: " + unregEx.getMessage());
+            }
+            mediaButtonFallbackReceiver = null;
+        }
         
         // Only remove player listeners - don't touch MediaSession, notification, or audio focus
         if (this.jwPlayer != null) {
@@ -1017,6 +1510,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Reset AA flag and release audio focus first
         resetAndroidAutoFlag();
         releaseAudioFocus();
+        teardownNetworkCallback();
 
         RNJWNotificationHelper notificationHelper;
 
@@ -1279,6 +1773,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (playlistItem == null || this.jwPlayer == null) {
             return;
         }
+        updateCurrentMediaAvailability(playlistItem, "updatePlaylistItem");
 
         PlaylistItem currentItem = this.jwPlayer.getPlaylistItem();
 
@@ -1446,6 +1941,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     
                     if (currentState == PlayerState.IDLE || currentState == PlayerState.PAUSED) {
                         try {
+                            if (shouldBlockPlayForNetwork("onPlaylistItem-handoff")) {
+                                publishNetworkUnavailableState("onPlaylistItem-handoff");
+                                return;
+                            }
+
                             // Trigger play first - this will start buffering and trigger onSeeked events
                             // The two-phase defense in onSeeked will handle position correction:
                             // - Phase 1: Block spurious seek-to-0 and re-seek
@@ -1481,6 +1981,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onError(ErrorEvent errorEvent) {
         JWLog.e(TAG, "onError(event=" + (errorEvent != null ? errorEvent.getMessage() : "null") + ")");
         try {
+            if (currentMediaRequiresNetwork && !isNetworkAvailableForPlayback()) {
+                long positionMs = rememberPlaybackPosition("network-error");
+                pausedByNetwork = true;
+                playBlockedByNetwork = true;
+                pendingResumeAfterNetworkRecovery = !pausedByUser;
+                lastPlaybackWasActive = !pausedByUser;
+                recoveryNeedsPlayerReload = true;
+                networkRecoveryInProgress = false;
+                networkRecoveryReloadAttempts = 0;
+                updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED, positionMs);
+                if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
+                    this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
+                }
+                JWLog.d(TAG, "NETWORK_GUARD: network error kept session paused for recovery positionMs=" + positionMs
+                        + " pendingResume=" + pendingResumeAfterNetworkRecovery, true);
+                return;
+            }
+
             this.updatePlayerState(PlayerState.ERROR);
             // Instead of releasing the session (which causes Android Auto to lose root and show only Exit),
             // keep it inactive but alive so we can recover or replay without user leaving AA.
@@ -1513,6 +2031,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onBuffer(BufferEvent bufferEvent) {
         JWLog.d(TAG, "onBuffer()", true);
         captureDurationSnapshot();
+        if (currentMediaRequiresNetwork && !isNetworkAvailableForPlayback()) {
+            long positionMs = rememberPlaybackPosition("buffer-while-offline");
+            pausedByNetwork = !pausedByUser;
+            pendingResumeAfterNetworkRecovery = !pausedByUser;
+            lastPlaybackWasActive = !pausedByUser;
+            updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING, positionMs);
+            return;
+        }
+
         this.updatePlayerState(PlayerState.BUFFERING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_BUFFERING);
         // Try to apply pending seek while buffering
@@ -1704,6 +2231,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onPause(PauseEvent pauseEvent) {
         JWLog.d(TAG, "onPause(isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")", true);
+        rememberPlaybackPosition("pause-event");
+        boolean recentUserGesture = hasRecentUserPlaybackGesture();
         
         // Check if handoff flag is stale (been set for too long)
         if (isPlayingFromAndroidAuto && androidAutoHandoffStartTime > 0) {
@@ -1727,12 +2256,44 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             return;
         }
         
+        if (!systemPauseInProgress && recentUserGesture) {
+            pausedByUser = true;
+            pausedByNetwork = false;
+            playBlockedByNetwork = false;
+            pendingResumeAfterNetworkRecovery = false;
+            recoveryNeedsPlayerReload = false;
+            networkRecoveryInProgress = false;
+            lastPlaybackWasActive = false;
+            JWLog.d(TAG, "USER_INTENT: pause event treated as user pause recentGesture=true networkAvailable="
+                    + isNetworkAvailableForPlayback(), true);
+        } else if (currentMediaRequiresNetwork && !isNetworkAvailableForPlayback() && !pausedByUser) {
+            pausedByNetwork = true;
+            pendingResumeAfterNetworkRecovery = true;
+            lastPlaybackWasActive = true;
+        } else if (pausedByUser) {
+            pausedByNetwork = false;
+            playBlockedByNetwork = false;
+            pendingResumeAfterNetworkRecovery = false;
+            recoveryNeedsPlayerReload = false;
+            networkRecoveryInProgress = false;
+            lastPlaybackWasActive = false;
+        } else if (!systemPauseInProgress && !networkRecoveryInProgress && !pausedByNetwork && !playBlockedByNetwork) {
+            pausedByUser = true;
+            pendingResumeAfterNetworkRecovery = false;
+            lastPlaybackWasActive = false;
+        }
+
         this.updatePlayerState(PlayerState.PAUSED);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
     }
 
     public void onPlay(PlayEvent playEvent) {
         JWLog.d(TAG, "onPlay()", true);
+        if (shouldBlockPlayForNetwork("onPlay-offline")) {
+            publishNetworkUnavailableState("onPlay-offline");
+            return;
+        }
+
         long now = SystemClock.elapsedRealtime();
         if (suppressNextOnPlayAfterSeekCompletion) {
             if (now <= suppressOnPlayExpiryMs) {
@@ -1747,6 +2308,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         resetPlaybackToStartIfNeeded("onPlay");
         captureDurationSnapshot();
+        pausedByUser = false;
+        pausedByNetwork = false;
+        playBlockedByNetwork = false;
+        pendingResumeAfterNetworkRecovery = false;
+        recoveryNeedsPlayerReload = false;
+        networkRecoveryInProgress = false;
+        lastPlaybackWasActive = true;
+        networkRecoveryReloadAttempts = 0;
+        rememberPlaybackPosition("play-event");
         this.updatePlayerState(PlayerState.PLAYING);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
         
@@ -1971,6 +2541,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             if (isPlayingFromAndroidAuto && jwPlayer != null) {
                 JWLog.d(TAG, "Android Auto handoff detected - forcing play after pending seek");
                 try {
+                    if (shouldBlockPlayForNetwork("pending-seek-handoff")) {
+                        publishNetworkUnavailableState("pending-seek-handoff");
+                        return;
+                    }
+
                     jwPlayer.play();
                 } catch (Exception ex) {
                     JWLog.w(TAG, "Failed to force play after Android Auto handoff: " + ex.getMessage());
@@ -1985,6 +2560,36 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "performPlay()");
         suppressNextOnPlayAfterSeekCompletion = false;
         resetPlaybackToStartIfNeeded("performPlay");
+
+        if (shouldBlockPlayForNetwork("performPlay")) {
+            publishNetworkUnavailableState("performPlay");
+            return;
+        }
+
+        pausedByUser = false;
+
+        PlayerState stateBeforePlay = safePlayerState();
+        boolean stuckNetworkPlayer = currentMediaRequiresNetwork
+            && isNetworkAvailableForPlayback()
+            && isPlayerStateNeedingReload(stateBeforePlay)
+            && lastKnownRealPlaybackPositionMs > 0;
+
+        if (stuckNetworkPlayer && tryRecreateHeadlessPlayerForRecovery(lastKnownRealPlaybackPositionMs, "performPlay")) {
+            return;
+        }
+
+        if (currentMediaRequiresNetwork
+            && isNetworkAvailableForPlayback()
+            && (pausedByNetwork || playBlockedByNetwork || recoveryNeedsPlayerReload || stuckNetworkPlayer)
+            && isPlayerStateNeedingReload(stateBeforePlay)) {
+            long resumePositionMs = rememberPlaybackPosition("performPlay-reload");
+            if (reloadPlayerForNetworkRecovery(resumePositionMs, "performPlay")) {
+                return;
+            }
+        }
+
+        lastPlaybackWasActive = true;
+
         boolean focusGranted = requestAudioFocusForPlayback();
         if (!focusGranted) {
             JWLog.w(TAG, "Audio focus not granted - proceeding anyway");
@@ -1996,7 +2601,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             } else if (jwPlayer != null) {
                 jwPlayer.play();
             }
-            if (jwPlayer != null) {
+            if (jwPlayer != null && safePlayerState() == PlayerState.PLAYING) {
                 updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PLAYING);
             }
         } catch (Exception e) {
@@ -2006,6 +2611,17 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performPause() {
         JWLog.d(TAG, "performPause(isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")", true);
+        noteUserPlaybackGesture("media-session-pause");
+        rememberPlaybackPosition("performPause");
+        if (!systemPauseInProgress) {
+            pausedByUser = true;
+            pendingResumeAfterNetworkRecovery = false;
+            pausedByNetwork = false;
+            playBlockedByNetwork = false;
+            recoveryNeedsPlayerReload = false;
+            networkRecoveryInProgress = false;
+            lastPlaybackWasActive = false;
+        }
         
         // Check if handoff flag is stale (been set for too long)
         if (isPlayingFromAndroidAuto && androidAutoHandoffStartTime > 0) {

@@ -1778,9 +1778,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 //                "tracks": schedDict
 //            ]
 
-            if let json = item.toJSONObject() {
-                playlistArray.add(json)
-            }
+            playlistArray.add(item.toJSONObject())
          }
 
         do {

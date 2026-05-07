@@ -491,9 +491,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 //                "tracks": schedDict
 //            ]
 
-            if let json = item.toJSONObject() {
-                playlistArray.add(json)
-            }
+            playlistArray.add(item.toJSONObject())
          }
 
         do {

@@ -56,6 +56,10 @@ import android.widget.FrameLayout;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
 import android.app.NotificationManager;
 import android.os.Build;
 import android.support.v4.media.session.MediaSessionCompat;
@@ -117,6 +121,13 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private boolean wasPlayingBeforeSeek = false; // used to resume after seek
     private boolean autoStartEnabled = true; // can be toggled if needed
     private boolean isPlayerReady = false; // becomes true in onReady
+    private String currentPlaybackUrl = null;
+    private boolean currentMediaRequiresNetwork = true;
+    private boolean networkStoppedForRecovery = false;
+    private boolean pendingResumeAfterNetworkRecovery = false;
+    private boolean backgroundRecoveryInProgress = false;
+    private int backgroundRecoveryReloadAttempts = 0;
+    private long lastKnownRealPlaybackPositionMs = 0L;
     private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
     
     private JWPlayerNativePlaybackHandler(Context context) {
@@ -195,6 +206,315 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             normalized = normalized + ".jpeg";
         }
         return CLOUDINARY_BASE + normalized;
+    }
+
+    private boolean isLocalPlaybackUrl(String source) {
+        if (source == null) return false;
+        String normalized = source.trim().toLowerCase(Locale.US);
+        return normalized.startsWith("file://")
+                || normalized.startsWith("content://")
+                || normalized.startsWith("android.resource://")
+                || normalized.startsWith("asset://")
+                || normalized.startsWith("data:");
+    }
+
+    private boolean isNetworkAvailable() {
+        try {
+            ConnectivityManager manager = (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) return true;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network activeNetwork = manager.getActiveNetwork();
+                if (activeNetwork == null) return false;
+                NetworkCapabilities capabilities = manager.getNetworkCapabilities(activeNetwork);
+                return capabilities != null
+                        && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+            }
+
+            NetworkInfo info = manager.getActiveNetworkInfo();
+            return info != null && info.isConnected();
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless network check failed: " + e.getMessage());
+            return true;
+        }
+    }
+
+    private long getBackgroundPositionMs() {
+        try {
+            if (backgroundPlayer != null) {
+                return Math.max(0L, (long) (backgroundPlayer.getPosition() * 1000L));
+            }
+        } catch (Exception ignored) {}
+        return Math.max(0L, lastKnownRealPlaybackPositionMs);
+    }
+
+    private long rememberBackgroundPosition(String reason) {
+        long positionMs = getBackgroundPositionMs();
+        lastKnownRealPlaybackPositionMs = positionMs;
+        JWLog.d(TAG, "NETWORK_GUARD: headless remember position reason=" + reason + " positionMs=" + positionMs);
+        saveCurrentSeekPosition();
+        return positionMs;
+    }
+
+    private boolean shouldBlockPlayForNetwork(String reason) {
+        if (!currentMediaRequiresNetwork || isNetworkAvailable()) {
+            return false;
+        }
+
+        PlayerState currentState = null;
+        try { currentState = backgroundPlayer != null ? backgroundPlayer.getState() : null; } catch (Exception ignored) {}
+        if (currentState == PlayerState.PLAYING && !networkStoppedForRecovery) {
+            JWLog.d(TAG, "NETWORK_GUARD: headless allowing already-buffered playback while offline reason=" + reason);
+            return false;
+        }
+
+        JWLog.d(TAG, "NETWORK_GUARD: headless blocking play reason=" + reason
+                + " source=" + JWLog.safe(currentPlaybackUrl)
+                + " positionMs=" + lastKnownRealPlaybackPositionMs, true);
+        return true;
+    }
+
+    private void publishBackgroundPausedForNetwork(String reason) {
+        long positionMs = rememberBackgroundPosition(reason);
+        isPlaying = false;
+        networkStoppedForRecovery = true;
+        pendingResumeAfterNetworkRecovery = true;
+        backgroundRecoveryInProgress = false;
+        backgroundRecoveryReloadAttempts = 0;
+
+        if (sharedMediaSession != null) {
+            PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
+                    .setState(PlaybackStateCompat.STATE_PAUSED, positionMs, 0.0f)
+                    .setActions(PlaybackStateCompat.ACTION_PLAY |
+                               PlaybackStateCompat.ACTION_PLAY_PAUSE |
+                               PlaybackStateCompat.ACTION_PAUSE |
+                               PlaybackStateCompat.ACTION_STOP |
+                               PlaybackStateCompat.ACTION_SEEK_TO |
+                               PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
+                               PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
+                               PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID);
+            try {
+                PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
+                if (existing != null) {
+                    for (PlaybackStateCompat.CustomAction ca : existing.getCustomActions()) {
+                        builder.addCustomAction(ca);
+                    }
+                }
+            } catch (Exception ignored) {}
+            sharedMediaSession.setPlaybackState(builder.build());
+            sharedMediaSession.setActive(true);
+        }
+
+        JWLog.d(TAG, "NETWORK_GUARD: headless published paused state reason=" + reason
+                + " pendingResume=" + pendingResumeAfterNetworkRecovery
+                + " positionMs=" + positionMs, true);
+    }
+
+    private boolean isBackgroundStateNeedingReload(PlayerState state) {
+        return state == null || (state != PlayerState.PLAYING && state != PlayerState.BUFFERING);
+    }
+
+    private boolean reloadBackgroundPlayerForNetworkRecovery(long resumePositionMs, String reason) {
+        if (backgroundPlayer == null) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless cannot reload; backgroundPlayer is null reason=" + reason);
+            return false;
+        }
+
+        if (backgroundRecoveryReloadAttempts >= 2) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless reload limit reached reason=" + reason
+                    + " resumePositionMs=" + resumePositionMs);
+            return false;
+        }
+
+        try {
+            PlayerConfig config = backgroundPlayer.getConfig();
+            if (config == null) {
+                JWLog.w(TAG, "NETWORK_GUARD: headless cannot reload; config is null reason=" + reason);
+                return false;
+            }
+
+            long safeResumePositionMs = Math.max(0L, resumePositionMs);
+            PlayerState stateBeforeReload = null;
+            try { stateBeforeReload = backgroundPlayer.getState(); } catch (Exception ignored) {}
+
+            backgroundRecoveryReloadAttempts++;
+            backgroundRecoveryInProgress = true;
+            isPlayerReady = false;
+
+            JWLog.d(TAG, "NETWORK_GUARD: headless reloading player for recovery reason=" + reason
+                    + " state=" + stateBeforeReload
+                    + " resumePositionMs=" + safeResumePositionMs
+                    + " attempt=" + backgroundRecoveryReloadAttempts, true);
+
+            backgroundPlayer.setup(config);
+
+            mainHandler.postDelayed(() -> {
+                if (!isNetworkAvailable() || backgroundPlayer == null) {
+                    JWLog.d(TAG, "NETWORK_GUARD: headless delayed recovery skipped networkAvailable=" + isNetworkAvailable()
+                            + " hasPlayer=" + (backgroundPlayer != null));
+                    backgroundRecoveryInProgress = false;
+                    return;
+                }
+
+                try {
+                    if (safeResumePositionMs > 0) {
+                        backgroundPlayer.seek(safeResumePositionMs / 1000.0);
+                    }
+                    backgroundPlayer.play();
+                    startPositionUpdates();
+                    scheduleBackgroundRecoveryVerification(safeResumePositionMs, reason + "-reload");
+                } catch (Exception e) {
+                    JWLog.w(TAG, "NETWORK_GUARD: headless delayed recovery play failed: " + e.getMessage());
+                    backgroundRecoveryInProgress = false;
+                }
+            }, 700);
+
+            return true;
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless reload failed reason=" + reason + " error=" + e.getMessage());
+            return false;
+        }
+    }
+
+    private void scheduleBackgroundRecoveryVerification(long resumePositionMs, String reason) {
+        mainHandler.postDelayed(() -> {
+            if (!backgroundRecoveryInProgress || !isNetworkAvailable() || backgroundPlayer == null) {
+                return;
+            }
+
+            PlayerState state = null;
+            try { state = backgroundPlayer.getState(); } catch (Exception ignored) {}
+            boolean recovered = state == PlayerState.PLAYING || state == PlayerState.BUFFERING;
+            JWLog.d(TAG, "NETWORK_GUARD: headless recovery verification reason=" + reason
+                    + " state=" + state
+                    + " recovered=" + recovered
+                    + " resumePositionMs=" + resumePositionMs
+                    + " reloadAttempts=" + backgroundRecoveryReloadAttempts, true);
+
+            if (recovered) {
+                if (state == PlayerState.PLAYING) {
+                    isPlaying = true;
+                    hasStartedPlayback = true;
+                    networkStoppedForRecovery = false;
+                    pendingResumeAfterNetworkRecovery = false;
+                    backgroundRecoveryReloadAttempts = 0;
+                }
+                backgroundRecoveryInProgress = false;
+                return;
+            }
+
+            if (isBackgroundStateNeedingReload(state) && reloadBackgroundPlayerForNetworkRecovery(resumePositionMs, reason + "-verify")) {
+                return;
+            }
+
+            backgroundRecoveryInProgress = false;
+        }, 1600);
+    }
+
+    public boolean isManagingPlayer(JWPlayer player) {
+        return player != null && backgroundPlayer != null && player == backgroundPlayer;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> getRecoverablePostData(Map<String, Object> playingInfo) {
+        if (playingInfo == null) {
+            return null;
+        }
+
+        Object extrasObj = playingInfo.get("extras");
+        if (!(extrasObj instanceof Map)) {
+            return null;
+        }
+
+        Object infoObj = ((Map<String, Object>) extrasObj).get("info");
+        if (!(infoObj instanceof String)) {
+            return null;
+        }
+
+        Type type = new TypeToken<Map<String, Object>>(){}.getType();
+        return gson.fromJson((String) infoObj, type);
+    }
+
+    public boolean recreateBackgroundPlayerForNetworkRecovery(long resumePositionMs, String reason) {
+        long safeResumePositionMs = Math.max(0L, resumePositionMs);
+
+        if (currentMediaRequiresNetwork && !isNetworkAvailable()) {
+            JWLog.d(TAG, "NETWORK_GUARD: headless recreate skipped; network unavailable reason=" + reason);
+            return false;
+        }
+
+        if (backgroundRecoveryReloadAttempts >= 4) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless recreate limit reached reason=" + reason
+                    + " resumePositionMs=" + safeResumePositionMs);
+            return false;
+        }
+
+        try {
+            Map<String, Object> playingInfo = playingInfoManager != null ? playingInfoManager.getCurrentPlayingInfo() : null;
+            Map<String, Object> postData = getRecoverablePostData(playingInfo);
+            if (postData == null) {
+                JWLog.w(TAG, "NETWORK_GUARD: headless recreate skipped; no recoverable post data reason=" + reason);
+                return false;
+            }
+
+            double resumeSeconds = safeResumePositionMs / 1000.0;
+            postData.put("startTime", resumeSeconds);
+            postData.put("timepoint", resumeSeconds);
+
+            String title = playingInfo != null ? stringOrNull(playingInfo.get("title")) : stringOrNull(postData.get("title"));
+            String subtitle = playingInfo != null ? stringOrNull(playingInfo.get("subtitle")) : null;
+            String icon = playingInfo != null ? stringOrNull(playingInfo.get("icon")) : resolveImageUrl(postData);
+
+            backgroundRecoveryReloadAttempts++;
+            backgroundRecoveryInProgress = true;
+            networkStoppedForRecovery = true;
+            pendingResumeAfterNetworkRecovery = true;
+            lastKnownRealPlaybackPositionMs = safeResumePositionMs;
+            isPlaying = false;
+
+            JWLog.d(TAG, "NETWORK_GUARD: headless recreating player for recovery reason=" + reason
+                    + " resumePositionMs=" + safeResumePositionMs
+                    + " attempt=" + backgroundRecoveryReloadAttempts, true);
+
+            updateMediaSessionMetadata(title, subtitle, icon, postData);
+            createBackgroundPlayer(postData, true, safeResumePositionMs);
+
+            if (backgroundPlayer == null) {
+                JWLog.w(TAG, "NETWORK_GUARD: headless recreate failed; backgroundPlayer is null reason=" + reason);
+                backgroundRecoveryInProgress = false;
+                return false;
+            }
+
+            requestAudioFocus();
+
+            mainHandler.postDelayed(() -> {
+                if (!isNetworkAvailable() || backgroundPlayer == null) {
+                    JWLog.d(TAG, "NETWORK_GUARD: headless recreate delayed play skipped networkAvailable=" + isNetworkAvailable()
+                            + " hasPlayer=" + (backgroundPlayer != null));
+                    backgroundRecoveryInProgress = false;
+                    return;
+                }
+
+                try {
+                    if (safeResumePositionMs > 0) {
+                        backgroundPlayer.seek(safeResumePositionMs / 1000.0);
+                    }
+                    backgroundPlayer.play();
+                    startPositionUpdates();
+                    scheduleBackgroundRecoveryVerification(safeResumePositionMs, reason + "-recreate");
+                } catch (Exception e) {
+                    JWLog.w(TAG, "NETWORK_GUARD: headless recreate delayed play failed: " + e.getMessage());
+                    backgroundRecoveryInProgress = false;
+                }
+            }, 700);
+
+            return true;
+        } catch (Exception e) {
+            JWLog.w(TAG, "NETWORK_GUARD: headless recreate failed reason=" + reason + " error=" + e.getMessage());
+            backgroundRecoveryInProgress = false;
+            return false;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -296,6 +616,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Following the same pattern as RNJWPlayerView.setConfig()
      */
     private void createBackgroundPlayer(Map<String, Object> postData) {
+        createBackgroundPlayer(postData, false, 0L);
+    }
+
+    private void createBackgroundPlayer(Map<String, Object> postData, boolean preserveRecoveryState, long resumePositionMs) {
         JWLog.d(TAG, "createBackgroundPlayer(postDataKeys=" + (postData != null ? postData.keySet() : null) + ")");
         try {
             // If a UI player is currently active, do not create a headless/background player
@@ -304,7 +628,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 return;
             }
             // Ensure no other player is active and wait for cleanup to finish
-            PlaybackManager.getInstance().stopAndCleanupCurrentPlayer();
+            if (preserveRecoveryState) {
+                PlaybackManager.getInstance().clearPlayer(this);
+            } else {
+                PlaybackManager.getInstance().stopAndCleanupCurrentPlayer();
+            }
 
             if (backgroundPlayer != null) {
                 cleanupBackgroundPlayer();
@@ -315,6 +643,22 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 JWLog.e(TAG, "No playback URL available");
                 return;
             }
+            currentPlaybackUrl = playbackUrl;
+            currentMediaRequiresNetwork = !isLocalPlaybackUrl(playbackUrl);
+            if (preserveRecoveryState) {
+                networkStoppedForRecovery = true;
+                pendingResumeAfterNetworkRecovery = true;
+                backgroundRecoveryInProgress = true;
+                lastKnownRealPlaybackPositionMs = Math.max(0L, resumePositionMs);
+            } else {
+                networkStoppedForRecovery = false;
+                pendingResumeAfterNetworkRecovery = false;
+                backgroundRecoveryInProgress = false;
+                backgroundRecoveryReloadAttempts = 0;
+                lastKnownRealPlaybackPositionMs = 0L;
+            }
+            JWLog.d(TAG, "NETWORK_GUARD: headless media requiresNetwork=" + currentMediaRequiresNetwork
+                    + " url=" + JWLog.safe(playbackUrl));
 
             String title = stringOrNull(postData.get("title"));
             String mediaId = stringOrNull(postData.get("mediaId"));
@@ -1002,13 +1346,36 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     public void playFromMediaSession() {
         JWLog.d(TAG, "playFromMediaSession()");
+        if (shouldBlockPlayForNetwork("playFromMediaSession")) {
+            publishBackgroundPausedForNetwork("playFromMediaSession");
+            return;
+        }
+
         if (backgroundPlayer != null) {
+            PlayerState stateBeforePlay = null;
+            try { stateBeforePlay = backgroundPlayer.getState(); } catch (Exception ignored) {}
+            if (currentMediaRequiresNetwork
+                    && isNetworkAvailable()
+                    && (networkStoppedForRecovery || pendingResumeAfterNetworkRecovery)
+                    && isBackgroundStateNeedingReload(stateBeforePlay)) {
+                long resumePositionMs = rememberBackgroundPosition("playFromMediaSession-reload");
+                if (reloadBackgroundPlayerForNetworkRecovery(resumePositionMs, "playFromMediaSession")) {
+                    return;
+                }
+            }
+
             backgroundPlayer.play();
+            if (networkStoppedForRecovery || pendingResumeAfterNetworkRecovery) {
+                scheduleBackgroundRecoveryVerification(lastKnownRealPlaybackPositionMs, "playFromMediaSession");
+            }
         }
     }
     
     public void pauseFromMediaSession() {
         JWLog.d(TAG, "pauseFromMediaSession()");
+        pendingResumeAfterNetworkRecovery = false;
+        networkStoppedForRecovery = false;
+        backgroundRecoveryInProgress = false;
         if (backgroundPlayer != null) {
             backgroundPlayer.pause();
         }
@@ -1059,17 +1426,42 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         if (backgroundPlayer != null) {
             try {
                 long position = (long)(backgroundPlayer.getPosition() * 1000); // Convert to milliseconds
+                lastKnownRealPlaybackPositionMs = Math.max(0L, position);
+                PlayerState playerState;
+                try {
+                    playerState = backgroundPlayer.getState();
+                } catch (Exception ignored) {
+                    playerState = isPlaying ? PlayerState.PLAYING : PlayerState.PAUSED;
+                }
+
+                if (playerState == PlayerState.PLAYING && networkStoppedForRecovery && isNetworkAvailable()) {
+                    JWLog.d(TAG, "NETWORK_GUARD: headless clearing stale recovery stop flag from position sync");
+                    networkStoppedForRecovery = false;
+                    pendingResumeAfterNetworkRecovery = false;
+                    backgroundRecoveryInProgress = false;
+                    backgroundRecoveryReloadAttempts = 0;
+                    hasStartedPlayback = true;
+                }
+
+                boolean actuallyPlaying = playerState == PlayerState.PLAYING && !networkStoppedForRecovery;
+                int sessionState = actuallyPlaying
+                        ? PlaybackStateCompat.STATE_PLAYING
+                        : (playerState == PlayerState.BUFFERING
+                            ? PlaybackStateCompat.STATE_BUFFERING
+                            : PlaybackStateCompat.STATE_PAUSED);
                 // Keep MediaSession playback state in sync when available
                 if (sharedMediaSession != null) {
-                    float speed = isPlaying ? RNJWMediaSessionHelper.currentSpeed : 0.0f;
+                    float speed = actuallyPlaying ? RNJWMediaSessionHelper.currentSpeed : 0.0f;
                     PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
-                        .setState(isPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED, position, speed)
+                        .setState(sessionState, position, speed)
                         .setActions(PlaybackStateCompat.ACTION_PLAY | 
+                                   PlaybackStateCompat.ACTION_PLAY_PAUSE |
                                    PlaybackStateCompat.ACTION_PAUSE | 
                                    PlaybackStateCompat.ACTION_STOP |
                                    PlaybackStateCompat.ACTION_SEEK_TO |
                                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                                   PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS);
+                                   PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
+                                   PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID);
                     // Preserve custom actions (e.g. Android Auto speed button)
                     try {
                         PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
@@ -1080,6 +1472,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                         }
                     } catch (Exception ignored) {}
                     sharedMediaSession.setPlaybackState(builder.build());
+                    sharedMediaSession.setActive(true);
                 }
 
                 saveCurrentSeekPosition();
@@ -1321,11 +1714,21 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     @Override
     public void onPlay(PlayEvent playEvent) {
         JWLog.d(TAG, "📱 JAVA: ✅ onPlay event - Background playback started successfully!");
+
+        if ((!hasStartedPlayback || networkStoppedForRecovery) && shouldBlockPlayForNetwork("onPlay")) {
+            publishBackgroundPausedForNetwork("onPlay");
+            return;
+        }
         
         // RNJWMediaSessionHelper will handle MediaSession state updates
         isPlaying = true;
         hasStartedPlayback = true; // mark first successful start
         autostartAttempts = 0; // reset attempts
+        networkStoppedForRecovery = false;
+        pendingResumeAfterNetworkRecovery = false;
+        backgroundRecoveryInProgress = false;
+        backgroundRecoveryReloadAttempts = 0;
+        rememberBackgroundPosition("onPlay");
         startPositionUpdates();
     }
     
@@ -1335,6 +1738,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         
         // RNJWMediaSessionHelper will handle MediaSession state updates
         isPlaying = false;
+        rememberBackgroundPosition("onPause");
         // keep position updates running for scrub accuracy
         startPositionUpdates();
     }
@@ -1342,6 +1746,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     @Override
     public void onError(ErrorEvent errorEvent) {
         JWLog.e(TAG, "📱 JAVA: ❌ onError event - Background playback error: " + errorEvent.getMessage());
+        if (currentMediaRequiresNetwork && !isNetworkAvailable()) {
+            publishBackgroundPausedForNetwork("onError");
+            stopPositionUpdates();
+            return;
+        }
         
         // Clear pending media on error
         playingInfoManager.clearPlayingInfo();

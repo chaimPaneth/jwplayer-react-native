@@ -1053,6 +1053,33 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
     }
 
+    private PlayerConfig applyHiddenUiGroups(PlayerConfig config, ReadableMap prop) {
+        if (config == null || prop == null || !prop.hasKey("hideUIGroups")) {
+            return config;
+        }
+
+        ReadableArray uiGroupsArray = prop.getArray("hideUIGroups");
+        if (uiGroupsArray == null) {
+            return config;
+        }
+
+        UiConfig.Builder uiConfigBuilder = config.getUiConfig() != null
+                ? new UiConfig.Builder(config.getUiConfig())
+                : new UiConfig.Builder().displayAllControls();
+
+        for (int i = 0; i < uiGroupsArray.size(); i++) {
+            if (uiGroupsArray.getType(i) == ReadableType.String) {
+                UiGroup uiGroup = GROUP_TYPES.get(uiGroupsArray.getString(i));
+                if (uiGroup != null) {
+                    uiConfigBuilder.hide(uiGroup);
+                }
+            }
+        }
+
+        UiConfig uiConfig = uiConfigBuilder.show(UiGroup.PLAYER_CONTROLS_CONTAINER).build();
+        return new PlayerConfig.Builder(config).uiConfig(uiConfig).build();
+    }
+
     /**
      * Main entry point for setting/updating player configuration.
      * Uses a smart approach: only recreate the player view when absolutely necessary,
@@ -1177,6 +1204,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         
         // Build new configuration
         PlayerConfig newConfig = buildPlayerConfig(prop, oldConfig);
+        newConfig = applyHiddenUiGroups(newConfig, prop);
         
         // ALWAYS ensure PLAYER_CONTROLS_CONTAINER is shown in UiConfig after setup.
         // This prevents issues where controls are off and JWPlayer SDK hides UI groups,
@@ -1523,7 +1551,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         // Setup player with config
         if (isJwConfig) {
-            mPlayer.setup(jwConfig);
+            mPlayer.setup(applyHiddenUiGroups(jwConfig, prop));
         } else {
             PlayerConfig playerConfig = configBuilder.build();
             mPlayer.setup(playerConfig);
@@ -2124,6 +2152,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onDisplayClick(DisplayClickEvent displayClickEvent) {
         JWLog.d(TAG, "onDisplayClick()");
+        com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteUserPlaybackGesture("display-click");
 
     }
 
