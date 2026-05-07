@@ -86,6 +86,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private static final String TAG = "JWPlayerNativePlaybackHandler";
     private static final String CLOUDINARY_BASE = "https://res.cloudinary.com/ouinternal/image/upload/c_scale,f_auto,q_auto,w_275/";
     private static final String JW_MANIFEST_BASE = "https://cdn.jwplayer.com/manifests/";
+    private static final String HEADLESS_PLAYBACK_AVAILABLE_EVENT = "onActiveHeadlessPlaybackAvailable";
     private static JWPlayerNativePlaybackHandler instance;
     private final Context context;
     private final GlobalPlayingInfoManager playingInfoManager;
@@ -764,6 +765,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             mediaSessionHelper = new RNJWMediaSessionHelper(context, notificationHelper, serviceMediaApi);
             
             JWLog.d(TAG, "📱 JAVA: Background player creation completed successfully");
+            emitActiveHeadlessPlaybackAvailable("background-player-created");
             // Artwork fetch gating (avoid duplicate network if metadata already has bitmap)
             try {
                 // imageUrl already declared earlier in createBackgroundPlayer; reuse it here
@@ -1864,6 +1866,22 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             }
         } catch (Exception e) {
             JWLog.e(TAG, "Error emitting stop UI player event", e);
+        }
+    }
+
+    private void emitActiveHeadlessPlaybackAvailable(String reason) {
+        JWLog.d(TAG, "emitActiveHeadlessPlaybackAvailable(reason=" + reason + ")");
+        try {
+            ReactContext reactContext = getReactContext();
+            if (reactContext != null) {
+                WritableMap eventData = Arguments.createMap();
+                eventData.putString("reason", reason);
+
+                reactContext.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                    .emit(HEADLESS_PLAYBACK_AVAILABLE_EVENT, eventData);
+            }
+        } catch (Exception e) {
+            JWLog.e(TAG, "Error emitting active headless playback event", e);
         }
     }
     
