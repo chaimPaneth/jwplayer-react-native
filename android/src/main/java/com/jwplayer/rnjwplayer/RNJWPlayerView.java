@@ -1,15 +1,12 @@
 package com.jwplayer.rnjwplayer;
 
 
-import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.NotificationManager;
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
@@ -31,7 +28,8 @@ import android.widget.RelativeLayout;
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.content.ContextCompat;
+import androidx.core.app.PictureInPictureModeChangedInfo;
+import androidx.core.util.Consumer;
 import androidx.lifecycle.Lifecycle;
 import androidx.lifecycle.LifecycleEventObserver;
 import androidx.lifecycle.LifecycleObserver;
@@ -135,9 +133,9 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 public class RNJWPlayerView extends RelativeLayout implements
         VideoPlayerEvents.OnFullscreenListener,
@@ -244,7 +242,8 @@ public class RNJWPlayerView extends RelativeLayout implements
     private ThemedReactContext mThemedReactContext;
 
     private RNJWMediaServiceController mMediaServiceController;
-    private PipHandlerReceiver mReceiver = null;
+    private Consumer<PictureInPictureModeChangedInfo> mPipListener = null;
+    private Boolean mLastHandledPipState = null;
     private OnBackPressedCallback mPipBackCallback = null;
 
     // Add completion handler field
@@ -872,102 +871,168 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
     }
 
-    private ArrayList<Integer> rootViewChildrenOriginalVisibility = new ArrayList<Integer>();
+    private final Map<View, Integer> rootViewVisibilitySnapshot = new LinkedHashMap<>();
 
-    private class PipHandlerReceiver extends BroadcastReceiver {
+    /**
+     * Handles a Picture-in-Picture mode change for this view's host activity.
+     *
+     * Invoked from the {@link androidx.activity.ComponentActivity} listener registered
+     * in {@link #registerPipListener()}. The listener fires synchronously inside the
+     * activity's lifecycle pass, so we re-post the actual reparenting work to the
+     * player view's message queue. This preserves the deferred timing the previous
+     * BroadcastReceiver implementation relied on (the JWPlayer SDK calculates the PiP
+     * window aspect off the current View; reparenting too early caused the host UI to
+     * be minimized as a whole instead of just the player).
+     *
+     * Listener-based delivery is in-process only, so this method can never be called
+     * from another app. That eliminates the previous cross-app PiP crash entirely
+     * without requiring any host-app MainActivity changes.
+     */
+    private void handlePipChange(boolean isInPip, Configuration newConfig) {
+        JWLog.d(TAG, "handlePipChange(isInPip=" + isInPip + ")");
 
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            JWLog.d(TAG, "PipHandlerReceiver.onReceive(intent=" + JWLog.intentInfo(intent) + ")");
-            if (intent == null) {
-                return;
-            }
-            if (Objects.equals(intent.getAction(), "onPictureInPictureModeChanged")) {
-                if (intent.hasExtra("newConfig") && intent.hasExtra("isInPictureInPictureMode")) {
-                    // Tell the JWP SDK we are toggling so it can handle toolbar / internal setup
-                    Boolean isInPip = intent.getBooleanExtra("isInPictureInPictureMode", false);
-                    mPlayer.onPictureInPictureModeChanged(isInPip, intent.getParcelableExtra("newConfig"));
+        // Ignore duplicate callbacks for the same PiP state; they can arrive during
+        // config churn and should not re-run view reparenting.
+        if (mLastHandledPipState != null && mLastHandledPipState == isInPip) {
+            JWLog.d(TAG, "handlePipChange: duplicate state " + isInPip + ", ignoring");
+            return;
+        }
 
-                    PlaybackManager.getInstance().setUiInPip(isInPip);
+        if (mPlayer == null || mPlayerView == null || mActivity == null || mActivity.isFinishing()) {
+            JWLog.w(TAG, "handlePipChange: invalid state, ignoring");
+            return;
+        }
 
-                    View decorView = mActivity.getWindow().getDecorView();
-                    ViewGroup rootView = decorView.findViewById(android.R.id.content);
+        // Defer the layout work until after the activity finishes its lifecycle pass.
+        // Running synchronously from inside onPictureInPictureModeChanged() reparents
+        // the view before the system has measured the PiP window, which causes the
+        // entire activity content to render at PiP size on exit (visible as the host
+        // app being "minimized" instead of just the player).
+        final Configuration configToApply = newConfig;
+        mPlayerView.post(() -> applyPipChange(isInPip, configToApply));
+    }
 
-                    ViewGroup.LayoutParams layoutParams = new ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT);
+    private void applyPipChange(boolean isInPip, Configuration newConfig) {
+        if (mPlayer == null || mPlayerView == null || mActivity == null || mActivity.isFinishing()) {
+            JWLog.w(TAG, "applyPipChange: invalid state, ignoring");
+            return;
+        }
+        if (mLastHandledPipState != null && mLastHandledPipState == isInPip) {
+            return;
+        }
 
-                    if (isInPip) {
-                        // Going into Picture in Picture
-                        ViewGroup parent = (ViewGroup) mPlayerView.getParent();
+        try {
+            // Tell the JWP SDK we are toggling so it can handle toolbar / internal setup
+            mPlayer.onPictureInPictureModeChanged(isInPip, newConfig);
 
-                        // Remove the player view temporarily
-                        if (parent != null) {
-                            parent.removeView(mPlayerView);
-                        }
+            PlaybackManager.getInstance().setUiInPip(isInPip);
 
-                        // Hide all views but player view and keep a handle on them for later
-                        for (int i = 0; i < rootView.getChildCount(); i++) {
-                            if (rootView.getChildAt(i) != mPlayerView) {
-                                rootViewChildrenOriginalVisibility.add(rootView.getChildAt(i).getVisibility());
-                                rootView.getChildAt(i).setVisibility(View.GONE);
-                            }
-                        }
-                        // Add player view back (This is safe since the JWP SDK has already calculated the PiP size/aspect off the View)
-                        rootView.addView(mPlayerView, layoutParams);
-                    } else {
-                        // Exiting Picture in Picture
+            View decorView = mActivity.getWindow().getDecorView();
+            ViewGroup rootView = decorView.findViewById(android.R.id.content);
+            if (rootView == null) return;
 
-                        // Toggle controls to ensure we don't lose them -- weird UX bug fix where controls got lost
-                        mPlayer.setForceControlsVisibility(true);
-                        mPlayer.setForceControlsVisibility(false);
+            ViewGroup.LayoutParams layoutParams = new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT);
 
-                        // If player was in fullscreen when going into PiP, we need to force it back out
-                        if (mPlayer.getFullscreen()) {
-                            mPlayer.setFullscreen(false, true);
-                        }
+            if (isInPip) {
+                // Going into Picture in Picture
+                ViewGroup parent = (ViewGroup) mPlayerView.getParent();
 
-                        // Strip player view
-                        rootView.removeView(mPlayerView);
+                // Remove the player view temporarily
+                if (parent != null) {
+                    parent.removeView(mPlayerView);
+                }
 
-                        // Add visibility back to  any other controls
-                        for (int i = 0; i < rootView.getChildCount(); i++) {
-                            rootView.getChildAt(i).setVisibility(rootViewChildrenOriginalVisibility.get(i));
-                        }
-                        // Clear our list of views
-                        rootViewChildrenOriginalVisibility.clear();
-                        // Add player view back in main spot
-                        addView(mPlayerView, 0, layoutParams);
+                // Hide all views but player view and keep a handle on them for later
+                rootViewVisibilitySnapshot.clear();
+                for (int i = 0; i < rootView.getChildCount(); i++) {
+                    View child = rootView.getChildAt(i);
+                    if (child != mPlayerView) {
+                        rootViewVisibilitySnapshot.put(child, child.getVisibility());
+                        child.setVisibility(View.GONE);
                     }
                 }
+                // Add player view back (the JWP SDK has already calculated the PiP size/aspect off the View)
+                rootView.addView(mPlayerView, layoutParams);
+                mLastHandledPipState = true;
+            } else {
+                // Exiting Picture in Picture
+
+                // Exit without a prior enter snapshot means this view instance did
+                // not own the PiP transition. Skip reparenting to avoid applying an
+                // invalid layout state (observed as app-sized minimization artifacts).
+                if (rootViewVisibilitySnapshot.isEmpty()) {
+                    JWLog.w(TAG, "applyPipChange: visibility snapshot empty on exit, skipping player reparent");
+                    mLastHandledPipState = false;
+                    return;
+                }
+
+                // Toggle controls to ensure we don't lose them -- weird UX bug fix where controls got lost
+                mPlayer.setForceControlsVisibility(true);
+                mPlayer.setForceControlsVisibility(false);
+
+                // If player was in fullscreen when going into PiP, we need to force it back out
+                if (mPlayer.getFullscreen()) {
+                    mPlayer.setFullscreen(false, true);
+                }
+
+                // Strip player view
+                rootView.removeView(mPlayerView);
+
+                // Restore visibility for the views that were hidden on PiP enter.
+                // Use the keyed snapshot so we never index out of bounds.
+                for (Map.Entry<View, Integer> entry : rootViewVisibilitySnapshot.entrySet()) {
+                    if (entry.getKey().getParent() == rootView) {
+                        entry.getKey().setVisibility(entry.getValue());
+                    }
+                }
+                rootViewVisibilitySnapshot.clear();
+                // Add player view back in main spot
+                addView(mPlayerView, 0, layoutParams);
+                mLastHandledPipState = false;
             }
+        } catch (Throwable t) {
+            JWLog.e(TAG, "applyPipChange: unexpected error: " + t.getMessage());
         }
     }
 
-    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    /**
+     * Registers an in-process Picture-in-Picture mode change listener on the host
+     * activity. Replaces the previous BroadcastReceiver approach, which required a
+     * matching {@code sendBroadcast} from the host app's {@code MainActivity} and
+     * was vulnerable to cross-app delivery when multiple apps embedded this library
+     * on the same device.
+     *
+     * Method name kept as {@code registerReceiver} for callsite compatibility.
+     */
     private void registerReceiver() {
-        JWLog.d(TAG, "registerReceiver()");
-        mReceiver = new PipHandlerReceiver();
-        IntentFilter intentFilter = new IntentFilter("onPictureInPictureModeChanged");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // Must be Exported to get intents
-                mActivity.registerReceiver(mReceiver, intentFilter, Context.RECEIVER_EXPORTED);
-            } else {
-                ContextCompat.registerReceiver(mActivity, mReceiver, intentFilter, ContextCompat.RECEIVER_EXPORTED); // Safe API level < 34
-            }
-        } else {
-            ContextCompat.registerReceiver(mActivity, mReceiver, intentFilter, ContextCompat.RECEIVER_EXPORTED); // Safe API level < 34
+        JWLog.d(TAG, "registerReceiver() -> PiP listener");
+        if (mActivity == null || mPipListener != null) {
+            return;
         }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // PiP is unsupported below API 26; nothing to listen for.
+            return;
+        }
+        mPipListener = info -> handlePipChange(
+                info.isInPictureInPictureMode(),
+                info.getNewConfig());
+        mActivity.addOnPictureInPictureModeChangedListener(mPipListener);
     }
 
     private void unRegisterReceiver() {
-        JWLog.d(TAG, "unRegisterReceiver()");
-        if (mReceiver != null) {
-            mActivity.unregisterReceiver(mReceiver);
-            mReceiver = null;
+        JWLog.d(TAG, "unRegisterReceiver() -> PiP listener");
+        if (mPipListener != null && mActivity != null) {
+            try {
+                mActivity.removeOnPictureInPictureModeChangedListener(mPipListener);
+            } catch (Throwable ignored) {
+                // listener already removed or activity tearing down
+            }
+            mPipListener = null;
         }
-
+        rootViewVisibilitySnapshot.clear();
+        mLastHandledPipState = null;
     }
 
     /**

@@ -731,7 +731,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     ctx,
                     mediaButtonFallbackReceiver,
                     intentFilter,
-                    ContextCompat.RECEIVER_EXPORTED);
+                    ContextCompat.RECEIVER_NOT_EXPORTED);
         } catch (Exception ex) {
             JWLog.w(TAG, "setupMediaButtonFallback: register failed " + ex.getMessage());
         }
