@@ -333,6 +333,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         } catch (Exception ignore) {}
 
+        // Skip capturing zero positions. JWPlayer briefly
+        // reports getPosition()==0 during media switches (before the new playlist item starts);
+        // writing that 0 would clobber the legitimate resume position cached by the periodic save.
+        if (positionMs <= 0) {
+            JWLog.d(TAG, "captureAndStoreSeekPosition: skipping zero position capture");
+            return;
+        }
+
         storeSeekPosition(positionMs);
     }
 
@@ -360,6 +368,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (resetToStartAfterSeekCompletion && position > 0) {
             JWLog.d(TAG, "storeSeekPosition: override due to pending completion reset");
             position = 0L;
+        }
+
+        // Don't overwrite a non-zero cached position with 0.
+        // During AA Skip Next/Prev, storeSeekPosition(0) can fire after externalMediaId got refreshed
+        // back to the OLD mediaId via inferMediaIdFromPlaylistItem, which would wipe the legitimate
+        // resume position saved seconds earlier by the periodic progress sync.
+        if (position == 0) {
+            Long existing = lastKnownPositionCache.get(externalMediaId);
+            if (existing != null && existing > 0) {
+                JWLog.d(TAG, "storeSeekPosition: BLOCKED zero overwrite for mediaId=" + externalMediaId + " (existing=" + existing + "ms)");
+                return;
+            }
         }
 
         // CRITICAL: Cache position in static map for handoff resume
@@ -2913,8 +2933,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "performMediaItemSelection(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ")");
 
         requestAudioFocusForPlayback();
-
-        captureAndStoreSeekPosition();
 
         try {
             Thread.sleep(500); // 0.5 seconds
