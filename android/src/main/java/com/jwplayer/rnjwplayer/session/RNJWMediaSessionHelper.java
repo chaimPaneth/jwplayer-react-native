@@ -72,6 +72,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private static final java.util.regex.Pattern MANIFEST_PATTERN = java.util.regex.Pattern.compile(".*/manifests/([^/?]+)\\.m3u8(?:\\?.*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern HLS_PATTERN = java.util.regex.Pattern.compile(".*/(\\d+)/hls/.*", java.util.regex.Pattern.CASE_INSENSITIVE);
+    private static final java.util.regex.Pattern APP_POST_MEDIA_ID_PATTERN = java.util.regex.Pattern.compile("^(post-)?\\d+$", java.util.regex.Pattern.CASE_INSENSITIVE);
 
     private JWPlayer jwPlayer;
     MediaSessionStateProvider mediaSessionStateProvider;
@@ -129,6 +130,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static String externalMediaId = null;
     private static String externalSubtitle = null;
 
+    // Stores the postId-format mediaId originally selected from Android Auto
+    // (e.g. "175936" or "post-175936"). Unlike `externalMediaId`, this is NOT
+    // overwritten by JW playlist callbacks (onPlaylistItem / storeSeekPosition)
+    // which legitimately track the JW Player media ID (e.g. "J56s1rL4").
+    // Used when emitting Next/Previous events so the JS HeadlessTaskHandler can
+    // resolve the correct postId via SeriesNavigationService.
+    private static String androidAutoSelectedMediaId = null;
+
     public static void noteUserPlaybackGesture(String reason) {
         lastUserPlaybackGestureMs = SystemClock.elapsedRealtime();
         JWLog.d(TAG, "USER_INTENT: playback gesture reason=" + reason
@@ -139,6 +148,36 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         long lastGestureMs = lastUserPlaybackGestureMs;
         return lastGestureMs > 0L
                 && SystemClock.elapsedRealtime() - lastGestureMs <= USER_PLAYBACK_GESTURE_WINDOW_MS;
+    }
+
+    private static boolean isAppPostMediaId(String mediaId) {
+        return mediaId != null && APP_POST_MEDIA_ID_PATTERN.matcher(mediaId.trim()).matches();
+    }
+
+    private void refreshAndroidAutoSelectedMediaIdFromPlaylist(String reason) {
+        String inferredMediaId = inferMediaIdFromPlaylistItem(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
+        if (!isAppPostMediaId(inferredMediaId)) {
+            return;
+        }
+
+        String normalizedMediaId = inferredMediaId.trim();
+        androidAutoSelectedMediaId = normalizedMediaId;
+        externalMediaId = normalizedMediaId;
+    }
+
+    private String resolveMediaIdForSkip(String direction) {
+        refreshAndroidAutoSelectedMediaIdFromPlaylist("skip-" + direction);
+
+        if (isAppPostMediaId(androidAutoSelectedMediaId)) {
+            return androidAutoSelectedMediaId.trim();
+        }
+
+        if (isAppPostMediaId(externalMediaId)) {
+            androidAutoSelectedMediaId = externalMediaId.trim();
+            return androidAutoSelectedMediaId;
+        }
+
+        return androidAutoSelectedMediaId != null ? androidAutoSelectedMediaId : externalMediaId;
     }
 
     // Static position cache: stores last known position per mediaId (survives instance recreation)
@@ -348,6 +387,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "storeSeekPosition(externalMediaId=" + externalMediaId + ", positionMs=" + position + ")");
         String inferredCurrentMediaId = inferMediaIdFromPlaylistItem(jwPlayer != null ? jwPlayer.getPlaylistItem() : null);
         if (inferredCurrentMediaId != null && !inferredCurrentMediaId.isEmpty()) {
+            if (isAppPostMediaId(inferredCurrentMediaId)) {
+                androidAutoSelectedMediaId = inferredCurrentMediaId.trim();
+            }
             if (externalMediaId == null || externalMediaId.isEmpty() || !inferredCurrentMediaId.equals(externalMediaId)) {
                 JWLog.d(TAG, "storeSeekPosition: refreshing externalMediaId from current playlist item: " + externalMediaId + " -> " + inferredCurrentMediaId);
                 externalMediaId = inferredCurrentMediaId;
@@ -1870,6 +1912,10 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         String inferredMediaId = inferMediaIdFromPlaylistItem(incomingItem);
+        if (isAppPostMediaId(inferredMediaId)) {
+            String normalizedMediaId = inferredMediaId.trim();
+            androidAutoSelectedMediaId = normalizedMediaId;
+        }
 
         boolean hasPendingAndroidAutoResume = externalMediaId != null
             && pendingSeekMs != null
@@ -2694,13 +2740,17 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToNext() {
         JWLog.d(TAG, "performSkipToNext()");
-        
+
+        // Prefer the current React playlist's app post ID; fall back to the last
+        // Android Auto selection when JW only exposes its internal media ID.
+        String mediaIdForSkip = resolveMediaIdForSkip("next");
+
         // Notify React Native about skip to next via MediaBrowserService (using reflection)
         // This allows RN to fetch the next post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod("sendSkipToNextEventToReactNative", String.class);
-            sendSkipNextMethod.invoke(null, externalMediaId);
+            sendSkipNextMethod.invoke(null, mediaIdForSkip);
         } catch (Exception e) {
             JWLog.w(TAG, "performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
         }
@@ -2717,13 +2767,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToPrevious() {
         JWLog.d(TAG, "performSkipToPrevious()");
-        
+
+        // Prefer the current React playlist's app post ID. See performSkipToNext().
+        String mediaIdForSkip = resolveMediaIdForSkip("previous");
+
         // Notify React Native about skip to previous via MediaBrowserService (using reflection)
         // This allows RN to fetch the previous post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod("sendSkipToPreviousEventToReactNative", String.class);
-            sendSkipPrevMethod.invoke(null, externalMediaId);
+            sendSkipPrevMethod.invoke(null, mediaIdForSkip);
         } catch (Exception e) {
             JWLog.w(TAG, "performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
         }
@@ -2993,6 +3046,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
             externalMediaId = mediaId;
             externalSubtitle = subtitle;
+            androidAutoSelectedMediaId = mediaId;
 
             // Create extras map
             java.util.Map<String, Object> extrasMap = new java.util.HashMap<>();
@@ -3021,6 +3075,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         autoHandoffSeekAttempts = 0; // Reset counter for new handoff
         
         externalMediaId = mediaId;
+        androidAutoSelectedMediaId = mediaId;
 
         JWLog.d(TAG, "handlePlayFromMediaId: Static state initialized - externalMediaId=" + externalMediaId + ", pendingSeekMs=" + pendingSeekMs + "ms (extracted from extras), autoHandoffSeekAttempts=0, pendingSeekApplied=false");
 
