@@ -1881,14 +1881,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         String previousTitle = existing != null ? existing.getString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE) : null;
         String previousMediaId = existing != null ? existing.getString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID) : null;
-        if (BuildConfig.DEBUG) {
-            JWLog.d(TAG, "metadata-update-before mediaId="
-                + playlistItem.getMediaId()
-                + ", title=" + playlistItem.getTitle()
-                + ", previousMediaId=" + previousMediaId
-                + ", previousTitle=" + previousTitle
-                + ", " + getCurrentPlaybackDebugInfo("metadata-update"));
-        }
+        JWLog.d(TAG, "metadata-update-before mediaId="
+            + playlistItem.getMediaId()
+            + ", title=" + playlistItem.getTitle()
+            + ", previousMediaId=" + previousMediaId
+            + ", previousTitle=" + previousTitle
+            + ", " + getCurrentPlaybackDebugInfo("metadata-update"));
 
         builder.putString("android.media.metadata.DISPLAY_TITLE", 
             playlistItem.getTitle() != null ? playlistItem.getTitle() : "");
@@ -2818,9 +2816,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToNext() {
         JWLog.d(TAG, "performSkipToNext()");
-        if (BuildConfig.DEBUG) {
-            JWLog.d(TAG, "external-skip-entry " + getCurrentPlaybackDebugInfo("next"));
-        }
+        JWLog.d(TAG, "external-skip-entry " + getCurrentPlaybackDebugInfo("next"));
 
         // Prefer the current React playlist's app post ID; fall back to the last
         // Android Auto selection when JW only exposes its internal media ID.
@@ -2836,19 +2832,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             Object result = sendSkipNextMethod.invoke(null, mediaIdForSkip);
             skipToken = (result instanceof String) ? (String) result : null;
             notifiedReactNative = (skipToken != null);
-            if (BuildConfig.DEBUG) {
-                JWLog.d(TAG, "external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
-            }
+            JWLog.d(TAG, "external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
         } catch (Exception e) {
-            if (BuildConfig.DEBUG) {
-                JWLog.w(TAG, "performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
-            }
+            JWLog.w(TAG, "performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
         }
 
         if (notifiedReactNative && isAppPostMediaId(mediaIdForSkip)) {
-            if (BuildConfig.DEBUG) {
-                JWLog.d(TAG, "external-skip-native-fallback-skipped command=next, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
-            }
+            JWLog.d(TAG, "external-skip-native-fallback-skipped command=next, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
             // Schedule a 300 ms fallback: if RN has not acknowledged the skip, fire native skip
             scheduleSkipFallback(skipToken, "next");
             return;
@@ -2857,9 +2847,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Also try JWPlayer's internal skip (for playlists within a single post)
         try {
             if (serviceMediaApi != null) {
-                if (BuildConfig.DEBUG) {
-                    JWLog.d(TAG, "external-skip-native-fallback command=next, mediaIdForSkip=" + mediaIdForSkip);
-                }
+                JWLog.d(TAG, "external-skip-native-fallback command=next, mediaIdForSkip=" + mediaIdForSkip);
                 serviceMediaApi.onSkipToNext();
             }
         } catch (Exception ex) {
@@ -2869,9 +2857,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToPrevious() {
         JWLog.d(TAG, "performSkipToPrevious()");
-        if (BuildConfig.DEBUG) {
-            JWLog.d(TAG, "external-skip-entry " + getCurrentPlaybackDebugInfo("previous"));
-        }
+        JWLog.d(TAG, "external-skip-entry " + getCurrentPlaybackDebugInfo("previous"));
 
         // Prefer the current React playlist's app post ID. See performSkipToNext().
         String mediaIdForSkip = resolveMediaIdForSkip("previous");
@@ -2886,19 +2872,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             Object result = sendSkipPrevMethod.invoke(null, mediaIdForSkip);
             skipToken = (result instanceof String) ? (String) result : null;
             notifiedReactNative = (skipToken != null);
-            if (BuildConfig.DEBUG) {
-                JWLog.d(TAG, "external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
-            }
+            JWLog.d(TAG, "external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
         } catch (Exception e) {
-            if (BuildConfig.DEBUG) {
-                JWLog.w(TAG, "performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
-            }
+            JWLog.w(TAG, "performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
         }
 
         if (notifiedReactNative && isAppPostMediaId(mediaIdForSkip)) {
-            if (BuildConfig.DEBUG) {
-                JWLog.d(TAG, "external-skip-native-fallback-skipped command=previous, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
-            }
+            JWLog.d(TAG, "external-skip-native-fallback-skipped command=previous, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
             // Schedule a 300 ms fallback: if RN has not acknowledged the skip, fire native skip
             scheduleSkipFallback(skipToken, "previous");
             return;
@@ -2907,9 +2887,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Also try JWPlayer's internal skip (for playlists within a single post)
         try {
             if (serviceMediaApi != null) {
-                if (BuildConfig.DEBUG) {
-                    JWLog.d(TAG, "external-skip-native-fallback command=previous, mediaIdForSkip=" + mediaIdForSkip);
-                }
+                JWLog.d(TAG, "external-skip-native-fallback command=previous, mediaIdForSkip=" + mediaIdForSkip);
                 serviceMediaApi.onSkipToPrevious();
             }
         } catch (Exception ex) {
