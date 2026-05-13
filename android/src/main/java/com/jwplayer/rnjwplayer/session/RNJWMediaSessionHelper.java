@@ -1881,12 +1881,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         String previousTitle = existing != null ? existing.getString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE) : null;
         String previousMediaId = existing != null ? existing.getString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID) : null;
-        JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE metadata-update-before mediaId="
-            + playlistItem.getMediaId()
-            + ", title=" + playlistItem.getTitle()
-            + ", previousMediaId=" + previousMediaId
-            + ", previousTitle=" + previousTitle
-            + ", " + getCurrentPlaybackDebugInfo("metadata-update"));
+        if (BuildConfig.DEBUG) {
+            JWLog.d(TAG, "metadata-update-before mediaId="
+                + playlistItem.getMediaId()
+                + ", title=" + playlistItem.getTitle()
+                + ", previousMediaId=" + previousMediaId
+                + ", previousTitle=" + previousTitle
+                + ", " + getCurrentPlaybackDebugInfo("metadata-update"));
+        }
 
         builder.putString("android.media.metadata.DISPLAY_TITLE", 
             playlistItem.getTitle() != null ? playlistItem.getTitle() : "");
@@ -2782,36 +2784,82 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         captureAndStoreSeekPosition();
     }
 
+    /**
+     * Schedule a native skip fallback to fire after SKIP_ACK_TIMEOUT_MS (300 ms).
+     * If React Native has not called acknowledgeSkip() by then, we fire the JWPlayer
+     * internal skip so the user's button press is never silently dropped.
+     *
+     * @param skipToken The token returned by MediaBrowserService when the RN event was dispatched.
+     *                  If null, the fallback is skipped (RN event dispatch failed entirely).
+     * @param direction "next" or "previous"
+     */
+    private void scheduleSkipFallback(final String skipToken, final String direction) {
+        if (skipToken == null) return;
+        mainHandler.postDelayed(() -> {
+            try {
+                Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+                java.lang.reflect.Method isSkipPendingMethod = mediaBrowserServiceClass.getMethod("isSkipPending", String.class);
+                Boolean isPending = (Boolean) isSkipPendingMethod.invoke(null, skipToken);
+                if (Boolean.TRUE.equals(isPending)) {
+                    JWLog.w(TAG, "skip-fallback firing: RN did not ack skipToken=" + skipToken + " command=" + direction);
+                    if (serviceMediaApi != null) {
+                        if ("next".equals(direction)) {
+                            serviceMediaApi.onSkipToNext();
+                        } else {
+                            serviceMediaApi.onSkipToPrevious();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                JWLog.w(TAG, "scheduleSkipFallback error: " + e.getMessage());
+            }
+        }, 300);
+    }
+
     private void performSkipToNext() {
         JWLog.d(TAG, "performSkipToNext()");
-        JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-entry " + getCurrentPlaybackDebugInfo("next"));
+        if (BuildConfig.DEBUG) {
+            JWLog.d(TAG, "external-skip-entry " + getCurrentPlaybackDebugInfo("next"));
+        }
 
         // Prefer the current React playlist's app post ID; fall back to the last
         // Android Auto selection when JW only exposes its internal media ID.
         String mediaIdForSkip = resolveMediaIdForSkip("next");
         boolean notifiedReactNative = false;
+        String skipToken = null;
 
         // Notify React Native about skip to next via MediaBrowserService (using reflection)
         // This allows RN to fetch the next post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod("sendSkipToNextEventToReactNative", String.class);
-            sendSkipNextMethod.invoke(null, mediaIdForSkip);
-            notifiedReactNative = true;
-            JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip);
+            Object result = sendSkipNextMethod.invoke(null, mediaIdForSkip);
+            skipToken = (result instanceof String) ? (String) result : null;
+            notifiedReactNative = (skipToken != null);
+            if (BuildConfig.DEBUG) {
+                JWLog.d(TAG, "external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
+            }
         } catch (Exception e) {
-            JWLog.w(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
+            if (BuildConfig.DEBUG) {
+                JWLog.w(TAG, "performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
+            }
         }
 
         if (notifiedReactNative && isAppPostMediaId(mediaIdForSkip)) {
-            JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-native-fallback-skipped command=next, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
+            if (BuildConfig.DEBUG) {
+                JWLog.d(TAG, "external-skip-native-fallback-skipped command=next, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
+            }
+            // Schedule a 300 ms fallback: if RN has not acknowledged the skip, fire native skip
+            scheduleSkipFallback(skipToken, "next");
             return;
         }
-        
+
         // Also try JWPlayer's internal skip (for playlists within a single post)
         try {
             if (serviceMediaApi != null) {
-                JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-native-fallback command=next, mediaIdForSkip=" + mediaIdForSkip);
+                if (BuildConfig.DEBUG) {
+                    JWLog.d(TAG, "external-skip-native-fallback command=next, mediaIdForSkip=" + mediaIdForSkip);
+                }
                 serviceMediaApi.onSkipToNext();
             }
         } catch (Exception ex) {
@@ -2821,33 +2869,47 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private void performSkipToPrevious() {
         JWLog.d(TAG, "performSkipToPrevious()");
-        JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-entry " + getCurrentPlaybackDebugInfo("previous"));
+        if (BuildConfig.DEBUG) {
+            JWLog.d(TAG, "external-skip-entry " + getCurrentPlaybackDebugInfo("previous"));
+        }
 
         // Prefer the current React playlist's app post ID. See performSkipToNext().
         String mediaIdForSkip = resolveMediaIdForSkip("previous");
         boolean notifiedReactNative = false;
+        String skipToken = null;
 
         // Notify React Native about skip to previous via MediaBrowserService (using reflection)
         // This allows RN to fetch the previous post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod("sendSkipToPreviousEventToReactNative", String.class);
-            sendSkipPrevMethod.invoke(null, mediaIdForSkip);
-            notifiedReactNative = true;
-            JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip);
+            Object result = sendSkipPrevMethod.invoke(null, mediaIdForSkip);
+            skipToken = (result instanceof String) ? (String) result : null;
+            notifiedReactNative = (skipToken != null);
+            if (BuildConfig.DEBUG) {
+                JWLog.d(TAG, "external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
+            }
         } catch (Exception e) {
-            JWLog.w(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
+            if (BuildConfig.DEBUG) {
+                JWLog.w(TAG, "performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
+            }
         }
 
         if (notifiedReactNative && isAppPostMediaId(mediaIdForSkip)) {
-            JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-native-fallback-skipped command=previous, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
+            if (BuildConfig.DEBUG) {
+                JWLog.d(TAG, "external-skip-native-fallback-skipped command=previous, reason=rn-owned-app-post-queue, mediaIdForSkip=" + mediaIdForSkip);
+            }
+            // Schedule a 300 ms fallback: if RN has not acknowledged the skip, fire native skip
+            scheduleSkipFallback(skipToken, "previous");
             return;
         }
-        
+
         // Also try JWPlayer's internal skip (for playlists within a single post)
         try {
             if (serviceMediaApi != null) {
-                JWLog.d(TAG, "LOG_CAN_BE_REMOVED_ON_RELEASE external-skip-native-fallback command=previous, mediaIdForSkip=" + mediaIdForSkip);
+                if (BuildConfig.DEBUG) {
+                    JWLog.d(TAG, "external-skip-native-fallback command=previous, mediaIdForSkip=" + mediaIdForSkip);
+                }
                 serviceMediaApi.onSkipToPrevious();
             }
         } catch (Exception ex) {
@@ -3051,15 +3113,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         requestAudioFocusForPlayback();
 
-        try {
-            Thread.sleep(500); // 0.5 seconds
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            JWLog.w(TAG, "Delay interrupted during handleDestroy");
-        }
+        // Use postDelayed instead of Thread.sleep so the MediaSession callback thread is not blocked.
+        // The continuation runs on the main thread after the same 500 ms deferral.
+        mainHandler.postDelayed(() -> finishMediaItemSelection(mediaId, extras), 500);
+    }
+
+    private void finishMediaItemSelection(String mediaId, Bundle extras) {
+        JWLog.d(TAG, "finishMediaItemSelection(mediaId=" + mediaId + ")");
 
         initServiceMediaApi();
-        
+
         // Mark that this is from Android Auto and record the time
         isPlayingFromAndroidAuto = true;
         androidAutoHandoffStartTime = System.currentTimeMillis();
@@ -3122,8 +3185,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     }
                 }
             }
-            
-            jwPlayerNativePlaybackHandler.handleHeadlessMediaSelection(mediaId, title, subtitle, icon, extrasMap);            
+
+            jwPlayerNativePlaybackHandler.handleHeadlessMediaSelection(mediaId, title, subtitle, icon, extrasMap);
         } catch (Exception e) {
             JWLog.e(TAG, "Error handling media item selection: " + e.getMessage());
         }
