@@ -492,6 +492,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             }
 
             audioManager = null;
+            hasAudioFocus = false;
 
             doUnbindService();
         } else {
@@ -1661,21 +1662,6 @@ public class RNJWPlayerView extends RelativeLayout implements
         return getNonBuggyContext(getReactContext(), getAppContext());
     }
     
-    /**
-     * Check if MediaSession already exists (from MediaBrowserService)
-     */
-    private boolean hasExistingMediaSession() {
-        JWLog.d(TAG, "hasExistingMediaSession() check via reflection");
-        try {
-            Class<?> singletonClass = Class.forName("com.mediabrowser.MediaSessionSingleton");
-            java.lang.reflect.Method getInstanceMethod = singletonClass.getMethod("getInstance", Context.class);
-            Object sessionInstance = getInstanceMethod.invoke(null, getMediaSessionContext());
-            return sessionInstance != null;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     private void setupMediaSessionHelper() {
         JWLog.d(TAG, "setupMediaSessionHelper(backgroundAudioEnabled=" + backgroundAudioEnabled + ")");
         if (!backgroundAudioEnabled) {
@@ -2242,10 +2228,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         JWLog.d(TAG, "onFirstFrame(loadTime=" + firstFrameEvent.getLoadTime() + ")");
         if (backgroundAudioEnabled) {
             doBindService();
-            // Only request audio focus if we're creating a new session
-            if (!hasExistingMediaSession()) {
-                requestAudioFocus();
-            }
+            requestAudioFocus();
         }
         WritableMap onFirstFrame = Arguments.createMap();
         onFirstFrame.putString("message", "onLoaded");
@@ -2303,11 +2286,10 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onPlay(PlayEvent playEvent) {
         JWLog.d(TAG, "onPlay()");
-        // Ideally done in onFirstFrame instead
-        // if (backgroundAudioEnabled) {
-        //     doBindService();
-        //     requestAudioFocus();
-        // }
+
+        if (backgroundAudioEnabled) {
+            requestAudioFocus();
+        }
 
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlay");
