@@ -1,4 +1,4 @@
-# Chat Mode: Repository Maintainer
+# Agent: Repository Maintainer
 
 ## Role
 You are operating in **Repository Maintainer** mode.
