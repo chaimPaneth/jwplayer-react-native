@@ -109,6 +109,7 @@ import com.jwplayer.pub.api.events.PlaylistItemEvent;
 import com.jwplayer.pub.api.events.ReadyEvent;
 import com.jwplayer.pub.api.events.SeekEvent;
 import com.jwplayer.pub.api.events.SeekedEvent;
+import com.jwplayer.pub.api.events.PlaylistItemMetadataChangedEvent;
 import com.jwplayer.pub.api.events.SetupErrorEvent;
 import com.jwplayer.pub.api.events.TimeEvent;
 import com.jwplayer.pub.api.events.listeners.AdvertisingEvents;
@@ -150,6 +151,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         VideoPlayerEvents.OnTimeListener,
         VideoPlayerEvents.OnPlaylistListener,
         VideoPlayerEvents.OnPlaylistItemListener,
+        VideoPlayerEvents.OnPlaylistItemMetadataChangedListener,
         VideoPlayerEvents.OnPlaylistCompleteListener,
         VideoPlayerEvents.OnAudioTracksListener,
         VideoPlayerEvents.OnAudioTrackChangedListener,
@@ -249,6 +251,9 @@ public class RNJWPlayerView extends RelativeLayout implements
     // Add completion handler field
     PlaylistItemDecision itemUpdatePromise = null;
 
+    // Flag to prevent race conditions during player destruction
+    private volatile boolean isDestroying = false;
+
     private void doBindService() {
         if (mMediaServiceController != null) {
             if (!isBackgroundAudioServiceRunning()) {
@@ -259,6 +264,33 @@ public class RNJWPlayerView extends RelativeLayout implements
                 mMediaServiceController.bindService();
             }
         }
+    }
+
+    /**
+     * Temporary workaround for a JW Android SDK limitation: setPlaylistItemMetadata updates
+     * the MediaSessionCompat metadata but does not rebuild the foreground-service Notification,
+     * so the lock-screen / shade continues to show the old title / description / poster.
+     *
+     * Cycling the MediaServiceController forces MediaService.doStartForeground() to run
+     * NotificationHelper.createNotification() again, which reads the (already-updated) session
+     * text and rebuilds the visible notification. Expect a brief notification flicker and a
+     * momentary allowBackgroundAudio(false)→(true) transition while the service rebinds.
+     *
+     * Known limitation: the poster image is downloaded asynchronously by the SDK's internal
+     * MediaSessionHelper, and cycling the service resets that helper — so the rebuilt
+     * notification typically shows the previous poster. The poster refreshes on the next
+     * playback state change (pause/play, seek).
+     *
+     * Remove this workaround once the JW Android SDK refreshes the notification natively.
+     */
+    void refreshBackgroundAudioNotification() {
+        if (!backgroundAudioEnabled || mPlayer == null || mActivity == null) {
+            return;
+        }
+        doUnbindService();
+        mMediaServiceController = new MediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
+                .build();
+        doBindService();
     }
 
     private void doUnbindService() {
@@ -383,7 +415,22 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     public void destroyPlayer() {
         JWLog.d(TAG, "destroyPlayer() mPlayer=" + JWLog.id(mPlayer));
-        if (mPlayer != null) {
+        if (mPlayer != null && !isDestroying) {
+            isDestroying = true;
+
+            // Disable touch events immediately to prevent race conditions
+            if (mPlayerView != null) {
+                Handler mainHandler = new Handler(Looper.getMainLooper());
+                mainHandler.post(() -> {
+                    if (mPlayerView != null) {
+                        mPlayerView.setClickable(false);
+                        mPlayerView.setFocusable(false);
+                        mPlayerView.setEnabled(false);
+                        mPlayerView.setOnTouchListener(null);
+                    }
+                });
+            }
+
             unRegisterReceiver();
             unregisterPipBackCallback();
 
@@ -427,6 +474,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                     EventType.TIME,
                     EventType.PLAYLIST,
                     EventType.PLAYLIST_ITEM,
+                    EventType.PLAYLIST_ITEM_METADATA_CHANGED,
                     EventType.PLAYLIST_COMPLETE,
                     EventType.FIRST_FRAME,
                     EventType.CONTROLS,
@@ -495,6 +543,8 @@ public class RNJWPlayerView extends RelativeLayout implements
             hasAudioFocus = false;
 
             doUnbindService();
+
+            isDestroying = false; // Reset flag for potential reuse
         } else {
             JWLog.d(TAG, "destroyPlayer() skipped: mPlayer is null");
         }
@@ -512,15 +562,15 @@ public class RNJWPlayerView extends RelativeLayout implements
             Class<?> handlerClass = Class.forName("com.jwplayer.rnjwplayer.JWPlayerNativePlaybackHandler");
             java.lang.reflect.Method getInstanceMethod = handlerClass.getMethod("getInstance", Context.class);
             Object handlerInstance = getInstanceMethod.invoke(null, getContext());
-            
+
             if (handlerInstance != null) {
                 // Check if background player is active
                 java.lang.reflect.Method isActiveMethod = handlerClass.getMethod("isBackgroundPlayerActive");
                 Boolean isActive = (Boolean) isActiveMethod.invoke(handlerInstance);
-                
+
                 if (isActive != null && isActive) {
                     JWLog.d(TAG, "Found active background player, destroying it to prevent conflicts");
-                    
+
                     // Get background player info before destroying for logging
                     try {
                         java.lang.reflect.Method getInfoMethod = handlerClass.getMethod("getCurrentBackgroundPlayerInfo");
@@ -532,11 +582,11 @@ public class RNJWPlayerView extends RelativeLayout implements
                     } catch (Exception infoError) {
                         // Ignore info retrieval errors
                     }
-                    
+
                     // Stop and cleanup background player completely (similar to destroyPlayer)
                     java.lang.reflect.Method stopMethod = handlerClass.getMethod("stopAndCleanup");
                     stopMethod.invoke(handlerInstance);
-                    
+
                     JWLog.d(TAG, "Successfully destroyed background player to prevent dual playback");
                 } else {
                     JWLog.d(TAG, "No active background player found, proceeding with UI player setup");
@@ -547,6 +597,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             // Continue with UI player setup even if background player check fails
         }
     }
+
 
     public void setupPlayerView(Boolean backgroundAudioEnabled, Boolean playlistItemCallbackEnabled) {
         JWLog.d(TAG, "setupPlayerView(backgroundAudioEnabled=" + backgroundAudioEnabled + ", playlistItemCallbackEnabled=" + playlistItemCallbackEnabled + ")");
@@ -567,6 +618,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                     EventType.AUDIO_TRACK_CHANGED,
                     EventType.PLAYLIST,
                     EventType.PLAYLIST_ITEM,
+                    EventType.PLAYLIST_ITEM_METADATA_CHANGED,
                     EventType.PLAYLIST_COMPLETE,
                     EventType.FIRST_FRAME,
                     EventType.CONTROLS,
@@ -1305,6 +1357,99 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
+     * Checks for IMA configuration when IMA is disabled and logs a warning.
+     * 
+     * @param obj The JSONObject to check (for JSON parser path)
+     * @param prop The ReadableMap to check (for legacy builder path)
+     */
+    private void checkAndWarnImaConfig(JSONObject obj, ReadableMap prop) {
+        if (BuildConfig.USE_IMA) {
+            return; // IMA is enabled, no warning needed
+        }
+        
+        String clientValue = getClientValue(obj, prop);
+        
+        if (clientValue != null && isImaClient(clientValue)) {
+            String warningMessage = "⚠️ Google IMA advertising is not enabled. " +
+                "To use IMA ads, add 'RNJWPlayerUseGoogleIMA = true' to your app/build.gradle ext {} block. " +
+                "Current client: " + clientValue + ". Player will load without ads.";
+            Log.w(TAG, warningMessage);
+        }
+    }
+    
+    /**
+     * Extracts the client value from either JSONObject or ReadableMap
+     */
+    private String getClientValue(JSONObject obj, ReadableMap prop) {
+        // Check JSON object (for JSON parser path)
+        if (obj != null && obj.has("advertising")) {
+            try {
+                JSONObject advertising = obj.getJSONObject("advertising");
+                if (advertising.has("client")) {
+                    return advertising.getString("client");
+                } else if (advertising.has("adClient")) {
+                    return advertising.getString("adClient");
+                }
+            } catch (Exception e) {
+                // Silently continue if we can't parse
+            }
+        }
+        
+        // Check ReadableMap (for legacy builder path)
+        if (prop != null && prop.hasKey("advertising")) {
+            ReadableMap advertising = prop.getMap("advertising");
+            if (advertising != null) {
+                if (advertising.hasKey("client")) {
+                    return advertising.getString("client");
+                } else if (advertising.hasKey("adClient")) {
+                    return advertising.getString("adClient");
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Checks if a client value indicates IMA usage
+     */
+    private boolean isImaClient(String clientValue) {
+        if (clientValue == null) {
+            return false;
+        }
+        return "ima".equalsIgnoreCase(clientValue) || 
+               "ima_dai".equalsIgnoreCase(clientValue) ||
+               "GoogleIMA".equalsIgnoreCase(clientValue) || 
+               "GoogleIMADAI".equalsIgnoreCase(clientValue) ||
+               "IMA_DAI".equalsIgnoreCase(clientValue) || 
+               "googima".equalsIgnoreCase(clientValue);
+    }
+    
+    /**
+     * Checks if advertising config contains IMA when IMA is disabled.
+     * Used to determine if we should skip configureAdvertising() in legacy builder.
+     */
+    private boolean shouldSkipAdvertising(ReadableMap prop) {
+        if (BuildConfig.USE_IMA || !prop.hasKey("advertising")) {
+            return false;
+        }
+        
+        ReadableMap advertising = prop.getMap("advertising");
+        if (advertising == null) {
+            return false;
+        }
+        
+        String clientValue = null;
+        if (advertising.hasKey("client")) {
+            clientValue = advertising.getString("client");
+        } else if (advertising.hasKey("adClient")) {
+            clientValue = advertising.getString("adClient");
+        }
+        
+        return isImaClient(clientValue);
+    }
+
+    /**
      * Builds a PlayerConfig from React Native props, preserving relevant old config values.
      * This ensures smooth transitions when reconfiguring the player.
      */
@@ -1321,11 +1466,16 @@ public class RNJWPlayerView extends RelativeLayout implements
         if (!forceLegacy) {
             try {
                 obj = MapUtil.toJSONObject(prop);
+                
+                // Check for IMA config and log warning if IMA is disabled
+                // Don't modify JSON - let parser handle it internally
+                checkAndWarnImaConfig(obj, null);
+                
                 jwConfig = JsonHelper.parseConfigJson(obj);
                 isJwConfig = true;
                 return jwConfig;  // Return directly if valid JW config
             } catch (Exception ex) {
-                JWLog.d(TAG, "Not a JW config format, using legacy builder");
+                JWLog.d(TAG, "Not a JW config format, using legacy builder: " + ex.getMessage());
                 isJwConfig = false;
             }
         }
@@ -1334,7 +1484,13 @@ public class RNJWPlayerView extends RelativeLayout implements
         configurePlaylist(configBuilder, prop);
         configureBasicSettings(configBuilder, prop);
         configureStyling(configBuilder, prop);
-        configureAdvertising(configBuilder, prop);
+        
+        // Check and warn about IMA config, then conditionally configure advertising
+        checkAndWarnImaConfig(null, prop);
+        if (!shouldSkipAdvertising(prop)) {
+            configureAdvertising(configBuilder, prop);
+        }
+        
         configureUI(configBuilder, prop);
 
         // Preserve important settings that RN props may not include every time
@@ -1540,6 +1696,11 @@ public class RNJWPlayerView extends RelativeLayout implements
         if (!forceLegacy) {
             try {
                 obj = MapUtil.toJSONObject(prop);
+                
+                // Check for IMA config and log warning if IMA is disabled
+                // Don't modify JSON - let parser handle it internally
+                checkAndWarnImaConfig(obj, null);
+                
                 jwConfig = JsonHelper.parseConfigJson(obj);
                 isJwConfig = true;
             } catch (Exception ex) {
@@ -1552,7 +1713,13 @@ public class RNJWPlayerView extends RelativeLayout implements
             configurePlaylist(configBuilder, prop);
             configureBasicSettings(configBuilder, prop);
             configureStyling(configBuilder, prop);
-            configureAdvertising(configBuilder, prop);
+            
+            // Check and warn about IMA config, then conditionally configure advertising
+            checkAndWarnImaConfig(null, prop);
+            if (!shouldSkipAdvertising(prop)) {
+                configureAdvertising(configBuilder, prop);
+            }
+            
             configureUI(configBuilder, prop);
         }
 
@@ -1896,6 +2063,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adLoadedEvent));
+        event.putInt("type", Util.getAdEventTypeValue(Util.AdEventType.JWAdEventTypeLoaded));
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topAdEvent", event);
     }
 
@@ -1905,6 +2073,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adLoadedXmlEvent));
+        event.putInt("type", Util.getAdEventTypeValue(Util.AdEventType.JWAdEventTypeLoadedXml));
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topAdEvent", event);
     }
 
@@ -1956,7 +2125,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         WritableMap event = Arguments.createMap();
         event.putString("message", "onAdEvent");
         event.putInt("client", Util.getAdEventClientValue(adBreakIgnoredEvent));
-        // missing type code
+        event.putInt("type", Util.getAdEventTypeValue(Util.AdEventType.JWAdEventTypeAdBreakIgnored));
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topAdEvent", event);
     }
 
@@ -2324,8 +2493,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlaylistItem");
         event.putInt("index", playlistItemEvent.getIndex());
-        Gson gson = new Gson();
-        String json = gson.toJson(playlistItemEvent.getPlaylistItem());
+        String json = JsonHelper.toJson(playlistItemEvent.getPlaylistItem());
         JWLog.d(TAG, "PlaylistItem JSON: " + json);
         event.putString("playlistItem", json);
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPlaylistItem", event);
@@ -2334,7 +2502,27 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onPlaylist(PlaylistEvent playlistEvent) {
         JWLog.d(TAG, "onPlaylist()");
+        WritableMap event = Arguments.createMap();
+        event.putString("message", "onPlaylist");
+        java.util.List<PlaylistItem> items = playlistEvent.getPlaylist();
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < items.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(JsonHelper.toJson(items.get(i)));
+        }
+        sb.append("]");
+        event.putString("playlist", sb.toString());
+        getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPlaylist", event);
+    }
 
+
+    @Override
+    public void onPlaylistItemMetadataChanged(PlaylistItemMetadataChangedEvent playlistItemMetadataChangedEvent) {
+        WritableMap event = Arguments.createMap();
+        event.putString("message", "onPlaylistItemMetadataChanged");
+        event.putInt("index", playlistItemMetadataChangedEvent.getIndex());
+        event.putString("playlistItem", JsonHelper.toJson(playlistItemMetadataChangedEvent.getPlaylistItem()));
+        getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPlaylistItemMetadataChanged", event);
     }
 
     @Override
@@ -2385,6 +2573,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         WritableMap event = Arguments.createMap();
         event.putString("message", "onRateChanged");
         event.putDouble("rate", playbackRateChangedEvent.getPlaybackRate());
+        if (mPlayer != null) {
+            event.putDouble("at", mPlayer.getPosition());
+        }
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topRateChanged", event);
     }
 

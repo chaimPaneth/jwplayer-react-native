@@ -588,6 +588,25 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         });
     }
 
+    @ReactMethod
+    public void setPlaylistItemMetadata(final int reactTag,
+                                        final String title,
+                                        final String description,
+                                        final String image,
+                                        final boolean refreshNotification) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            RNJWPlayerView playerView = getPlayerView(reactTag);
+            if (playerView != null && playerView.mPlayerView != null) {
+                playerView.mPlayerView.getPlayer().setPlaylistItemMetadata(title, description, image);
+                // Temporary workaround: cycle the MediaServiceController so the foreground-service
+                // Notification rebuilds from the updated MediaSession metadata.
+                if (refreshNotification) {
+                    playerView.refreshBackgroundAudioNotification();
+                }
+            }
+        });
+    }
+
     private int stateToInt(PlayerState playerState) {
         JWLog.d(TAG, "stateToInt(playerState=" + playerState + ")");
         switch (playerState) {
