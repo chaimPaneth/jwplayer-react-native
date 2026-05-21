@@ -1,6 +1,5 @@
 package com.jwplayer.rnjwplayer;
 
-import android.util.Log;
 
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReadableMap;
@@ -65,7 +64,7 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
         view.mPlayerView.getPlayer().setControls(controls);
       }
     } catch (Exception e) {
-      Log.w(TAG, "Error setting controls: " + e.getMessage());
+      JWLog.w(TAG, "Error setting controls: " + e.getMessage());
     }
   }
 
@@ -88,7 +87,7 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
       }
       view.setConfig(config);
     } catch (Exception e) {
-      Log.w(TAG, "Error recreating player: " + e.getMessage());
+      JWLog.w(TAG, "Error recreating player: " + e.getMessage());
     }
   }
 

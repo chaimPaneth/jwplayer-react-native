@@ -2,7 +2,7 @@ package com.jwplayer.rnjwplayer;
 
 import static androidx.media3.common.util.Util.toByteArray;
 
-import android.util.Log;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 import android.util.Patterns;
 import android.webkit.URLUtil;
 
@@ -71,7 +71,7 @@ public class Util {
                 inputStream.close();
             }
         } catch (IOException e) {
-            Log.e("Util", "❌ [HTTP POST] Exception: " + e.getMessage(), e);
+            JWLog.e("Util", "❌ [HTTP POST] Exception: " + e.getMessage());
             throw e;
         } finally {
             if (urlConnection != null) {
@@ -100,7 +100,7 @@ public class Util {
                 obj = MapUtil.toJSONObject(playlistItem);
                 item = JsonHelper.parsePlaylistItemJson(obj);
             } catch (Exception ex) {
-                Log.e("createPlaylist", ex.toString());
+                JWLog.e("createPlaylist", ex.toString());
             }
             if (item != null) {
                 playlist.add(item);
@@ -156,7 +156,7 @@ public class Util {
                 JSONObject info = MapUtil.toJSONObject(playlistItem.getMap("userInfo"));
                 itemBuilder.userInfo(info);
             } catch (JSONException e) {
-                Log.e("userInfo", "Error parsing `userInfo` from your playlist. Message: " + e.getLocalizedMessage());
+                JWLog.e("userInfo", "Error parsing `userInfo` from your playlist. Message: " + e.getLocalizedMessage());
             }
         }
 

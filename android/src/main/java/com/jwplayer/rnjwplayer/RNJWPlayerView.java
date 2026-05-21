@@ -55,7 +55,6 @@ import com.jwplayer.pub.api.JsonHelper;
 import com.jwplayer.pub.api.PlayerState;
 import com.jwplayer.pub.api.UiGroup;
 import com.jwplayer.pub.api.background.MediaService;
-import com.jwplayer.pub.api.background.MediaServiceController;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 import com.jwplayer.pub.api.configuration.PlayerConfig;
 import com.jwplayer.pub.api.configuration.UiConfig;
@@ -288,7 +287,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             return;
         }
         doUnbindService();
-        mMediaServiceController = new MediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
+        mMediaServiceController = new RNJWMediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
                 .build();
         doBindService();
     }
@@ -1373,7 +1372,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             String warningMessage = "⚠️ Google IMA advertising is not enabled. " +
                 "To use IMA ads, add 'RNJWPlayerUseGoogleIMA = true' to your app/build.gradle ext {} block. " +
                 "Current client: " + clientValue + ". Player will load without ads.";
-            Log.w(TAG, warningMessage);
+            JWLog.w(TAG, warningMessage);
         }
     }
     

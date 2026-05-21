@@ -1,6 +1,5 @@
 package com.jwplayer.rnjwplayer;
 
-import android.util.Log;
 
 import android.os.Handler;
 import android.os.Looper;
@@ -583,7 +582,7 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 // Delegate to setConfig() which intelligently handles reconfiguration vs recreation
                 playerView.setConfig(config);
             } else {
-                Log.e("RNJWPlayer", "recreatePlayerWithConfig: Player view not found for tag " + reactTag);
+                JWLog.e("RNJWPlayer", "recreatePlayerWithConfig: Player view not found for tag " + reactTag);
             }
         });
     }

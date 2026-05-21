@@ -2,6 +2,7 @@ package com.jwplayer.rnjwplayer;
 
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 import com.jwplayer.pub.api.configuration.ads.AdRules;
 import com.jwplayer.pub.api.configuration.ads.AdvertisingConfig;
 import com.jwplayer.pub.api.configuration.ads.VastAdvertisingConfig;
@@ -48,7 +49,7 @@ public class RNJWPlayerAds {
                     return ImaHelper.configureImaOrDai(ads, adSchedule);
                 } catch (RuntimeException e) {
                     // IMA not enabled - log error and return null (graceful degradation)
-                    android.util.Log.e("RNJWPlayerAds", "Failed to configure IMA ads: " + e.getMessage());
+                    JWLog.e("RNJWPlayerAds", "Failed to configure IMA ads: " + e.getMessage());
                     return null;
                 }
             default: // Defaulting to VAST
