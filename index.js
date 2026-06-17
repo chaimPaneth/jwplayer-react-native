@@ -390,7 +390,12 @@ export default class JWPlayer extends Component {
 	     * iOS will fire all playlist items (including index 0)
 		 */
 		onBeforeNextPlaylistItem: PropTypes.func,
-		resolveNextPlaylistItem: PropTypes.func
+		resolveNextPlaylistItem: PropTypes.func,
+		/**
+		 * Fires when Picture-in-Picture starts or stops.
+		 * Event payload: { active: boolean }
+		 */
+		onPictureInPictureChange: PropTypes.func
 	};
 
 	constructor(props) {
@@ -534,6 +539,11 @@ export default class JWPlayer extends Component {
 	loadPlaylist(playlistItems) {
 		if (RNJWPlayerManager)
 			RNJWPlayerManager.loadPlaylist(this.getRNJWPlayerBridgeHandle(), playlistItems);
+	}
+
+	setNextPlaylistToPlay(playlistItems) {
+		if (RNJWPlayerManager && Platform.OS === 'ios')
+			RNJWPlayerManager.setNextPlaylistToPlay(this.getRNJWPlayerBridgeHandle(), playlistItems);
 	}
 
 	loadPlaylistWithUrl(playlistUrl) {

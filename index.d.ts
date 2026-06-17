@@ -544,6 +544,7 @@ declare module "@jwplayer/jwplayer-react-native" {
     onAudioTracks?: () => void;
     shouldComponentUpdate?: (nextProps: any, nextState: any) => boolean;
     onBeforeNextPlaylistItem?: (event: BaseEvent<PlaylistItemEventProps>) => void;
+    onPictureInPictureChange?: (event?: BaseEvent<{ active: boolean }>) => void;
   }
 
   export const JWPlayerAdEvents: {
@@ -613,6 +614,15 @@ declare module "@jwplayer/jwplayer-react-native" {
      * @param playlistItems `PlaylistItem` or `JWPlaylistItem`
      */
     loadPlaylist(playlistItems: PlaylistItem[] | JWPlaylistItem[]): void;
+    /**
+     * iOS only. Swaps the currently-playing media to the first item of the
+     * provided playlist by calling `replaceCurrentItem` on the underlying
+     * AVPlayer — WITHOUT recreating the player/layer. This preserves an active
+     * Picture-in-Picture session across a content change (unlike `loadPlaylist`,
+     * which recreates the layer and closes PiP).
+     * @param playlistItems `PlaylistItem` or `JWPlaylistItem` (first item is used)
+     */
+    setNextPlaylistToPlay(playlistItems: PlaylistItem[] | JWPlaylistItem[]): void;
     /**
      * Side load playlist via URL into an already setup player
      * @param playlistUrl URL for playlist to load (format for response: json)

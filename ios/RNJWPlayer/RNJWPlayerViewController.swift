@@ -54,6 +54,12 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
         parentView?.settingConfig = false
         parentView?.onPlayerReady?([:])
 
+        // If we are restoring from PiP after an auto-advance content swap, the
+        // freshly reloaded media starts at its stale stored position. Re-apply the
+        // live position captured when PiP stopped (guarded so a genuinely new
+        // lesson is left alone) so playback continues seamlessly.
+        parentView?.handlePlayerReadyForPipRestore()
+
         if parentView?.pendingConfig == true && (parentView?.currentConfig != nil) {
             parentView?.setConfig(parentView!.currentConfig)
         }

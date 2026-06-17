@@ -59,6 +59,9 @@ RCT_EXPORT_VIEW_PROPERTY(onFullScreenExitRequested, RCTDirectEventBlock);
 /* jwplayer view events */
 RCT_EXPORT_VIEW_PROPERTY(onPlayerSizeChange, RCTDirectEventBlock);
 
+/* picture-in-picture events */
+RCT_EXPORT_VIEW_PROPERTY(onPictureInPictureChange, RCTDirectEventBlock);
+
 /* casting events */
 RCT_EXPORT_VIEW_PROPERTY(onCastingDevicesAvailable, RCTDirectEventBlock);
 RCT_EXPORT_VIEW_PROPERTY(onConnectedToCastingDevice, RCTDirectEventBlock);
@@ -135,6 +138,8 @@ RCT_EXTERN_METHOD(quite)
 RCT_EXTERN_METHOD(reset)
 
 RCT_EXTERN_METHOD(loadPlaylist: (nonnull NSNumber *)reactTag: (nonnull NSArray *)playlist)
+
+RCT_EXTERN_METHOD(setNextPlaylistToPlay: (nonnull NSNumber *)reactTag: (nonnull NSArray *)playlist)
 
 RCT_EXTERN_METHOD(recreatePlayerWithConfig: (nonnull NSNumber *)reactTag: (nonnull NSDictionary *)config)
 

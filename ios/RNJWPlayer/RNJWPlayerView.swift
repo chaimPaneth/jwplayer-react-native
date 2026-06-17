@@ -94,6 +94,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     @objc var onCaptionsChanged: RCTDirectEventBlock?
     @objc var onCaptionsList: RCTDirectEventBlock?
     @objc var onBeforeNextPlaylistItem: RCTDirectEventBlock?
+    @objc var onPictureInPictureChange: RCTDirectEventBlock?
     
     init() {
         super.init(frame: CGRect(x: 20, y: 0, width: UIScreen.main.bounds.width - 40, height: 300))
@@ -275,28 +276,9 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     }
                 }
 
-                // Check if player is in PiP mode before loading new playlist
-                var isPipActive = false
-                var pipController: AVPictureInPictureController?
-                
-                if let playerView = playerView {
-                    pipController = playerView.pictureInPictureController
-                    isPipActive = pipController?.isPictureInPictureActive ?? false
-                } else if let playerViewController = playerViewController {
-                    pipController = playerViewController.playerView.pictureInPictureController
-                    isPipActive = pipController?.isPictureInPictureActive ?? false
-                }
-                
                 if let playerViewController = playerViewController {
-                    // We must treat PiP mode differently and setup as a new config
-                    // or else the player will become unresponsive
-                    if isPipActive {
-                        setNewConfig(config: config)
-                    } else {
-                        playerViewController.player.loadPlaylist(items: playlistArray)
-                    }
+                    playerViewController.player.loadPlaylist(items: playlistArray)
                 } else if let playerView = playerView {
-                    // If you use player only, consider doing a simpliar check for PiP as above
                     playerView.player.loadPlaylist(items: playlistArray)
                 } else {
                     setNewConfig(config: config)
@@ -307,10 +289,192 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         }
     }
 
+    /// ── PIP-safe content swap ────────────────────────────────────────────
+    /// Swaps the currently-playing media to the first item of `playlist` by
+    /// reaching the UNDERLYING AVPlayer and calling replaceCurrentItem(). This
+    /// does NOT recreate the player or its layer, so the AVPictureInPicture
+    /// session stays bound and the PiP window remains open across the switch.
+    /// (JWPlayer's own UI/time state is bypassed — acceptable for PiP continuity.)
+    @objc func setNextPlaylistToPlay(_ playlist: Any) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            guard let arr = playlist as? [[String: Any]],
+                  let first = arr.first,
+                  let fileStr = first["file"] as? String,
+                  let url = URL(string: fileStr) else {
+                print("setNextPlaylistToPlay: invalid playlist/url")
+                return
+            }
+
+            guard let avPlayer = self.findUnderlyingAVPlayer() else {
+                print("setNextPlaylistToPlay: could NOT find underlying AVPlayer")
+                return
+            }
+
+            print("setNextPlaylistToPlay: replacing current item with \(fileStr)")
+            let newItem = AVPlayerItem(url: url)
+
+            // Resume/start position (seconds) carried by the JS playlist item.
+            // The normal config path applies this via JWPlayerItem.startTime, but
+            // the PIP swap bypasses JWPlayer, so we must apply it to the AVPlayer
+            // ourselves — otherwise the swapped-in lesson always starts at 0.
+            // The shared lib uses lowercase `starttime`; the RN JWPlayer prop API
+            // uses `startTime`. Accept either so the swap honors the resume point.
+            var startSeconds: Double = 0
+            for key in ["starttime", "startTime"] {
+                if let st = first[key] as? Double {
+                    startSeconds = st
+                    break
+                } else if let st = first[key] as? NSNumber {
+                    startSeconds = st.doubleValue
+                    break
+                }
+            }
+
+            // Remove any previous end observer before installing a new one.
+            if let obs = self.pipSwapEndObserver {
+                NotificationCenter.default.removeObserver(obs)
+                self.pipSwapEndObserver = nil
+            }
+
+            // Since replaceCurrentItem bypasses JWPlayer, JWPlayer won't fire its
+            // completion event for this item. Observe the AVPlayerItem's end
+            // ourselves and notify JS (onComplete) so the auto-advance continues
+            // to the NEXT lesson — which triggers another setNextPlaylistToPlay.
+            self.pipSwapEndObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: newItem,
+                queue: .main
+            ) { [weak self] _ in
+                print("setNextPlaylistToPlay: swapped item reached end — notifying JS to advance")
+                self?.onComplete?([:])
+            }
+
+            avPlayer.replaceCurrentItem(with: newItem)
+
+            // Keep JS position tracking LIVE during the swap. replaceCurrentItem
+            // bypasses JWPlayer's engine, so its onMediaTimeEvent goes stale and JS
+            // never learns the real playback position of the swapped lesson. Without
+            // this, restoring from PiP reloads the lesson at its OLD/stored position
+            // instead of where it was actually playing. Emit onTime ourselves from
+            // the swapped AVPlayer so JS stays in sync and restore resumes correctly.
+            self.removePipSwapTimeObserver()
+            let interval = CMTime(seconds: 1.0, preferredTimescale: 600)
+            self.pipSwapTimeObserverPlayer = avPlayer
+            self.pipSwapTimeObserver = avPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self, weak avPlayer] t in
+                guard let self = self, let avPlayer = avPlayer else { return }
+                let pos = CMTimeGetSeconds(t)
+                guard pos.isFinite else { return }
+                let durTime = avPlayer.currentItem?.duration ?? .indefinite
+                let dur = CMTimeGetSeconds(durTime)
+                self.onTime?(["position": pos, "duration": dur.isFinite ? dur : 0])
+            }
+
+            // Apply the start position once the new item is ready. Seeking before
+            // the item finishes loading is unreliable (duration is indefinite), so
+            // we wait for .readyToPlay, then seek precisely and resume playback.
+            self.pipSwapItemStatusObserver?.invalidate()
+            self.pipSwapItemStatusObserver = nil
+            if startSeconds > 0 {
+                print("setNextPlaylistToPlay: will resume swapped item at \(startSeconds)s once ready")
+                let target = CMTime(seconds: startSeconds, preferredTimescale: 600)
+                self.pipSwapItemStatusObserver = newItem.observe(\.status, options: [.new]) { [weak self, weak avPlayer] item, _ in
+                    guard item.status == .readyToPlay else { return }
+                    avPlayer?.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+                    avPlayer?.play()
+                    self?.pipSwapItemStatusObserver?.invalidate()
+                    self?.pipSwapItemStatusObserver = nil
+                }
+            }
+
+            avPlayer.play()
+        }
+    }
+
+    /// Recursively searches a JWPlayerView's layer tree for the AVPlayerLayer
+    /// that backs playback, and returns its AVPlayer.
+    private func findUnderlyingAVPlayer() -> AVPlayer? {
+        var rootView: UIView?
+        if let pvc = playerViewController {
+            rootView = pvc.view
+        } else if let pv = playerView {
+            rootView = pv
+        }
+
+        guard let root = rootView else { return nil }
+        return RNJWPlayerView.findAVPlayer(in: root.layer)
+    }
+
+    private static func findAVPlayer(in layer: CALayer) -> AVPlayer? {
+        if let playerLayer = layer as? AVPlayerLayer, let p = playerLayer.player {
+            return p
+        }
+        if let subs = layer.sublayers {
+            for s in subs {
+                if let found = findAVPlayer(in: s) { return found }
+            }
+        }
+        return nil
+    }
+
+    /// Safely removes the periodic time observer installed during a PIP swap.
+    private func removePipSwapTimeObserver() {
+        if let obs = pipSwapTimeObserver {
+            // removeTimeObserver must be called on the same AVPlayer it was added to.
+            if let player = pipSwapTimeObserverPlayer {
+                player.removeTimeObserver(obs)
+            }
+            pipSwapTimeObserver = nil
+            pipSwapTimeObserverPlayer = nil
+        }
+    }
+
+    /// Called from jwplayerIsReady. If we are restoring from PiP and the lesson
+    /// that just (re)loaded is the SAME one that was playing in PiP, re-apply the
+    /// live position captured at restore. JS may reload the lesson several times
+    /// while settling; each reload resets to the stale stored starttime, so we
+    /// re-seek every time until either the user advances to a different lesson or
+    /// the safety timeout fires. The file guard prevents hijacking a new lesson.
+    func handlePlayerReadyForPipRestore() {
+        guard pendingRestoreSeek > 0 else { return }
+
+        var currentFile: String?
+        if let asset = findUnderlyingAVPlayer()?.currentItem?.asset as? AVURLAsset {
+            currentFile = asset.url.absoluteString
+        }
+
+        // A different lesson loaded (genuine auto-advance / new selection) — the
+        // restore position no longer applies. Drop it and let playback proceed.
+        if let pf = pendingRestoreFile, let cf = currentFile, pf != cf {
+            print("PiP restore: jwplayerIsReady — different lesson loaded, dropping pendingRestoreSeek")
+            pendingRestoreSeek = -1
+            pendingRestoreFile = nil
+            pendingRestoreClearWork?.cancel()
+            pendingRestoreClearWork = nil
+            return
+        }
+
+        let pos = pendingRestoreSeek
+        print("PiP restore: jwplayerIsReady — reload complete, reseeking to \(pos)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.playerViewController?.player.seek(to: pos)
+            self?.playerViewController?.player.play()
+        }
+    }
+
     private var pendingPlayerConfig: [String: Any]?
     private var playerConfigTimeout: Timer?
-    private let maxPendingTime: TimeInterval = 5.0 // Maximum time to wait for PiP to close
-    private var isRecreatingPlayer: Bool = false // Prevents re-entrant calls during recreation
+    private let maxPendingTime: TimeInterval = 5.0
+    private var isRecreatingPlayer: Bool = false
+    private var pipSwapEndObserver: NSObjectProtocol? // Observes end-of-play for items swapped in via setNextPlaylistToPlay
+    private var pipSwapItemStatusObserver: NSKeyValueObservation? // Observes readiness of a swapped-in item so we can apply its start position
+    private var pipSwapTimeObserver: Any? // Periodic time observer feeding live onTime to JS during a PIP swap
+    private weak var pipSwapTimeObserverPlayer: AVPlayer? // The AVPlayer the time observer is attached to (needed for safe removal)
+    private var isRestoringFromPip: Bool = false // True between restoreUserInterface… and didStop (user tapped "return to app")
+    var pendingRestoreSeek: Double = -1 // Live position to resume at after restoring from PiP (consumed by reseek + jwplayerIsReady)
+    private var pendingRestoreFile: String? // The media URL the pendingRestoreSeek belongs to, so a genuinely new lesson isn't wrongly reseeked
+    private var pendingRestoreClearWork: DispatchWorkItem? // Safety timeout to drop a stale pendingRestoreSeek
     
     @objc func recreatePlayerWithConfig(_ config: [String: Any]) {
         // Prevent re-entrant calls while player is being recreated
@@ -645,6 +809,8 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         }
     }
 
+    /// Restarts PiP after a player reconfiguration or recreation.
+    /// Waits for the player to be ready and playing before starting PiP.
     func setNewConfig(config: [String : Any]) {
         let forceLegacyConfig = config["forceLegacyConfig"] as? Bool?
         let playlistItemCallback = config["playlistItemCallbackEnabled"] as? Bool?
@@ -957,7 +1123,12 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         // TODO this was broken when using `.playlist(string)`
         do {
             let skinStyling = try skinStylingBuilder.build()
-            DispatchQueue.main.async { [self] in
+            DispatchQueue.main.async { [weak self] in
+                // Guard against the player being torn down/recreated before this
+                // async block runs (prevents nil force-unwrap crash).
+                guard let self = self, let playerViewController = self.playerViewController else {
+                    return
+                }
                 playerViewController.styling = skinStyling
             }
         } catch {
@@ -1583,6 +1754,88 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController:AVPictureInPictureController) {
+        // Remove any swap-end observer since PiP is done.
+        if let obs = pipSwapEndObserver {
+            NotificationCenter.default.removeObserver(obs)
+            pipSwapEndObserver = nil
+        }
+        // Stop feeding live time from the swapped AVPlayer — JWPlayer takes over now.
+        removePipSwapTimeObserver()
+
+        if isRestoringFromPip {
+            // User tapped "return to app" — playback must CONTINUE at the live
+            // position. Capture the real AVPlayer position and, once restore has
+            // settled, force the JWPlayer to that position (JWPlayer's inline
+            // player can otherwise restore at the original start position).
+            isRestoringFromPip = false
+            var capturedPos: Double = -1
+            if let avPlayer = findUnderlyingAVPlayer() {
+                capturedPos = CMTimeGetSeconds(avPlayer.currentTime())
+            }
+            let jwPosNow = playerViewController?.player.time.position ?? -1
+            print("PiP restore: didStop — AVPlayer pos=\(capturedPos), JWPlayer pos=\(jwPosNow)")
+
+            if capturedPos.isFinite && capturedPos > 0 {
+                let pos = capturedPos
+                // Persist the live position AND the media URL it belongs to. On
+                // restore, JS unfreezes and reloads the lesson via config — possibly
+                // MORE THAN ONCE — and every reload resets to the lesson's STALE
+                // stored starttime (the resume point, not where it was actually
+                // playing in PiP). We re-apply this live position on each
+                // jwplayerIsReady (see handlePlayerReadyForPipRestore) so the reloads
+                // can't strand playback at the wrong spot. The file guard ensures a
+                // genuinely new lesson (auto-advance) is NOT hijacked by this seek.
+                pendingRestoreSeek = pos
+                if let asset = findUnderlyingAVPlayer()?.currentItem?.asset as? AVURLAsset {
+                    pendingRestoreFile = asset.url.absoluteString
+                } else {
+                    pendingRestoreFile = nil
+                }
+                // No-reload case (no config change, e.g. single un-swapped lesson):
+                // settle briefly then seek directly.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                    guard let self = self else { return }
+                    let before = self.playerViewController?.player.time.position ?? -1
+                    print("PiP restore: after settle — JWPlayer pos=\(before), seeking to \(pos)")
+                    self.playerViewController?.player.seek(to: pos)
+                    self.playerViewController?.player.play()
+                }
+                // Safety: drop the pending seek after a generous window so it can
+                // never affect playback long after the restore has settled. This is
+                // long enough to outlast slow-network reloads (which we saw time out).
+                pendingRestoreClearWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    if self?.pendingRestoreSeek == pos {
+                        print("PiP restore: clearing stale pendingRestoreSeek")
+                        self?.pendingRestoreSeek = -1
+                        self?.pendingRestoreFile = nil
+                    }
+                }
+                pendingRestoreClearWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20.0, execute: work)
+            }
+            // Do NOT stop playback here.
+        } else {
+            print("PiP didStop: user X-dismiss — stopping playback")
+            // User dismissed PiP via the X — STOP all playback so audio doesn't
+            // keep playing in the background without a visible player.
+            // Drop any pending restore seek — there is nothing to resume.
+            pendingRestoreSeek = -1
+            pendingRestoreFile = nil
+            pendingRestoreClearWork?.cancel()
+            pendingRestoreClearWork = nil
+            if let avPlayer = findUnderlyingAVPlayer(), avPlayer.rate > 0 {
+                avPlayer.pause()
+            }
+            if let playerViewController = playerViewController {
+                playerViewController.player.stop()
+            } else if let playerView = playerView {
+                playerView.player.stop()
+            }
+        }
+
+        // Notify JS that PiP has stopped.
+        self.onPictureInPictureChange?(["active": false])
         // Handle any pending content switch
         if let config = pendingPlayerConfig {
             pendingPlayerConfig = nil
@@ -1593,9 +1846,10 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController:AVPictureInPictureController) {
-
+        // Notify JS that PiP is active so it can FREEZE the React key and avoid a
+        // remount (which would destroy this view and close the PiP window).
+        self.onPictureInPictureChange?(["active": true])
     }
-
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController:AVPictureInPictureController) {
 
     }
@@ -1609,7 +1863,16 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     }
 
     func pictureInPictureController(_ pictureInPictureController:AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler:@escaping (Bool) -> Void) {
-
+        // The user tapped "return to app". Flag this so the upcoming didStop
+        // keeps playback going (instead of stopping it like an X-dismiss).
+        print("PiP restore: restoreUserInterface called (user returning to app)")
+        isRestoringFromPip = true
+        // Only complete restoration here on the playerView-only path. On the
+        // viewController path, JWPlayerViewController's super already calls it
+        // (calling it twice is undefined behaviour).
+        if playerViewController == nil {
+            completionHandler(true)
+        }
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
