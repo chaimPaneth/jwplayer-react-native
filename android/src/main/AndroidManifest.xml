@@ -22,7 +22,22 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </service>
-
+ 
+        <!--
+            The RN wrapper binds com.jwplayer.rnjwplayer.session.RNJWMediaService (not the SDK's
+            MediaService above). It must be declared here with foregroundServiceType=mediaPlayback,
+            otherwise bindService() fails silently, startForeground() never runs, and the OS freezes
+            the process during background playback (audio stops after ~2 min on screen lock).
+        -->
+        <service
+            android:name="com.jwplayer.rnjwplayer.session.RNJWMediaService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </service>
+ 
         <!--
             PiP support: Merged into the host app's MainActivity via ${applicationId} placeholder.
             The manifest merger matches this against the host's .MainActivity and adds the PiP attributes.
