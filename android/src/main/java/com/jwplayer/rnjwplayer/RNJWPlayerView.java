@@ -1156,6 +1156,27 @@ public class RNJWPlayerView extends RelativeLayout implements
     public void setConfig(ReadableMap prop) {
         JWLog.d(TAG, "setConfig(propKeys=" + (prop != null ? prop.toHashMap().keySet() : null) + ")");
         if (mConfig == null || !mConfig.equals(prop)) {
+            // Capture the app-provided post-id mediaId from the raw playlist prop BEFORE
+            // JW's JsonHelper config parser drops it (createPlayerView/buildPlayerConfig
+            // return the parsed JW config directly, stripping mediaId). This preserves the
+            // numeric OU post id for the MediaSession completion event so background/locked
+            // auto-advance works for JW-hosted video, whose JW-inferred mediaId is a content
+            // UUID rather than a post id. See RNJWMediaSessionHelper.resolveMediaIdForCompletion.
+            if (prop != null && prop.hasKey("playlist")) {
+                try {
+                    ReadableArray playlistArr = prop.getArray("playlist");
+                    if (playlistArr != null && playlistArr.size() > 0) {
+                        ReadableMap firstItem = playlistArr.getMap(0);
+                        if (firstItem != null && firstItem.hasKey("mediaId")) {
+                            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                                    .setAppProvidedMediaId(firstItem.getString("mediaId"));
+                        }
+                    }
+                } catch (Exception e) {
+                    JWLog.w(TAG, "setConfig: failed to capture app-provided mediaId: " + e.getMessage());
+                }
+            }
+
             // Set license key if provided
             if (prop.hasKey("license")) {
                 new LicenseUtil().setLicenseKey(getReactContext(), prop.getString("license"));
