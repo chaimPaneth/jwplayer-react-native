@@ -138,6 +138,27 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // resolve the correct postId via SeriesNavigationService.
     private static String androidAutoSelectedMediaId = null;
 
+    // App-provided post-id mediaId captured from the RN playlist prop at config
+    // time (RNJWPlayerView.setConfig), BEFORE JW's JsonHelper config parser drops
+    // it. For JW-hosted video the JW-inferred id is a content UUID (e.g. "1RrnrpNg"),
+    // not a numeric OU post id, so onPlaylistComplete would otherwise emit an id the
+    // JS HeadlessTaskHandler cannot map to a post — breaking background/locked
+    // auto-advance for video. This preserves the numeric post id for the completion
+    // event. Like androidAutoSelectedMediaId, it is NOT overwritten by JW callbacks.
+    private static String appProvidedMediaId = null;
+
+    /**
+     * Stores the app-provided post-id mediaId (numeric or "post-<n>") taken from the
+     * RN playlist prop. Called from RNJWPlayerView.setConfig before the JW config
+     * parser strips it. Non-app-post ids (e.g. JW content UUIDs) are ignored.
+     */
+    public static void setAppProvidedMediaId(String mediaId) {
+        if (isAppPostMediaId(mediaId)) {
+            appProvidedMediaId = mediaId.trim();
+            JWLog.d(TAG, "setAppProvidedMediaId: appProvidedMediaId=" + appProvidedMediaId);
+        }
+    }
+
     public static void noteUserPlaybackGesture(String reason) {
         lastUserPlaybackGestureMs = SystemClock.elapsedRealtime();
         JWLog.d(TAG, "USER_INTENT: playback gesture reason=" + reason
@@ -178,6 +199,28 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         return androidAutoSelectedMediaId != null ? androidAutoSelectedMediaId : externalMediaId;
+    }
+
+    /**
+     * Resolves the mediaId to emit on playlist completion (auto-advance on finish).
+     * Prefers an app-post-format id (numeric / "post-<n>") so the JS
+     * HeadlessTaskHandler can map it to a post and advance. This matters most when
+     * the screen is locked / app is backgrounded, where this MediaSession completion
+     * event is the ONLY working advance path (the JS view-event path is dormant).
+     * For JW-hosted video the live externalMediaId is a JW content UUID, so we fall
+     * back to the app-provided id captured at config time. Pure read: no side effects.
+     */
+    private String resolveMediaIdForCompletion() {
+        if (isAppPostMediaId(androidAutoSelectedMediaId)) {
+            return androidAutoSelectedMediaId.trim();
+        }
+        if (isAppPostMediaId(externalMediaId)) {
+            return externalMediaId.trim();
+        }
+        if (isAppPostMediaId(appProvidedMediaId)) {
+            return appProvidedMediaId.trim();
+        }
+        return externalMediaId;
     }
 
     private String getCurrentPlaybackDebugInfo(String command) {
@@ -2450,10 +2493,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Notify React Native about playlist completion via MediaBrowserService
         // This allows RN to decide whether to auto-advance to next track
         try {
-            JWLog.d(TAG, "onPlaylistComplete: notifying React Native via MediaBrowserService with mediaId=" + externalMediaId);
+            String completionMediaId = resolveMediaIdForCompletion();
+            JWLog.d(TAG, "onPlaylistComplete: notifying React Native via MediaBrowserService with mediaId=" + completionMediaId
+                + " (externalMediaId=" + externalMediaId
+                + ", androidAutoSelectedMediaId=" + androidAutoSelectedMediaId
+                + ", appProvidedMediaId=" + appProvidedMediaId + ")");
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
             java.lang.reflect.Method sendCompleteMethod = mediaBrowserServiceClass.getMethod("sendPlaylistCompleteToReactNative", String.class);
-            sendCompleteMethod.invoke(null, externalMediaId);
+            sendCompleteMethod.invoke(null, completionMediaId);
             JWLog.d(TAG, "onPlaylistComplete: React Native notified successfully");
         } catch (Exception e) {
             JWLog.w(TAG, "onPlaylistComplete: Could not notify MediaBrowserService: " + e.getMessage());

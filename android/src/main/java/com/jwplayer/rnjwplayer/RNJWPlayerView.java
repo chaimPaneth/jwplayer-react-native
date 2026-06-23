@@ -246,6 +246,10 @@ public class RNJWPlayerView extends RelativeLayout implements
     private Consumer<PictureInPictureModeChangedInfo> mPipListener = null;
     private Boolean mLastHandledPipState = null;
     private OnBackPressedCallback mPipBackCallback = null;
+    // Remembers the player's controls-enabled state from just before PiP entry so it
+    // can be restored on exit. Null when not in PiP / when this view did not own the
+    // PiP transition.
+    private Boolean mControlsBeforePip = null;
 
     // Add completion handler field
     PlaylistItemDecision itemUpdatePromise = null;
@@ -974,10 +978,49 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
 
         try {
+            JWLog.d(TAG, "applyPipChange(isInPip=" + isInPip + ") controls=" + safeGetControls()
+                    + " controlsBeforePip=" + mControlsBeforePip);
+
+            // PiP controls handling.
+            //
+            // Android PiP scales the host activity (and the embedded player view) down into a
+            // small window; the player's control overlay shrinks with it. JW auto-hides
+            // controls while playing, but when paused it keeps the full overlay visible, so in
+            // the tiny PiP window it renders oversized/misaligned (the reported "wrong scale").
+            // We hide controls for the duration of PiP and restore them on exit.
+            //
+            // ORDER MATTERS around onPictureInPictureModeChanged(): the JW SDK (re)builds its
+            // control UI *inside* that call from the current getControls() state. On EXIT we
+            // must re-enable controls BEFORE notifying the SDK; otherwise JW rebuilds the
+            // normal-mode UI with no control bar, and a later setControls(true) does not bring
+            // it back.
+            //
+            // Host apps drive controls in one of two ways and this handles both:
+            //  - apps that enable JW's native controls -> setControls(false/true) hides/restores;
+            //  - apps that keep native controls disabled and drive visibility via
+            //    forceControlsVisibility (e.g. the OU apps, where getControls() is false) -> the
+            //    setControls calls are no-ops, so the nudgeControlsVisible() toggle on exit is
+            //    what actually re-renders the control bar after the player view is reparented.
+            if (!isInPip && mControlsBeforePip != null) {
+                JWLog.d(TAG, "applyPipChange: restoring controls=" + mControlsBeforePip + " before SDK notify");
+                try { mPlayer.setControls(mControlsBeforePip); } catch (Throwable ignored) {}
+                mControlsBeforePip = null;
+            }
+
             // Tell the JWP SDK we are toggling so it can handle toolbar / internal setup
             mPlayer.onPictureInPictureModeChanged(isInPip, newConfig);
 
             PlaybackManager.getInstance().setUiInPip(isInPip);
+
+            // On ENTER, hide controls so the PiP window is video-only. Done after the SDK
+            // notify (runtime hide of the existing control views, which works).
+            if (isInPip) {
+                if (mControlsBeforePip == null) {
+                    mControlsBeforePip = mPlayer.getControls();
+                }
+                JWLog.d(TAG, "applyPipChange: hiding controls for PiP (was " + mControlsBeforePip + ")");
+                try { mPlayer.setControls(false); } catch (Throwable ignored) {}
+            }
 
             View decorView = mActivity.getWindow().getDecorView();
             ViewGroup rootView = decorView.findViewById(android.R.id.content);
@@ -1017,12 +1060,9 @@ public class RNJWPlayerView extends RelativeLayout implements
                 if (rootViewVisibilitySnapshot.isEmpty()) {
                     JWLog.w(TAG, "applyPipChange: visibility snapshot empty on exit, skipping player reparent");
                     mLastHandledPipState = false;
+                    nudgeControlsVisible();
                     return;
                 }
-
-                // Toggle controls to ensure we don't lose them -- weird UX bug fix where controls got lost
-                mPlayer.setForceControlsVisibility(true);
-                mPlayer.setForceControlsVisibility(false);
 
                 // If player was in fullscreen when going into PiP, we need to force it back out
                 if (mPlayer.getFullscreen()) {
@@ -1043,10 +1083,46 @@ public class RNJWPlayerView extends RelativeLayout implements
                 // Add player view back in main spot
                 addView(mPlayerView, 0, layoutParams);
                 mLastHandledPipState = false;
+
+                // Controls were already re-enabled before the SDK notify above; nudge the
+                // control bar to render now that the player view is laid out again.
+                nudgeControlsVisible();
             }
         } catch (Throwable t) {
             JWLog.e(TAG, "applyPipChange: unexpected error: " + t.getMessage());
         }
+    }
+
+    /**
+     * Reads the player's current controls-enabled state without throwing, for logging.
+     */
+    private String safeGetControls() {
+        try {
+            return String.valueOf(mPlayer != null && mPlayer.getControls());
+        } catch (Throwable t) {
+            return "?";
+        }
+    }
+
+    /**
+     * Posts a force-visibility nudge (show, then release back to normal auto-hide) on the
+     * next frame so JW re-renders the control bar after the player view has been
+     * re-attached and laid out. Mirrors the original post-PiP "controls got lost"
+     * workaround. The actual re-enable of controls happens earlier, before the SDK is
+     * notified of the PiP exit (see applyPipChange).
+     */
+    private void nudgeControlsVisible() {
+        if (mPlayerView == null) {
+            return;
+        }
+        mPlayerView.post(() -> {
+            try {
+                mPlayer.setForceControlsVisibility(true);
+                mPlayer.setForceControlsVisibility(false);
+            } catch (Throwable ignored) {
+                // player may have been torn down between PiP exit and this callback
+            }
+        });
     }
 
     /**
@@ -1085,6 +1161,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
         rootViewVisibilitySnapshot.clear();
         mLastHandledPipState = null;
+        mControlsBeforePip = null;
     }
 
     /**
@@ -1207,6 +1284,27 @@ public class RNJWPlayerView extends RelativeLayout implements
     public void setConfig(ReadableMap prop) {
         JWLog.d(TAG, "setConfig(propKeys=" + (prop != null ? prop.toHashMap().keySet() : null) + ")");
         if (mConfig == null || !mConfig.equals(prop)) {
+            // Capture the app-provided post-id mediaId from the raw playlist prop BEFORE
+            // JW's JsonHelper config parser drops it (createPlayerView/buildPlayerConfig
+            // return the parsed JW config directly, stripping mediaId). This preserves the
+            // numeric OU post id for the MediaSession completion event so background/locked
+            // auto-advance works for JW-hosted video, whose JW-inferred mediaId is a content
+            // UUID rather than a post id. See RNJWMediaSessionHelper.resolveMediaIdForCompletion.
+            if (prop != null && prop.hasKey("playlist")) {
+                try {
+                    ReadableArray playlistArr = prop.getArray("playlist");
+                    if (playlistArr != null && playlistArr.size() > 0) {
+                        ReadableMap firstItem = playlistArr.getMap(0);
+                        if (firstItem != null && firstItem.hasKey("mediaId")) {
+                            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                                    .setAppProvidedMediaId(firstItem.getString("mediaId"));
+                        }
+                    }
+                } catch (Exception e) {
+                    JWLog.w(TAG, "setConfig: failed to capture app-provided mediaId: " + e.getMessage());
+                }
+            }
+
             // Set license key if provided
             if (prop.hasKey("license")) {
                 new LicenseUtil().setLicenseKey(getReactContext(), prop.getString("license"));
