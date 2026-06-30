@@ -628,6 +628,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         this.jwPlayer = serviceMediaApi.getPlayer();
+        // [TEMP-FOCUS-DIAG] Log the session player identity so we can compare it against the
+        // UI player id logged in RNJWPlayerView.focusDiag() (same-instance question). Remove
+        // after diagnosing the background/lock auto-advance issue.
+        JWLog.force(TAG, "[TEMP-FOCUS-DIAG] initServiceMediaApi: session jwPlayer=" + JWLog.id(this.jwPlayer)
+            + " serviceMediaApi=" + JWLog.id(serviceMediaApi));
         Context currentContext = this.context;
         this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
         setupNetworkCallback();
@@ -955,6 +960,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         long currentTime = System.currentTimeMillis();
         boolean currentlyPlaying = isCurrentlyPlaying();
         long timeSinceLastRequest = currentTime - lastFocusRequestTime;
+        // [TEMP-FOCUS-DIAG] Capture the session player's focus-change decision inputs. Remove
+        // after diagnosing the background/lock auto-advance issue.
+        JWLog.force(TAG, "[TEMP-FOCUS-DIAG] handleAudioFocusChange focusChange=" + focusChange
+            + " sessionJwPlayer=" + JWLog.id(jwPlayer)
+            + " currentlyPlaying=" + currentlyPlaying
+            + " timeSinceLastRequest=" + timeSinceLastRequest + "ms"
+            + " (ignoreWindow=" + FOCUS_LOSS_IGNORE_WINDOW_MS + "ms)"
+            + " currentlyHasFocus=" + currentlyHasFocus
+            + " wasPlayingBeforeFocusLoss=" + wasPlayingBeforeFocusLoss
+            + " isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto);
 
         switch (focusChange) {
             case android.media.AudioManager.AUDIOFOCUS_GAIN:
@@ -2486,6 +2501,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
         JWLog.d(TAG, "onPlaylistComplete()", true);
+        // [TEMP-FOCUS-DIAG] Timestamped completion marker on the background/session player. If this
+        // fires DURING the lock, the track finished in background and the advance is gated on the
+        // RN JS thread; if it only fires after unlock, native playback stalled near the end. Remove later.
+        try {
+            JWLog.force(TAG, "[TEMP-FOCUS-DIAG] onPlaylistComplete sessionJwPlayer=" + JWLog.id(jwPlayer)
+                + " positionSec=" + (jwPlayer != null ? jwPlayer.getPosition() : -1)
+                + " currentlyHasFocus=" + currentlyHasFocus
+                + " isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto);
+        } catch (Throwable ignore) {}
         boolean triggeredBySeekCompletion = completionScheduledFromSeek;
         completionScheduledFromSeek = false;
         resetAndroidAutoFlag();
