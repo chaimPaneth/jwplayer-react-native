@@ -1578,7 +1578,23 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 //        }
 //
         if let keyPath = keyPath, keyPath == "isPictureInPicturePossible", let playerView = playerView, object as? AVPictureInPictureController == playerView.pictureInPictureController {
-            // Your code here for handling isPictureInPicturePossible
+            // Arm auto-PIP as soon as the controller reports PIP is possible.
+            enableAutomaticPipIfPossible()
+        }
+    }
+
+    // MARK: - Picture-in-Picture
+    // JWPlayerKit sets up the AVPictureInPictureController (and allowsPictureInPicturePlayback),
+    // but it does NOT set canStartPictureInPictureAutomaticallyFromInline, which iOS requires to
+    // auto-start PIP when the app backgrounds. Without it, only manual PIP (via the button) works.
+    // Set it true on whichever path's controller is active. Idempotent.
+    func enableAutomaticPipIfPossible() {
+        guard pipEnabled else { return }
+        if #available(iOS 14.2, *) {
+            let controller = playerView?.pictureInPictureController ?? playerViewController?.playerView.pictureInPictureController
+            if let controller = controller, !controller.canStartPictureInPictureAutomaticallyFromInline {
+                controller.canStartPictureInPictureAutomaticallyFromInline = true
+            }
         }
     }
 
@@ -2115,6 +2131,8 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     // Inactive
     // Hack for ios 14 stopping audio when going to background
     @objc func applicationWillResignActive(_ notification: Notification) {
+        // Ensure auto-PIP is armed before the app backgrounds.
+        enableAutomaticPipIfPossible()
         if !userPaused && backgroundAudioEnabled {
             if (playerView != nil) && playerView.player.getState() == .playing {
                 playerView.player.play()

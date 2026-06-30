@@ -335,6 +335,9 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
         parentView?.userPaused = false
         parentView?.wasInterrupted = false
+
+        // Playback started and the player is on screen — arm auto-PIP-on-background.
+        parentView?.enableAutomaticPipIfPossible()
     }
 
     override func jwplayer(_ player:JWPlayer, willPlayWithReason reason:JWPlayReason) {
