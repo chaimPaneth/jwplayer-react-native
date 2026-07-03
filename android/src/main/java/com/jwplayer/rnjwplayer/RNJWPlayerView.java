@@ -1278,6 +1278,17 @@ public class RNJWPlayerView extends RelativeLayout implements
                 }
 
                 PlayerConfig oldConfig = mPlayer.getConfig();
+                // Capture the controls-enabled state BEFORE setup() so we can restore the
+                // caller's intended visibility after forcing the UI group below.
+                boolean currentControlsState = mPlayer.getControls();
+                // If controls were previously turned off (e.g. app's collapsed/mini player
+                // calls setControls(false)), the SDK's live uiConfig no longer includes
+                // PLAYER_CONTROLS_CONTAINER. Carrying that uiConfig forward as-is into setup()
+                // permanently drops the UI group -- there is no way to recover it afterward via
+                // setControls(true) (see createUiConfigWithControlsContainer doc). This left the
+                // player with no controls/pause button after next/prev while collapsed, then
+                // expanding back to full view. Always ensure the UI group is present at setup()
+                // time, and re-apply the real on/off state via setControls() afterward.
                 PlayerConfig config = new PlayerConfig.Builder()
                         .autostart(oldConfig.getAutostart())
                         .nextUpOffset(oldConfig.getNextUpOffset())
@@ -1287,7 +1298,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         .displayTitle(oldConfig.getDisplayTitle())
                         .advertisingConfig(oldConfig.getAdvertisingConfig())
                         .stretching(oldConfig.getStretching())
-                        .uiConfig(oldConfig.getUiConfig())
+                        .uiConfig(createUiConfigWithControlsContainer(mPlayer, oldConfig.getUiConfig()))
                         .playlist(Util.createPlaylist(mPlaylistProp))
                         .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
                         .preload(oldConfig.getPreload())
@@ -1297,6 +1308,10 @@ public class RNJWPlayerView extends RelativeLayout implements
                         .build();
 
                 mPlayer.setup(config);
+
+                // Restore the real controls visibility now that the UI group is guaranteed
+                // to be present (setup() above may have re-enabled the control bar).
+                mPlayer.setControls(currentControlsState);
 
                 mConfig = prop;
                 return;
@@ -1460,12 +1475,9 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     /**
      * Utility method to check if only a specific key differs between configs.
-     * This is kept for potential future optimizations or debugging, but is no longer
-     * used in the main setConfig flow since we now reconfigure the player for all changes.
-     * 
-     * @deprecated Consider using reconfigurePlayer() for all config changes instead
+     * Used by setConfig()'s playlist-only fast path to avoid a full player
+     * stop/recreate on next/prev navigation.
      */
-    @Deprecated
     public boolean isOnlyDiff(ReadableMap prop, String keyName) {
         if (mConfig == null || prop == null) {
             return false;
