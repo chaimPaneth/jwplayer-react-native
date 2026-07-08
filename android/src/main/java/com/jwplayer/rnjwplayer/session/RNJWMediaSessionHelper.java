@@ -97,6 +97,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static final long ANDROID_AUTO_HANDOFF_TIMEOUT_MS = 5000; // 5 seconds max
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
+    // --- Background-streaming keep-alive locks -------------------------------------------------
+    // Held only while audio is actively playing/buffering so a STREAMED shiur keeps playing when
+    // the screen is off under Battery Saver. Without a high-performance Wi-Fi lock, Android puts
+    // the Wi-Fi radio into aggressive power-save (DTIM multiplier) on screen-off + Battery Saver;
+    // once the pre-buffer drains (~50s) HLS segment loads fail with UnknownHostException and the
+    // player fatally errors. This mirrors what ExoPlayer's setWakeMode(WAKE_MODE_NETWORK) does,
+    // which the JWPlayer SDK does not expose to the RN wrapper. Released on pause/stop/error/
+    // cleanup so idle playback never drains the battery. Only matters for network media; local
+    // downloads are unaffected either way.
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
+    private android.os.PowerManager.WakeLock wakeLock;
+    private static final String WIFI_LOCK_TAG = "RNJWPlayer:wifi";
+    private static final String WAKE_LOCK_TAG = "RNJWPlayer:wake";
+
     // Flight Mode / network recovery state. Local downloaded media must bypass this guard.
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
@@ -812,6 +826,99 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
         } catch (Exception ex) {
             JWLog.w(TAG, "updatePlaybackState: set failed " + ex.getMessage());
+        }
+
+        // Keep the Wi-Fi radio and CPU awake only while actively playing or buffering, so a
+        // streamed shiur survives screen-off under Battery Saver. Every playback-state push
+        // funnels through this method, so this single toggle covers play/pause/stop/error and
+        // the network-recovery paths. Released for every other state to protect battery.
+        setPlaybackLocksActive(state == PlaybackStateCompat.STATE_PLAYING
+                || state == PlaybackStateCompat.STATE_BUFFERING);
+    }
+
+    /**
+     * Acquire or release the background-streaming keep-alive locks (high-performance Wi-Fi lock +
+     * partial CPU wake lock). Safe to call repeatedly: acquisition/release is guarded by
+     * {@code isHeld()} so it is idempotent and does not spam logs. Never throws to the caller.
+     */
+    private void setPlaybackLocksActive(boolean active) {
+        try {
+            if (active) {
+                acquirePlaybackLocks();
+            } else {
+                releasePlaybackLocks();
+            }
+        } catch (Exception e) {
+            JWLog.w(TAG, "setPlaybackLocksActive(" + active + ") failed: " + e.getMessage());
+        }
+    }
+
+    // Playback wake locks are intentionally held without a timeout: a shiur can run for well
+    // over an hour and is released deterministically on pause/stop/error/cleanup. This matches
+    // ExoPlayer's own WakeLockManager behavior.
+    @android.annotation.SuppressLint("WakelockTimeout")
+    private void acquirePlaybackLocks() {
+        Context appContext = (this.context != null) ? this.context.getApplicationContext() : null;
+        if (appContext == null) {
+            return;
+        }
+
+        // High-performance Wi-Fi lock: prevents the radio from entering the aggressive power-save
+        // mode (DTIM throttling) that Battery Saver + screen-off imposes, which otherwise kills the
+        // streaming connection with UnknownHostException once the buffer drains. WIFI_MODE_FULL_HIGH_PERF
+        // is intentional over WIFI_MODE_FULL_LOW_LATENCY: low-latency mode only engages while the app
+        // is foreground with the screen on -- the opposite of the locked-screen case we must support.
+        if (wifiLock == null) {
+            android.net.wifi.WifiManager wifiManager =
+                    (android.net.wifi.WifiManager) appContext.getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager != null) {
+                wifiLock = wifiManager.createWifiLock(
+                        android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, WIFI_LOCK_TAG);
+                if (wifiLock != null) {
+                    wifiLock.setReferenceCounted(false);
+                }
+            }
+        }
+        if (wifiLock != null && !wifiLock.isHeld()) {
+            wifiLock.acquire();
+            JWLog.d(TAG, "acquirePlaybackLocks: WifiLock (FULL_HIGH_PERF) acquired");
+        }
+
+        // Partial CPU wake lock: keeps the CPU running so buffering/decoding continues during
+        // Doze / Battery Saver while the screen is off. Mirrors ExoPlayer's WAKE_MODE_NETWORK.
+        if (wakeLock == null) {
+            android.os.PowerManager powerManager =
+                    (android.os.PowerManager) appContext.getSystemService(Context.POWER_SERVICE);
+            if (powerManager != null) {
+                wakeLock = powerManager.newWakeLock(
+                        android.os.PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG);
+                if (wakeLock != null) {
+                    wakeLock.setReferenceCounted(false);
+                }
+            }
+        }
+        if (wakeLock != null && !wakeLock.isHeld()) {
+            wakeLock.acquire();
+            JWLog.d(TAG, "acquirePlaybackLocks: partial WakeLock acquired");
+        }
+    }
+
+    private void releasePlaybackLocks() {
+        if (wifiLock != null && wifiLock.isHeld()) {
+            try {
+                wifiLock.release();
+                JWLog.d(TAG, "releasePlaybackLocks: WifiLock released");
+            } catch (Exception e) {
+                JWLog.w(TAG, "releasePlaybackLocks: WifiLock release failed: " + e.getMessage());
+            }
+        }
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try {
+                wakeLock.release();
+                JWLog.d(TAG, "releasePlaybackLocks: WakeLock released");
+            } catch (Exception e) {
+                JWLog.w(TAG, "releasePlaybackLocks: WakeLock release failed: " + e.getMessage());
+            }
         }
     }
 
@@ -1662,6 +1769,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Reset AA flag and release audio focus first
         resetAndroidAutoFlag();
         releaseAudioFocus();
+        releasePlaybackLocks();
         teardownNetworkCallback();
 
         RNJWNotificationHelper notificationHelper;
