@@ -628,11 +628,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         this.jwPlayer = serviceMediaApi.getPlayer();
-        // [TEMP-FOCUS-DIAG] Log the session player identity so we can compare it against the
-        // UI player id logged in RNJWPlayerView.focusDiag() (same-instance question). Remove
-        // after diagnosing the background/lock auto-advance issue.
-        JWLog.force(TAG, "[TEMP-FOCUS-DIAG] initServiceMediaApi: session jwPlayer=" + JWLog.id(this.jwPlayer)
-            + " serviceMediaApi=" + JWLog.id(serviceMediaApi));
         Context currentContext = this.context;
         this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
         setupNetworkCallback();
@@ -892,7 +887,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (currentlyHasFocus) {
             return true;
         }
-        
+
+        // RNJWPlayerView (the UI layer) independently owns an AudioFocusRequest for the
+        // SAME JWPlayer instance whenever it is attached (foreground, PiP, or backgrounded-
+        // but-not-yet-destroyed). If we request our own OS-level focus here while the UI
+        // already holds it, the system evicts the UI's request and delivers AUDIOFOCUS_LOSS
+        // to RNJWPlayerView's listener, which unconditionally pauses mPlayer -- even though
+        // the app never actually lost focus overall. This happens on every new playlist item
+        // (updatePlaylistItem -> requestAudioFocusForPlayback) and on performPlay/seek, so it
+        // can spuriously pause playback mid-background or right after an auto-advance.
+        // Defer to the UI's existing grant instead of competing for a second one.
+        if (PlaybackManager.getInstance().hasUiAudioFocus()) {
+            JWLog.d(TAG, "requestAudioFocusForPlayback: UI already holds audio focus, skipping duplicate OS request");
+            currentlyHasFocus = true;
+            return true;
+        }
+
         // Detect Android Auto handoff: if we're currently playing and requesting focus
         // it's likely a handoff from Android Auto to phone app
         boolean wasPlayingBeforeRequest = isCurrentlyPlaying();
@@ -960,16 +970,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         long currentTime = System.currentTimeMillis();
         boolean currentlyPlaying = isCurrentlyPlaying();
         long timeSinceLastRequest = currentTime - lastFocusRequestTime;
-        // [TEMP-FOCUS-DIAG] Capture the session player's focus-change decision inputs. Remove
-        // after diagnosing the background/lock auto-advance issue.
-        JWLog.force(TAG, "[TEMP-FOCUS-DIAG] handleAudioFocusChange focusChange=" + focusChange
-            + " sessionJwPlayer=" + JWLog.id(jwPlayer)
-            + " currentlyPlaying=" + currentlyPlaying
-            + " timeSinceLastRequest=" + timeSinceLastRequest + "ms"
-            + " (ignoreWindow=" + FOCUS_LOSS_IGNORE_WINDOW_MS + "ms)"
-            + " currentlyHasFocus=" + currentlyHasFocus
-            + " wasPlayingBeforeFocusLoss=" + wasPlayingBeforeFocusLoss
-            + " isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto);
 
         switch (focusChange) {
             case android.media.AudioManager.AUDIOFOCUS_GAIN:
@@ -2078,14 +2078,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             
             JWLog.d(TAG, "onPlaylistItem: Position sources - savedPositionMs=" + savedPositionMs + "ms (from " + positionSource + "), playlistStartMs=" + playlistStartMs + "ms (from extras)");
             
-            if (savedPositionMs >= 0) {
-                // Use saved position (most recent from background player or previous session)
-                resumeMs = savedPositionMs;
-                JWLog.d(TAG, "onPlaylistItem: using saved position resumeMs=" + resumeMs + "ms (Priority 1: Most recent saved position, overriding playlist starttime=" + playlistStartMs + "ms)");
-            } else if (hasExplicitStart) {
-                // Fallback to playlist startTime if no saved position
+            // GROUND TRUTH for the resume position is the JS explicit start (playlistStartMs).
+            // PlayerCore refreshes it to the LIVE playback position on every foreground
+            // transition (it reads lastKnownPositionSeconds, which is updated continuously from
+            // native onTime). The static cache, by contrast, is only written on explicit seeks,
+            // so it goes STALE during continuous background playback: it holds the advance/seek
+            // time position (e.g. 0ms or 11005ms), NOT the live position (e.g. 139000ms).
+            // Therefore, whenever JS supplied an explicit start it MUST win over the static
+            // cache; the cache is only a fallback for when there is no explicit start at all.
+            // (Generalizes the earlier stale-zero guard — the stale cached value is not always 0.)
+            if (hasExplicitStart && playlistStartMs >= 0) {
                 resumeMs = playlistStartMs;
-                JWLog.d(TAG, "onPlaylistItem: no saved position, using playlist starttime from JS as resumeMs=" + resumeMs + "ms (Priority 2: Explicit startTime from JS, no saved position available)");
+                JWLog.d(TAG, "onPlaylistItem: using explicit JS starttime resumeMs=" + resumeMs + "ms (live position; preferred over static cache savedPositionMs=" + savedPositionMs + "ms)");
+            } else if (savedPositionMs >= 0) {
+                // Fallback: static cache / resume provider only when JS supplied no explicit start.
+                resumeMs = savedPositionMs;
+                JWLog.d(TAG, "onPlaylistItem: no explicit start; using saved position resumeMs=" + resumeMs + "ms (static cache fallback)");
             } else {
                 // No saved position and no explicit start time
                 resumeMs = -1L;
@@ -2501,15 +2509,6 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     public void onPlaylistComplete(PlaylistCompleteEvent playlistCompleteEvent) {
         JWLog.d(TAG, "onPlaylistComplete()", true);
-        // [TEMP-FOCUS-DIAG] Timestamped completion marker on the background/session player. If this
-        // fires DURING the lock, the track finished in background and the advance is gated on the
-        // RN JS thread; if it only fires after unlock, native playback stalled near the end. Remove later.
-        try {
-            JWLog.force(TAG, "[TEMP-FOCUS-DIAG] onPlaylistComplete sessionJwPlayer=" + JWLog.id(jwPlayer)
-                + " positionSec=" + (jwPlayer != null ? jwPlayer.getPosition() : -1)
-                + " currentlyHasFocus=" + currentlyHasFocus
-                + " isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto);
-        } catch (Throwable ignore) {}
         boolean triggeredBySeekCompletion = completionScheduledFromSeek;
         completionScheduledFromSeek = false;
         resetAndroidAutoFlag();

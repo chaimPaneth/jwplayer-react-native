@@ -17,6 +17,18 @@ public class PlaybackManager {
     private volatile boolean uiInBackground = false;
     // Track whether the app is currently in Android Picture-in-Picture (PiP)
     private volatile boolean pipActive = false;
+    // Track whether RNJWPlayerView currently holds the OS audio focus grant for the
+    // active player. RNJWMediaSessionHelper (background/session layer, active whenever
+    // backgroundAudioEnabled=true, including plain foreground/PiP/lock-screen playback)
+    // independently requests its own AudioFocusRequest for the SAME JWPlayer instance.
+    // Two separate AudioFocusRequest/listener registrations from the same process compete:
+    // whichever requests last is granted focus, and the OS delivers AUDIOFOCUS_LOSS to the
+    // other -- which RNJWPlayerView's listener treats as a real loss and pauses mPlayer.
+    // This flag lets RNJWMediaSessionHelper skip requesting its own OS-level focus while
+    // the UI already holds it, so a routine event (new playlist item, performPlay, seek)
+    // does not self-evict RNJWPlayerView's focus grant and spuriously pause playback
+    // during PiP/lock-screen background playback or immediately after auto-advance.
+    private volatile boolean uiHasAudioFocus = false;
 
     private static final String TAG = "PlaybackManager";
 
@@ -41,6 +53,7 @@ public class PlaybackManager {
             if (!(handler instanceof RNJWPlayerView)) {
                 uiInBackground = false;
                 pipActive = false;
+                uiHasAudioFocus = false;
             }
         }
     }
@@ -70,6 +83,7 @@ public class PlaybackManager {
                 mActivePlayerHandler = null;
                 uiInBackground = false;
                 pipActive = false;
+                uiHasAudioFocus = false;
             } else {
                 JWLog.d(TAG, "No active player to clean up.");
             }
@@ -193,5 +207,24 @@ public class PlaybackManager {
     public void setUiInPip(boolean inPip) {
         this.pipActive = inPip;
         JWLog.d(TAG, "setUiInPip(" + inPip + ")");
+    }
+
+    /**
+     * Called by RNJWPlayerView whenever its own OS audio-focus grant changes
+     * (gained, lost, or abandoned/destroyed). See the field doc on
+     * {@code uiHasAudioFocus} for why this exists.
+     */
+    public void setUiAudioFocus(boolean hasFocus) {
+        this.uiHasAudioFocus = hasFocus;
+        JWLog.d(TAG, "setUiAudioFocus(" + hasFocus + ")");
+    }
+
+    /**
+     * Returns true if RNJWPlayerView currently holds the OS audio focus grant for
+     * the active player. RNJWMediaSessionHelper consults this before making its own
+     * competing AudioFocusRequest.
+     */
+    public boolean hasUiAudioFocus() {
+        return uiHasAudioFocus;
     }
 }

@@ -497,6 +497,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
             audioManager = null;
             hasAudioFocus = false;
+            PlaybackManager.getInstance().setUiAudioFocus(false);
 
             doUnbindService();
         } else {
@@ -1848,34 +1849,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     // Audio Focus
 
-    // [TEMP-FOCUS-DIAG] Remove after diagnosing the background/lock auto-advance issue.
-    // Captures UI-player audio-focus state at the moment the view requests/loses focus,
-    // including the player instance identity so we can tell whether the UI player and the
-    // RNJWMediaSessionHelper session player (serviceMediaApi.getPlayer()) are the SAME
-    // JWPlayer instance.
-    private String focusDiag(String where) {
-        String state = "?";
-        String pos = "?";
-        try {
-            if (mPlayer != null) {
-                state = String.valueOf(mPlayer.getState());
-                pos = String.valueOf(mPlayer.getPosition());
-            }
-        } catch (Throwable ignore) {}
-        return "[TEMP-FOCUS-DIAG] " + where
-            + " uiPlayer=" + JWLog.id(mPlayer)
-            + " hasAudioFocus=" + hasAudioFocus
-            + " backgroundAudioEnabled=" + backgroundAudioEnabled
-            + " isInBackground=" + isInBackground
-            + " sessionDepth=" + sessionDepth
-            + " userPaused=" + userPaused
-            + " wasInterrupted=" + wasInterrupted
-            + " state=" + state
-            + " positionSec=" + pos;
-    }
-
     public void requestAudioFocus() {
-        JWLog.force(TAG, focusDiag("requestAudioFocus()"));
         JWLog.d(TAG, "requestAudioFocus() apiLevel=" + Build.VERSION.SDK_INT + ", hasAudioFocus=" + hasAudioFocus);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             if (hasAudioFocus) {
@@ -1902,6 +1876,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                     } else if (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                         playbackNowAuthorized = true;
                         hasAudioFocus = true;
+                        PlaybackManager.getInstance().setUiAudioFocus(true);
                     } else if (res == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
                         playbackDelayed = true;
                         playbackNowAuthorized = false;
@@ -1924,6 +1899,7 @@ public class RNJWPlayerView extends RelativeLayout implements
             JWLog.d(TAG, "requestAudioFocus (legacy) result=" + result);
             if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                 hasAudioFocus = true;
+                PlaybackManager.getInstance().setUiAudioFocus(true);
             }
         }
     }
@@ -1949,6 +1925,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                     mPlayer.pause();
                     wasInterrupted = true;
                     hasAudioFocus = false;
+                    PlaybackManager.getInstance().setUiAudioFocus(false);
                     break;
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                     mPlayer.pause();
@@ -1962,7 +1939,6 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     public void onAudioFocusChange(int focusChange) {
-        JWLog.force(TAG, focusDiag("onAudioFocusChange(focusChange=" + focusChange + ")"));
         JWLog.d(TAG, "onAudioFocusChange(focusChange=" + focusChange + ")");
         if (mPlayer != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1984,13 +1960,13 @@ public class RNJWPlayerView extends RelativeLayout implements
                         }
                         break;
                     case AudioManager.AUDIOFOCUS_LOSS:
-                        JWLog.force(TAG, focusDiag("AUDIOFOCUS_LOSS -> pausing UI mPlayer"));
                         mPlayer.pause();
                         synchronized (focusLock) {
                             wasInterrupted = true;
                             playbackDelayed = false;
                         }
                         hasAudioFocus = false;
+                        PlaybackManager.getInstance().setUiAudioFocus(false);
                         break;
                     case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                         mPlayer.pause();
@@ -2539,23 +2515,8 @@ public class RNJWPlayerView extends RelativeLayout implements
         updateWakeLock(false);
     }
 
-    // [TEMP-FOCUS-DIAG] throttle for background playback-progress logging. Remove with the rest.
-    private long lastTimeDiagMs = 0;
-
     @Override
     public void onTime(TimeEvent timeEvent) {
-        // [TEMP-FOCUS-DIAG] Throttled (>=5s) progress log: shows whether playback ADVANCES while
-        // backgrounded/locked — i.e. did the track actually finish in the background, or stall
-        // near the end. Remove after diagnosing the background auto-advance issue.
-        long nowMs = android.os.SystemClock.elapsedRealtime();
-        if (nowMs - lastTimeDiagMs >= 5000) {
-            lastTimeDiagMs = nowMs;
-            JWLog.force(TAG, "[TEMP-FOCUS-DIAG] onTime uiPlayer=" + JWLog.id(mPlayer)
-                + " positionSec=" + timeEvent.getPosition()
-                + " durationSec=" + timeEvent.getDuration()
-                + " isInBackground=" + isInBackground
-                + " sessionDepth=" + sessionDepth);
-        }
         // JWLog.d(TAG, "onTime(position=" + timeEvent.getPosition() + ", duration=" + timeEvent.getDuration() + ")");
         WritableMap event = Arguments.createMap();
         event.putString("message", "onTime");
