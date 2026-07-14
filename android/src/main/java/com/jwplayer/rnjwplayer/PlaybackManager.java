@@ -133,6 +133,13 @@ public class PlaybackManager {
         }
     }
 
+    /** Returns true only while the manager is replacing one registered player with another. */
+    public boolean isTransitioning() {
+        synchronized (mutex) {
+            return isTransitioning;
+        }
+    }
+
     /**
      * Returns true if the currently active handler is the UI player view.
      * Useful for deciding whether to create a headless/background player.

@@ -242,6 +242,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     private ThemedReactContext mThemedReactContext;
 
     private RNJWMediaServiceController mMediaServiceController;
+    private long mMediaGeneration = 0L;
     private Consumer<PictureInPictureModeChangedInfo> mPipListener = null;
     private Boolean mLastHandledPipState = null;
     private OnBackPressedCallback mPipBackCallback = null;
@@ -265,9 +266,13 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
     }
 
-    private void doUnbindService() {
+    private void releaseMediaService(boolean transfer, String reason) {
         if (mMediaServiceController != null) {
-            mMediaServiceController.unbindService();
+            if (transfer) {
+                mMediaServiceController.prepareForTransfer(reason);
+            } else {
+                mMediaServiceController.stopAndUnbind(reason);
+            }
             mMediaServiceController = null;
         }
     }
@@ -387,6 +392,11 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     public void destroyPlayer() {
         JWLog.d(TAG, "destroyPlayer() mPlayer=" + JWLog.id(mPlayer));
+        boolean replacingOwner = PlaybackManager.getInstance().isTransitioning();
+        releaseMediaService(
+            replacingOwner,
+            replacingOwner ? "ui-player-replacement" : "ui-player-destroyed");
+
         if (mPlayer != null) {
             unRegisterReceiver();
             unregisterPipBackCallback();
@@ -499,7 +509,6 @@ public class RNJWPlayerView extends RelativeLayout implements
             hasAudioFocus = false;
             PlaybackManager.getInstance().setUiAudioFocus(false);
 
-            doUnbindService();
         } else {
             JWLog.d(TAG, "destroyPlayer() skipped: mPlayer is null");
         }
@@ -1233,6 +1242,12 @@ public class RNJWPlayerView extends RelativeLayout implements
      */
     public void setConfig(ReadableMap prop) {
         JWLog.d(TAG, "setConfig(propKeys=" + (prop != null ? prop.toHashMap().keySet() : null) + ")");
+        if (prop != null && prop.hasKey("androidHandoffGeneration")
+                && !prop.isNull("androidHandoffGeneration")) {
+            mMediaGeneration = (long) prop.getDouble("androidHandoffGeneration");
+        } else {
+            mMediaGeneration = 0L;
+        }
         if (mConfig == null || !mConfig.equals(prop)) {
             // Capture the app-provided post-id mediaId from the raw playlist prop BEFORE
             // JW's JsonHelper config parser drops it (createPlayerView/buildPlayerConfig
@@ -1726,6 +1741,19 @@ public class RNJWPlayerView extends RelativeLayout implements
             mPlayerView.exitFullScreenOnPortrait = exitFullScreenOnPortrait;
         }
 
+        // Start and bind the mediaPlayback FGS before setup() can begin remote source loading.
+        // This keeps UI -> headless replacement eligible under Battery Saver and also satisfies
+        // Android 15's requirement that an app be top-visible or already running an FGS before
+        // background audio focus is requested.
+        audioManager = (AudioManager) simpleContext.getSystemService(Context.AUDIO_SERVICE);
+        if (prop.hasKey("backgroundAudioEnabled")) {
+            backgroundAudioEnabled = prop.getBoolean("backgroundAudioEnabled");
+        }
+        setupMediaSessionHelper();
+        if (backgroundAudioEnabled) {
+            doBindService();
+        }
+
         // Setup player with config
         if (isJwConfig) {
             mPlayer.setup(applyHiddenUiGroups(jwConfig, prop));
@@ -1753,16 +1781,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         // be targeted using styling. See https://docs.jwplayer.com/players/docs/android-styling-guide
         applyLegacyStyling();
 
-        // Setup audio
-        audioManager = (AudioManager) simpleContext.getSystemService(Context.AUDIO_SERVICE);
-
-        if (prop.hasKey("backgroundAudioEnabled")) {
-            backgroundAudioEnabled = prop.getBoolean("backgroundAudioEnabled");
-        }
-
         setupPlayerView(backgroundAudioEnabled, playlistItemCallbackEnabled);
-
-        setupMediaSessionHelper();
     }
     
     /**
@@ -1794,6 +1813,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         mMediaServiceController = new RNJWMediaServiceController.Builder(mActivity, mPlayer)
                 .serviceMediaApi(serviceMediaApi)
                 .notificationHelper(notificationHelper)
+                .owner("ui", mMediaGeneration)
                 .build();
     }
 
@@ -2571,7 +2591,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         mIsCastActive = castEvent.isActive();
         // stop/start the background audio service if it's running and we're casting
         if (castEvent.isActive()) {
-            doUnbindService();
+            releaseMediaService(false, "cast-started");
         } else {
             if (backgroundAudioEnabled) {
                 Context simpleContext = getNonBuggyContext(getReactContext(), getAppContext());
@@ -2582,6 +2602,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         .serviceMediaApi(serviceMediaApi)
                         .mediaSessionHelper(rNJWMediaSessionHelper)
                         .notificationHelper(notificationHelper)
+                    .owner("ui", mMediaGeneration)
                         .build();
 
                 doBindService();

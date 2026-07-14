@@ -29,6 +29,7 @@ import com.jwplayer.pub.api.configuration.UiConfig;
 import com.jwplayer.pub.api.media.adaptive.QualityLevel;
 import com.jwplayer.pub.api.media.audio.AudioTrack;
 import com.jwplayer.rnjwplayer.utils.JWLog;
+import com.jwplayer.rnjwplayer.session.RNJWMediaService;
 import java.util.List;
 import java.util.Map;
 
@@ -659,6 +660,41 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         } catch (Exception e) {
             promise.reject("CLEAR_PENDING_MEDIA_ERROR", "Failed to clear pending media", e);
         }
+    }
+
+    @ReactMethod
+    public void acknowledgeHeadlessCompletion(double completionSeq, String outcome, Promise promise) {
+        try {
+            JWPlayerNativePlaybackHandler.getInstance(mReactContext)
+                    .resolveCompletion((long) completionSeq, outcome);
+            promise.resolve(true);
+        } catch (Exception error) {
+            promise.reject(
+                    "HEADLESS_COMPLETION_ACK_ERROR",
+                    "Failed to acknowledge headless completion",
+                    error);
+        }
+    }
+
+    @ReactMethod
+    public void awaitUiOwnerAttachment(double generationValue, Promise promise) {
+        final long generation = (long) generationValue;
+        final long deadlineMs = android.os.SystemClock.elapsedRealtime() + 5000L;
+        final Handler handler = new Handler(Looper.getMainLooper());
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (RNJWMediaService.isUiOwnerAttached(generation)) {
+                    promise.resolve(true);
+                } else if (android.os.SystemClock.elapsedRealtime() >= deadlineMs) {
+                    promise.reject(
+                            "UI_OWNER_ATTACHMENT_TIMEOUT",
+                            "UI playback owner did not attach for generation " + generation);
+                } else {
+                    handler.postDelayed(this, 25L);
+                }
+            }
+        });
     }
 
 }

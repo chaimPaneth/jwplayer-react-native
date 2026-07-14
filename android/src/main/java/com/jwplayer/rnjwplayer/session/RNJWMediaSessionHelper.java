@@ -144,6 +144,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static String externalMediaId = null;
     private static String externalSubtitle = null;
 
+    // [PLAYLIST-ADVANCE-FIX] RC-5 / 1d: dedupe rapid duplicate playFromMediaId dispatches for the
+    // SAME item. The auto-advance was delivered twice ~1.3s apart, creating two background players
+    // (ExoPlayer churn) while the network was blocked. A second selection of the same mediaId within
+    // the window is dropped as already-in-flight.
+    private static volatile String lastSelectionMediaId = null;
+    private static volatile long lastSelectionAtMs = 0L;
+    private static final long SELECTION_DEDUPE_WINDOW_MS = 3000L;
+
     // Stores the postId-format mediaId originally selected from Android Auto
     // (e.g. "175936" or "post-175936"). Unlike `externalMediaId`, this is NOT
     // overwritten by JW playlist callbacks (onPlaylistItem / storeSeekPosition)
@@ -620,10 +628,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     final void setupServiceMediaApi(ServiceMediaApi serviceMediaApi) {
         JWLog.d(TAG, "setupServiceMediaApi(serviceMediaApi=" + JWLog.id(serviceMediaApi) + ")");
-        this.cleanup();
         if (serviceMediaApi != null) {
+            if (this.serviceMediaApi != null && this.serviceMediaApi != serviceMediaApi) {
+                cleanup();
+                activeInstance = this;
+            }
             this.serviceMediaApi = serviceMediaApi;
-
             initServiceMediaApi();
         }
     }
@@ -1726,19 +1736,30 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      * without destroying MediaSession state. Keeps AA UI visible during transitions.
      */
     public final void detachPlayerOnly() {
-        JWLog.d(TAG, "detachPlayerOnly() - lightweight cleanup for media switch");
+        detachForTransfer();
+    }
+
+    /**
+     * Detaches an outgoing player without publishing STATE_NONE, clearing metadata, cancelling
+     * the notification, or deactivating the shared MediaSession. The started service owns those
+     * session-level decisions while a successor player is being attached.
+     */
+    public final void detachForTransfer() {
+        JWLog.d(TAG, "detachForTransfer() - preserving MediaSession for owner replacement");
 
         if (activeInstance == this) {
             activeInstance = null;
         }
 
+        releaseAudioFocus();
+        releasePlaybackLocks();
         teardownNetworkCallback();
 
         if (mediaButtonFallbackReceiver != null) {
             try {
                 context.unregisterReceiver(mediaButtonFallbackReceiver);
             } catch (Exception unregEx) {
-                JWLog.w(TAG, "detachPlayerOnly() - failed to unregister fallback receiver: " + unregEx.getMessage());
+                JWLog.w(TAG, "detachForTransfer() - failed to unregister fallback receiver: " + unregEx.getMessage());
             }
             mediaButtonFallbackReceiver = null;
         }
@@ -1751,9 +1772,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                                     EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, 
                                     EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, 
                                     EventType.SEEK, EventType.SEEKED});
-                JWLog.d(TAG, "detachPlayerOnly() - removed player listeners");
+                JWLog.d(TAG, "detachForTransfer() - removed player listeners");
             } catch (Exception e) {
-                JWLog.w(TAG, "detachPlayerOnly() - error removing listeners: " + e.getMessage());
+                JWLog.w(TAG, "detachForTransfer() - error removing listeners: " + e.getMessage());
             }
             this.jwPlayer = null;
         }
@@ -3353,6 +3374,20 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      */
     public static boolean handlePlayFromMediaId(String mediaId, Bundle extras) {
         JWLog.d(TAG, "handlePlayFromMediaId(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ") activeInstance=" + (activeInstance != null));
+
+        // [PLAYLIST-ADVANCE-FIX] RC-5 / 1d: drop a duplicate selection of the same mediaId that
+        // arrives within the dedupe window (double advance dispatch). Return true so the caller
+        // treats it as handled -- the in-flight selection will play the item.
+        long nowMs = SystemClock.elapsedRealtime();
+        if (mediaId != null && mediaId.equals(lastSelectionMediaId)
+                && (nowMs - lastSelectionAtMs) < SELECTION_DEDUPE_WINDOW_MS) {
+            JWLog.d(TAG, "[PLAYLIST-ADVANCE-FIX] handlePlayFromMediaId: dropping duplicate selection for mediaId="
+                    + mediaId + " within " + (nowMs - lastSelectionAtMs) + "ms");
+            return true;
+        }
+        lastSelectionMediaId = mediaId;
+        lastSelectionAtMs = nowMs;
+
         pendingSeekMs = extractResumePosition(extras);
         pendingSeekApplied = false;
         autoHandoffSeekAttempts = 0; // Reset counter for new handoff

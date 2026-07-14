@@ -24,6 +24,11 @@ import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
 import com.longtailvideo.jwplayer.R.drawable;
 
 public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
+    public static final int DEFAULT_NOTIFICATION_ID = 2005;
+    public static final String DEFAULT_CHANNEL_ID = "NotificationBarController";
+    public static final String DEFAULT_CHANNEL_NAME = "Player Notification";
+    public static final String DEFAULT_CHANNEL_DESCRIPTION = "Control playback of the media player";
+
     final NotificationManager notificationManager;
     private NotificationChannel notificationChannel;
     private final int smallIconResId;
@@ -77,13 +82,63 @@ public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId);
         serviceMediaApi.addNotificationActions(context, builder);
         builder.setContentTitle(description.getTitle()).setContentText(description.getSubtitle()).setSubText(description.getDescription()).setLargeIcon(description.getIconBitmap()).setOnlyAlertOnce(true).setStyle((new androidx.media.app.NotificationCompat.MediaStyle()).setMediaSession(stateProvider.mediaSessionCompat.getSessionToken()).setShowActionsInCompactView(serviceMediaApi.getCompactActions())).setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setSmallIcon(this.smallIconResId).setDeleteIntent(serviceMediaApi.getActionIntent(context, 86));
-        Intent activityIntent;
-        (activityIntent = new Intent(context, context.getClass())).setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        builder.setContentIntent(PendingIntent.getActivity(context, 0, activityIntent, PendingIntent.FLAG_IMMUTABLE));
+        Intent activityIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+        if (activityIntent != null) {
+            activityIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            builder.setContentIntent(PendingIntent.getActivity(
+                context,
+                0,
+                activityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
+        }
         Notification notification = builder.build();
         this.notificationManager.notify(this.notificationId, notification);
         return notification;
     }
+
+        /**
+         * Creates the notification used while ownership is moving between UI and headless players.
+         * It deliberately has no transport actions; the attached helper replaces it atomically once
+         * the successor player is ready to own the shared MediaSession.
+         */
+        public static Notification createBootstrapNotification(Context context) {
+        NotificationManager manager =
+            (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (VERSION.SDK_INT >= 26 && manager != null) {
+            NotificationChannel channel = new NotificationChannel(
+                DEFAULT_CHANNEL_ID,
+                DEFAULT_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription(DEFAULT_CHANNEL_DESCRIPTION);
+            channel.setShowBadge(false);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            manager.createNotificationChannel(channel);
+        }
+
+        int appIcon = context.getResources().getIdentifier(
+            "ic_app_icon", "drawable", context.getPackageName());
+        int smallIcon = appIcon > 0 ? appIcon : drawable.ic_jw_play;
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(
+            context, DEFAULT_CHANNEL_ID)
+            .setContentTitle("Preparing playback")
+            .setContentText("")
+            .setOnlyAlertOnce(true)
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSmallIcon(smallIcon);
+
+        Intent activityIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+        if (activityIntent != null) {
+            activityIntent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            builder.setContentIntent(PendingIntent.getActivity(
+                context,
+                0,
+                activityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
+        }
+        return builder.build();
+        }
 
     public static class Builder {
         protected NotificationManager notificationManager;
@@ -106,10 +161,10 @@ public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
 
             this.iconDrawableResource = appIcon > 0 ? appIcon : drawable.ic_jw_play;
 
-            this.notificationId = 2005;
-            this.notificationChannelId = "NotificationBarController";
-            this.channelName = "Player Notification";
-            this.channelDescription = "Control playback of the media player";
+            this.notificationId = DEFAULT_NOTIFICATION_ID;
+            this.notificationChannelId = DEFAULT_CHANNEL_ID;
+            this.channelName = DEFAULT_CHANNEL_NAME;
+            this.channelDescription = DEFAULT_CHANNEL_DESCRIPTION;
             this.notificationManager = manager;
             this.mediaServiceFactory = factory;
         }
