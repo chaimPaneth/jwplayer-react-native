@@ -955,11 +955,15 @@ public class RNJWPlayerView extends RelativeLayout implements
             // it back.
             //
             // Host apps drive controls in one of two ways and this handles both:
-            //  - apps that enable JW's native controls -> setControls(false/true) hides/restores;
-            //  - apps that keep native controls disabled and drive visibility via
-            //    forceControlsVisibility (e.g. the OU apps, where getControls() is false) -> the
-            //    setControls calls are no-ops, so the nudgeControlsVisible() toggle on exit is
-            //    what actually re-renders the control bar after the player view is reparented.
+            //  - apps that enable JW's native controls -> setControls(false/true) hides/restores,
+            //    and the nudgeControlsVisible() call below re-renders the control bar after the
+            //    player view is reparented on exit;
+            //  - apps that keep native controls disabled and drive visibility entirely via their
+            //    own forceControlsVisibility calls (e.g. the OU apps, where getControls() is
+            //    always false) -> setControls() is a no-op for them either way, and
+            //    nudgeControlsVisible() is SKIPPED (see isNativeControlsEnabled()) because forcing
+            //    JW's own control bar visible for a frame would show its default Play/Pause glyph
+            //    even though the app's configured setting says controls should stay off.
             if (!isInPip && mControlsBeforePip != null) {
                 JWLog.d(TAG, "applyPipChange: restoring controls=" + mControlsBeforePip + " before SDK notify");
                 try { mPlayer.setControls(mControlsBeforePip); } catch (Throwable ignored) {}
@@ -1019,7 +1023,9 @@ public class RNJWPlayerView extends RelativeLayout implements
                 if (rootViewVisibilitySnapshot.isEmpty()) {
                     JWLog.w(TAG, "applyPipChange: visibility snapshot empty on exit, skipping player reparent");
                     mLastHandledPipState = false;
-                    nudgeControlsVisible();
+                    if (isNativeControlsEnabled()) {
+                        nudgeControlsVisible();
+                    }
                     return;
                 }
 
@@ -1044,8 +1050,13 @@ public class RNJWPlayerView extends RelativeLayout implements
                 mLastHandledPipState = false;
 
                 // Controls were already re-enabled before the SDK notify above; nudge the
-                // control bar to render now that the player view is laid out again.
-                nudgeControlsVisible();
+                // control bar to render now that the player view is laid out again. Only
+                // when native controls are actually configured on — apps that keep them
+                // off (forceControlsVisibility-driven) must not have JW's own control bar
+                // momentarily forced visible. See isNativeControlsEnabled().
+                if (isNativeControlsEnabled()) {
+                    nudgeControlsVisible();
+                }
             }
         } catch (Throwable t) {
             JWLog.e(TAG, "applyPipChange: unexpected error: " + t.getMessage());
@@ -1064,11 +1075,42 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
+     * Returns whether this player instance is currently configured with JW's native
+     * controls enabled — the durable host-app setting driven by config/setControls(),
+     * NOT the transient show/hide state reported by ControlBarVisibilityEvent.
+     *
+     * Used to gate the PiP-exit forceControlsVisibility nudge (see nudgeControlsVisible):
+     * apps that enable JW's native controls need the nudge to re-render their control
+     * bar after the player view is reparented on PiP exit. Apps that keep native
+     * controls disabled and drive all visibility themselves via forceControlsVisibility
+     * (e.g. the OU apps, where getControls() is always false) must NOT receive this
+     * nudge — calling setForceControlsVisibility(true) momentarily shows JW's own
+     * default control bar / play-pause glyph even though the app's configured setting
+     * says controls should stay off, which is visible as a large Play/Pause icon
+     * flashing on PiP return.
+     *
+     * Safe to call at the point nudgeControlsVisible() would be invoked: on the normal
+     * exit path controls have already been restored to the pre-PiP configured value via
+     * setControls(mControlsBeforePip) a few lines above; on the "didn't own the PiP
+     * enter" early-return path controls were never touched by this instance, so
+     * getControls() already reflects the real configured value either way.
+     */
+    private boolean isNativeControlsEnabled() {
+        try {
+            return mPlayer != null && mPlayer.getControls();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
      * Posts a force-visibility nudge (show, then release back to normal auto-hide) on the
      * next frame so JW re-renders the control bar after the player view has been
      * re-attached and laid out. Mirrors the original post-PiP "controls got lost"
      * workaround. The actual re-enable of controls happens earlier, before the SDK is
      * notified of the PiP exit (see applyPipChange).
+     *
+     * Callers MUST gate this with isNativeControlsEnabled() — see that method's doc.
      */
     private void nudgeControlsVisible() {
         if (mPlayerView == null) {
@@ -1287,16 +1329,52 @@ public class RNJWPlayerView extends RelativeLayout implements
             // Only playlist changed -> update config without stop/recreate
             if (mConfig != null && isOnlyDiff(prop, "playlist") && mPlayer != null) {
                 JWLog.d(TAG, "Playlist-only change detected -> applying fast update");
-                
+
+                // Distinguish a same-track foreground rebuild (PiP/lock/background resume-sync
+                // only rewrites the playlist item's starttime) from a genuine new-track open
+                // (different file). mConfig still holds the PREVIOUS prop here -- it is updated
+                // to `prop` only at the very end of setConfig -- so compare the two directly.
+                // Both sides read the RN prop's "file", giving a consistent, normalization-free
+                // comparison (see firstPlaylistFileFromConfig).
+                String previousFirstFile = firstPlaylistFileFromConfig(mConfig);
+
                 // IMPORTANT: ensure mPlaylistProp is updated from NEW prop
                 if (prop.hasKey("playlist")) {
                     mPlaylistProp = prop.getArray("playlist");
                 }
+                String newFirstFile = firstPlaylistFileFromConfig(prop);
+                boolean sameTrack = previousFirstFile != null && previousFirstFile.equals(newFirstFile);
 
                 PlayerConfig oldConfig = mPlayer.getConfig();
                 // Capture the controls-enabled state BEFORE setup() so we can restore the
                 // caller's intended visibility after forcing the UI group below.
                 boolean currentControlsState = mPlayer.getControls();
+
+                // Preserve a user-initiated pause across a same-track foreground rebuild.
+                //
+                // On PiP/lock exit the app re-sends the declarative config with only the
+                // playlist item's starttime changed (the resume-sync in PlayerCore), so this
+                // fast path runs every time. oldConfig.getAutostart() perpetuates whatever
+                // autostart this player instance was ORIGINALLY created with -- when the app's
+                // autoplay preference is on, that is `true`, so setup() below would auto-RESUME
+                // playback on every single PiP/foreground return even though the user explicitly
+                // PAUSED while in PiP. Confirmed via logcat: with autoPlay preference on, native
+                // onPlay() fires straight out of this setup() call with NO JS bridge call
+                // (seekTo/play) anywhere in between -- this path has zero JS-side visibility, so
+                // it cannot be fixed from the RN layer alone.
+                //
+                // userPaused is set by onPause() (and the pause()/stop() bridge) and cleared by
+                // onPlay(); a system/interruption pause does NOT set it (see onPause). When it is
+                // set AND we are rebuilding the SAME track (not opening a new one), force autostart
+                // off so the player reloads at the resume position but stays paused. A genuine
+                // new-track open (different file) keeps the autoplay preference, so tapping a new
+                // item still starts playback even if the previous track was paused. A was-playing
+                // return keeps autostart because userPaused is false there.
+                boolean autostart = oldConfig.getAutostart();
+                if (autostart && userPaused && sameTrack) {
+                    JWLog.d(TAG, "Playlist-only fast update: same track + userPaused -> forcing autostart=false to preserve user pause");
+                    autostart = false;
+                }
                 // If controls were previously turned off (e.g. app's collapsed/mini player
                 // calls setControls(false)), the SDK's live uiConfig no longer includes
                 // PLAYER_CONTROLS_CONTAINER. Carrying that uiConfig forward as-is into setup()
@@ -1306,7 +1384,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 // expanding back to full view. Always ensure the UI group is present at setup()
                 // time, and re-apply the real on/off state via setControls() afterward.
                 PlayerConfig config = new PlayerConfig.Builder()
-                        .autostart(oldConfig.getAutostart())
+                        .autostart(autostart)
                         .nextUpOffset(oldConfig.getNextUpOffset())
                         .repeat(oldConfig.getRepeat())
                         .relatedConfig(oldConfig.getRelatedConfig())
@@ -1529,6 +1607,33 @@ public class RNJWPlayerView extends RelativeLayout implements
         JWLog.d(TAG, "playlistNotTheSame()" );
         return prop.hasKey("playlist") && mPlaylistProp != prop.getArray("playlist") && !Arrays
                 .deepEquals(new ReadableArray[]{mPlaylistProp}, new ReadableArray[]{prop.getArray("playlist")});
+    }
+
+    /**
+     * Returns the first playlist item's "file" URL from a raw RN config prop, or null when it
+     * cannot be determined. Used by the playlist-only fast path in {@link #setConfig} to tell a
+     * same-track foreground rebuild (resume-sync only changes starttime) apart from a genuine
+     * new-track open. Reads the RN prop directly rather than the SDK's parsed PlaylistItem so
+     * both sides of the comparison use the identical, unnormalized string.
+     *
+     * Returning null on any surprise is intentional: it disables the pause-preserving autostart
+     * override for that update rather than risking an incorrect suppression of playback.
+     */
+    private String firstPlaylistFileFromConfig(ReadableMap configProp) {
+        try {
+            if (configProp != null && configProp.hasKey("playlist")) {
+                ReadableArray playlist = configProp.getArray("playlist");
+                if (playlist != null && playlist.size() > 0) {
+                    ReadableMap first = playlist.getMap(0);
+                    if (first != null && first.hasKey("file") && !first.isNull("file")) {
+                        return first.getString("file");
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Fall through to null (see method doc).
+        }
+        return null;
     }
 
     private void configurePlaylist(PlayerConfig.Builder configBuilder, ReadableMap prop) {
