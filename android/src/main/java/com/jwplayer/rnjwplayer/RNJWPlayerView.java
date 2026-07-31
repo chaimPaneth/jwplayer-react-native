@@ -255,15 +255,19 @@ public class RNJWPlayerView extends RelativeLayout implements
     PlaylistItemDecision itemUpdatePromise = null;
 
     private void doBindService() {
-        if (mMediaServiceController != null) {
-            if (!isBackgroundAudioServiceRunning()) {
-                // This may not be your expected behavior, but is necessary to avoid crashing
-                // Do not use multiple player instances with background audio enabled
+        doBindService(null);
+    }
 
-                // don't rebind me if the service is already active with a player.
-                mMediaServiceController.bindService();
-            }
+    private void doBindService(Runnable onForegroundReady) {
+        if (mMediaServiceController == null) {
+            return;
         }
+
+        // Always bind the wrapper's typed mediaPlayback FGS. The JW SDK's own MediaService may
+        // already be running, but it is a separate service and is not proof that our MediaSession
+        // owner is foreground. Skipping this bind left RNJWMediaService bound-but-demoted on
+        // Android 17 and allowed app-idle shutdown after screen-off.
+        mMediaServiceController.bindService(onForegroundReady);
     }
 
     private void releaseMediaService(boolean transfer, String reason) {
@@ -393,6 +397,11 @@ public class RNJWPlayerView extends RelativeLayout implements
     public void destroyPlayer() {
         JWLog.d(TAG, "destroyPlayer() mPlayer=" + JWLog.id(mPlayer));
         boolean replacingOwner = PlaybackManager.getInstance().isTransitioning();
+        JWLog.d(TAG, "UI_DESTROY_PLAYER replacingOwner=" + replacingOwner
+                + " hasPlayer=" + (mPlayer != null)
+                + " isInBackground=" + isInBackground
+                + " generation=" + mMediaGeneration
+                + " caller=" + JWLog.callerInfo(RNJWPlayerView.class));
         releaseMediaService(
             replacingOwner,
             replacingOwner ? "ui-player-replacement" : "ui-player-destroyed");
@@ -413,6 +422,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
             // Ensure MediaSession reflects a non-playing state when UI player is destroyed
             try {
+                JWLog.d(TAG, "UI_DESTROY_SESSION_HANDLE_DESTROY replacingOwner=" + replacingOwner);
                 com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.handleDestroy();
             } catch (Throwable t) {
                 JWLog.w(TAG, "Failed to update MediaSession on destroy: " + t.getMessage());
@@ -1846,25 +1856,41 @@ public class RNJWPlayerView extends RelativeLayout implements
             mPlayerView.exitFullScreenOnPortrait = exitFullScreenOnPortrait;
         }
 
-        // Start and bind the mediaPlayback FGS before setup() can begin remote source loading.
-        // This keeps UI -> headless replacement eligible under Battery Saver and also satisfies
-        // Android 15's requirement that an app be top-visible or already running an FGS before
-        // background audio focus is requested.
+        // Start and bind the typed mediaPlayback FGS before setup() can begin source loading or
+        // trigger an audio-focus request. A Handler.post() is not a synchronization boundary for
+        // startForegroundService(); the only durable boundary is attachOwner() completing inside
+        // RNJWMediaService.onServiceConnected().
         audioManager = (AudioManager) simpleContext.getSystemService(Context.AUDIO_SERVICE);
         if (prop.hasKey("backgroundAudioEnabled")) {
             backgroundAudioEnabled = prop.getBoolean("backgroundAudioEnabled");
         }
         setupMediaSessionHelper();
-        if (backgroundAudioEnabled) {
-            doBindService();
-        }
 
-        // Setup player with config
-        if (isJwConfig) {
-            mPlayer.setup(applyHiddenUiGroups(jwConfig, prop));
+        final boolean useJwConfig = isJwConfig;
+        final PlayerConfig.Builder finalConfigBuilder = configBuilder;
+        final PlayerConfig finalJwConfig = jwConfig;
+        final ReadableMap finalProp = prop;
+        final JWPlayer playerForSetup = mPlayer;
+
+        Runnable setupRunnable = () -> {
+            // A delayed connection from an owner that React already replaced must never set up
+            // the stale player.
+            if (playerForSetup == null || mPlayer != playerForSetup) {
+                JWLog.w(TAG, "FGS_READY_STALE_PLAYER generation=" + mMediaGeneration);
+                return;
+            }
+            JWLog.d(TAG, "FGS_READY_SETUP generation=" + mMediaGeneration);
+            if (useJwConfig) {
+                playerForSetup.setup(applyHiddenUiGroups(finalJwConfig, finalProp));
+            } else {
+                playerForSetup.setup(finalConfigBuilder.build());
+            }
+        };
+
+        if (backgroundAudioEnabled) {
+            doBindService(setupRunnable);
         } else {
-            PlayerConfig playerConfig = configBuilder.build();
-            mPlayer.setup(playerConfig);
+            setupRunnable.run();
         }
 
         // Configure PiP if enabled
@@ -2410,6 +2436,10 @@ public class RNJWPlayerView extends RelativeLayout implements
         event.putString("message", "onBuffer");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topBuffer", event);
 
+        if (backgroundAudioEnabled) {
+            // Buffering is exactly when the radio must stay awake.
+            PlaybackKeepAlive.setPlaying(getContext(), true, "ui-buffer");
+        }
         updateWakeLock(true);
     }
 
@@ -2420,6 +2450,11 @@ public class RNJWPlayerView extends RelativeLayout implements
         event.putString("message", "onComplete");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topComplete", event);
 
+        // Auto-advance may start another item immediately; re-evaluate instead of forcing release.
+        PlaybackKeepAlive.setPlaying(
+                getContext(),
+                PlaybackManager.getInstance().isActivePlayerPlaying(),
+                "ui-complete");
         updateWakeLock(false);
     }
 
@@ -2516,6 +2551,8 @@ public class RNJWPlayerView extends RelativeLayout implements
         event.putString("message", "onPause");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topPause", event);
 
+        // Paused playback needs no radio; the watchdog would release these anyway.
+        PlaybackKeepAlive.setPlaying(getContext(), false, "ui-pause");
         updateWakeLock(false);
 
         if (!wasInterrupted) {
@@ -2529,6 +2566,9 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         if (backgroundAudioEnabled) {
             requestAudioFocus();
+            // Authoritative playback signal: hold the streaming keep-alive locks regardless of
+            // MediaSession/owner state so screen-off Wi-Fi power save cannot kill the stream.
+            PlaybackKeepAlive.setPlaying(getContext(), true, "ui-play");
         }
 
         WritableMap event = Arguments.createMap();

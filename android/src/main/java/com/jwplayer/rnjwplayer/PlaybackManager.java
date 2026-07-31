@@ -234,4 +234,29 @@ public class PlaybackManager {
     public boolean hasUiAudioFocus() {
         return uiHasAudioFocus;
     }
+
+    /**
+     * Reports whether the registered active player is really playing or buffering, regardless of
+     * which owner (UI or headless) holds it and regardless of MediaSession state.
+     * Used by {@link PlaybackKeepAlive} to validate that the streaming keep-alive locks are still
+     * warranted, so they can never be pinned for the life of the process.
+     */
+    public boolean isActivePlayerPlaying() {
+        JWPlayer player;
+        synchronized (mutex) {
+            player = mActivePlayer;
+        }
+        if (player == null) {
+            return false;
+        }
+        try {
+            com.jwplayer.pub.api.PlayerState state = player.getState();
+            return state == com.jwplayer.pub.api.PlayerState.PLAYING
+                    || state == com.jwplayer.pub.api.PlayerState.BUFFERING;
+        } catch (Throwable error) {
+            JWLog.w(TAG, "isActivePlayerPlaying: unable to read state: " + error.getMessage());
+            // Unknown rather than idle: let the caller keep any keep-alive locks it holds.
+            return true;
+        }
+    }
 }

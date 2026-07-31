@@ -46,7 +46,6 @@ import com.jwplayer.pub.api.events.listeners.VideoPlayerEvents;
 import com.jwplayer.pub.api.license.LicenseUtil;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 import com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper;
-import com.jwplayer.rnjwplayer.session.RNJWMediaService;
 import com.jwplayer.rnjwplayer.session.RNJWMediaServiceController;
 import com.jwplayer.rnjwplayer.session.RNJWNotificationHelper;
 import com.jwplayer.rnjwplayer.utils.JWLog;
@@ -770,44 +769,79 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     .notificationHelper(notificationHelper)
                     .owner("headless", currentMediaGeneration)
                     .build();
-                mediaSessionHelper = mediaServiceController.getMediaSessionHelper();
-            mediaServiceController.bindService();
+            mediaSessionHelper = mediaServiceController.getMediaSessionHelper();
 
-            backgroundPlayer.setup(playerConfig);
+            final JWPlayer playerForSetup = backgroundPlayer;
+            mediaServiceController.bindService(() -> {
+                if (backgroundPlayer != playerForSetup) {
+                    JWLog.w(TAG, "HEADLESS_FGS_READY_STALE generation=" + currentMediaGeneration);
+                    return;
+                }
+                if (!requestAudioFocus()) {
+                    JWLog.w(TAG, "HEADLESS_AUDIO_FOCUS_NOT_GRANTED generation="
+                            + currentMediaGeneration);
+                    cleanupBackgroundPlayer(preserveRecoveryState);
+                    return;
+                }
 
-            if (backgroundPlayer.getPlaylist() != null && !backgroundPlayer.getPlaylist().isEmpty()) {
-                PlaylistItem currentItem = backgroundPlayer.getPlaylist().get(0);
-            } else {
-                JWLog.w(TAG, "WARNING: Playlist is null or empty after setup!");
-            }
-            
-            JWLog.d(TAG, "📱 JAVA: Background player creation completed successfully");
-            emitActiveHeadlessPlaybackAvailable("background-player-created");
-            // Artwork fetch gating (avoid duplicate network if metadata already has bitmap)
-            try {
-                // imageUrl already declared earlier in createBackgroundPlayer; reuse it here
-                if (imageUrl != null) {
-                    boolean needFetch = true;
-                    if (sharedMediaSession != null) {
-                        try {
-                            MediaMetadataCompat md = sharedMediaSession.getController().getMetadata();
-                            if (md != null && md.getBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART) != null) {
-                                needFetch = false;
-                                JWLog.d(TAG, "ARTWORK_DEBUG: existing bitmap present; skip fetch");
+                JWLog.d(TAG, "HEADLESS_FGS_READY_SETUP generation=" + currentMediaGeneration);
+                playerForSetup.setup(playerConfig);
+
+                if (playerForSetup.getPlaylist() == null || playerForSetup.getPlaylist().isEmpty()) {
+                    JWLog.w(TAG, "WARNING: Playlist is null or empty after setup!");
+                }
+
+                if (autoStartEnabled) {
+                    startAutostartChain();
+                }
+
+                // setup() resets speed to 1x; restore the persisted rate only after setup.
+                try {
+                    float savedSpeed = RNJWMediaSessionHelper.currentSpeed;
+                    if (savedSpeed != 1.0f && savedSpeed > 0f) {
+                        final float speedToApply = savedSpeed;
+                        mainHandler.postDelayed(() -> {
+                            try {
+                                if (backgroundPlayer == playerForSetup) {
+                                    playerForSetup.setPlaybackRate(speedToApply);
+                                    JWLog.d(TAG, "Restored playback speed to " + speedToApply
+                                            + "x on new background player");
+                                }
+                            } catch (Exception e) {
+                                JWLog.w(TAG, "Failed to restore playback speed: " + e.getMessage());
                             }
-                        } catch (Exception metaEx) {
-                            JWLog.w(TAG, "ARTWORK_DEBUG: metadata inspection failed: " + metaEx.getMessage());
+                        }, 300);
+                    }
+                } catch (Exception speedEx) {
+                    JWLog.w(TAG, "Error reading saved speed: " + speedEx.getMessage());
+                }
+
+                JWLog.d(TAG, "Background player creation completed successfully");
+                emitActiveHeadlessPlaybackAvailable("background-player-created");
+                try {
+                    if (imageUrl != null) {
+                        boolean needFetch = true;
+                        if (sharedMediaSession != null) {
+                            try {
+                                MediaMetadataCompat md = sharedMediaSession.getController().getMetadata();
+                                if (md != null && md.getBitmap(
+                                        MediaMetadataCompat.METADATA_KEY_ALBUM_ART) != null) {
+                                    needFetch = false;
+                                    JWLog.d(TAG, "ARTWORK_DEBUG: existing bitmap present; skip fetch");
+                                }
+                            } catch (Exception metaEx) {
+                                JWLog.w(TAG, "ARTWORK_DEBUG: metadata inspection failed: "
+                                        + metaEx.getMessage());
+                            }
+                        }
+                        if (needFetch) {
+                            scheduleAlbumArtFetch(imageUrl);
                         }
                     }
-                    if (needFetch) {
-                        scheduleAlbumArtFetch(imageUrl);
-                    } else {
-                        JWLog.d(TAG, "ARTWORK_DEBUG: Skipping artwork fetch (bitmap already present)");
-                    }
+                } catch (Exception artEx) {
+                    JWLog.w(TAG, "ARTWORK_DEBUG: gating error: " + artEx.getMessage());
                 }
-            } catch (Exception artEx) {
-                JWLog.w(TAG, "ARTWORK_DEBUG: gating error: " + artEx.getMessage());
-            }
+            });
         } catch (Exception e) {
             JWLog.e(TAG, "Error creating background player", e);
             cleanupBackgroundPlayer(preserveRecoveryState);
@@ -1208,61 +1242,16 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Following the same pattern as RNJWPlayerView with background audio
      */
     private void startBackgroundPlayback(Map<String, Object> postData, String title, String subtitle) {
-        JWLog.d(TAG, "📱 JAVA: startBackgroundPlayback called for: " + JWLog.safe(title) + " / " + JWLog.safe(subtitle));
-        
-        try {
-            if (!RNJWMediaService.ensureStarted(
-                    context,
-                    "headless-selection-" + currentMediaGeneration)) {
-                JWLog.e(TAG, "Playback FGS start rejected; refusing unowned headless playback");
-                return;
-            }
+        JWLog.d(TAG, "startBackgroundPlayback called for: " + JWLog.safe(title)
+                + " / " + JWLog.safe(subtitle));
 
-            // Request audio focus before starting playback
-            if (!requestAudioFocus()) {
-                JWLog.w(TAG, "📱 JAVA: Failed to get audio focus, delaying playback");
-                return;
-            }
-            
-            JWLog.d(TAG, "📱 JAVA: Audio focus granted, creating new background player");
-            
-            // Always create a new background player for the new media
+        try {
+            // createBackgroundPlayer binds RNJWMediaService first. Its foreground-ready callback
+            // requests audio focus and calls setup only after attachOwner() has promoted the typed
+            // mediaPlayback FGS. Do not touch audio before that callback on Android 15+.
             createBackgroundPlayer(postData);
-            
-            if (backgroundPlayer != null) {
-                JWLog.d(TAG, "📱 JAVA: Background player created successfully");
-                if (autoStartEnabled) {
-                    startAutostartChain();
-                }
-                // Re-apply persisted playback speed to the new player instance.
-                // JWPlayer.setup() resets speed to 1x, but the user's last chosen
-                // speed is preserved in the static RNJWMediaSessionHelper.currentSpeed.
-                try {
-                    float savedSpeed = RNJWMediaSessionHelper.currentSpeed;
-                    if (savedSpeed != 1.0f && savedSpeed > 0f) {
-                        final float speedToApply = savedSpeed;
-                        final JWPlayer player = backgroundPlayer;
-                        // Delay slightly to ensure player is initialized after setup()
-                        mainHandler.postDelayed(() -> {
-                            try {
-                                if (player != null) {
-                                    player.setPlaybackRate(speedToApply);
-                                    JWLog.d(TAG, "📱 JAVA: Restored playback speed to " + speedToApply + "x on new background player");
-                                }
-                            } catch (Exception e) {
-                                JWLog.w(TAG, "📱 JAVA: Failed to restore playback speed: " + e.getMessage());
-                            }
-                        }, 300);
-                    }
-                } catch (Exception speedEx) {
-                    JWLog.w(TAG, "📱 JAVA: Error reading saved speed: " + speedEx.getMessage());
-                }
-            } else {
-                JWLog.e(TAG, "📱 JAVA: Failed to create background player");
-            }
-            
         } catch (Exception e) {
-            JWLog.e(TAG, "📱 JAVA: Error starting background playback", e);
+            JWLog.e(TAG, "Error starting background playback", e);
         }
     }
     
@@ -1597,7 +1586,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     }
 
     private void cleanupBackgroundPlayer(boolean transfer) {
-        JWLog.d(TAG, "cleanupBackgroundPlayer(transfer=" + transfer + ")");
+        JWLog.d(TAG, "cleanupBackgroundPlayer(transfer=" + transfer
+                + ", hasPlayer=" + (backgroundPlayer != null)
+                + ", generation=" + currentMediaGeneration + ")");
         try {
             JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Cleaning up background player");
 
@@ -1672,6 +1663,13 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     lifecycleRegistry.markState(Lifecycle.State.CREATED);
                 }
             });
+
+            // Re-evaluate rather than force-release: a successor player may already be playing
+            // when this cleanup is part of an owner transfer.
+            PlaybackKeepAlive.setPlaying(
+                    context,
+                    PlaybackManager.getInstance().isActivePlayerPlaying(),
+                    transfer ? "headless-cleanup-transfer" : "headless-cleanup-stop");
             
             JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: Background player cleanup completed");
             
@@ -1716,6 +1714,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     .build();
 
             int res = audioManager.requestAudioFocus(focusRequest);
+            JWLog.d(TAG, "HEADLESS_AUDIO_FOCUS_RESULT result=" + res
+                    + " generation=" + currentMediaGeneration
+                    + " sdk=" + Build.VERSION.SDK_INT);
             synchronized (focusLock) {
                 if (res == AudioManager.AUDIOFOCUS_REQUEST_FAILED) {
                     JWLog.w(TAG, "📱 JAVA: Audio focus request failed");
@@ -1855,6 +1856,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         backgroundRecoveryInProgress = false;
         backgroundRecoveryReloadAttempts = 0;
         rememberBackgroundPosition("onPlay");
+        // Hold the streaming keep-alive locks off the authoritative player event, independent of
+        // MediaSession/service ownership churn.
+        PlaybackKeepAlive.setPlaying(context, true, "headless-play");
         startPositionUpdates();
     }
     

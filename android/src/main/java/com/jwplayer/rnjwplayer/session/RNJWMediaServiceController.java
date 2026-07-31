@@ -36,6 +36,7 @@ public class RNJWMediaServiceController implements ServiceConnection {
     private final long mediaGeneration;
     private boolean bound;
     private boolean released;
+    private Runnable foregroundReadyCallback;
 
     protected RNJWMediaServiceController(Context context, RNJWNotificationHelper notificationHelper, RNJWMediaSessionHelper mediaSessionHelper, ServiceMediaApi serviceMediaApi, Class<? extends RNJWMediaService> mediaServiceClass, MediaServiceFactory mediaServiceFactory, String ownerType, long mediaGeneration) {
         this.appContext = context.getApplicationContext();
@@ -59,11 +60,29 @@ public class RNJWMediaServiceController implements ServiceConnection {
     }
 
     public void bindService() {
+        bindService(null);
+    }
+
+    /**
+     * Starts and binds the playback service, then runs {@code onForegroundReady} only after
+     * attachOwner() has promoted the service to a typed mediaPlayback foreground service.
+     * Player setup and audio-focus requests must use this callback on Android 15+.
+     */
+    public void bindService(Runnable onForegroundReady) {
+        if (onForegroundReady != null) {
+            foregroundReadyCallback = onForegroundReady;
+        }
+        if (rnjwMediaService != null && bound && !released) {
+            dispatchForegroundReady();
+            return;
+        }
         if (!bound && !released) {
             Class<? extends RNJWMediaService> serviceClass = this.mediaServiceClass;
             if (!RNJWMediaService.ensureStarted(
                     appContext,
                     ownerType + "-owner-" + mediaGeneration)) {
+                JWLog.w(TAG, "FGS_START_FAILED token=" + ownerToken + " type=" + ownerType
+                        + " generation=" + mediaGeneration);
                 return;
             }
             try {
@@ -71,12 +90,25 @@ public class RNJWMediaServiceController implements ServiceConnection {
                         new Intent(appContext, serviceClass),
                         this,
                         Context.BIND_AUTO_CREATE);
-                JWLog.d(TAG, "bindService token=" + ownerToken + " type=" + ownerType
+                JWLog.d(TAG, "BIND_REQUEST token=" + ownerToken + " type=" + ownerType
                         + " generation=" + mediaGeneration + " bound=" + bound);
             } catch (RuntimeException error) {
                 bound = false;
                 JWLog.e(TAG, "bindService failed for token=" + ownerToken, error);
             }
+        }
+    }
+
+    private void dispatchForegroundReady() {
+        Runnable callback = foregroundReadyCallback;
+        foregroundReadyCallback = null;
+        if (callback == null || released) {
+            return;
+        }
+        try {
+            callback.run();
+        } catch (Throwable error) {
+            JWLog.e(TAG, "Foreground-ready callback failed for token=" + ownerToken, error);
         }
     }
 
@@ -94,6 +126,7 @@ public class RNJWMediaServiceController implements ServiceConnection {
 
     public void prepareForTransfer(String reason) {
         released = true;
+        foregroundReadyCallback = null;
         try {
             this.serviceMediaApi.getPlayer().allowBackgroundAudio(false);
         } catch (Throwable ignored) {}
@@ -101,13 +134,14 @@ public class RNJWMediaServiceController implements ServiceConnection {
         boolean handled = service != null
                 ? service.prepareOwnerTransfer(ownerToken, reason)
                 : RNJWMediaService.prepareActiveOwnerTransfer(ownerToken, reason);
-        JWLog.d(TAG, "prepareForTransfer token=" + ownerToken + " handled=" + handled
-                + " reason=" + reason);
+        JWLog.d(TAG, "PREPARE_FOR_TRANSFER token=" + ownerToken + " handled=" + handled
+                + " reason=" + reason + " serviceBound=" + (service != null));
         unbindService();
     }
 
     public void stopAndUnbind(String reason) {
         released = true;
+        foregroundReadyCallback = null;
         try {
             this.serviceMediaApi.getPlayer().allowBackgroundAudio(false);
         } catch (Throwable ignored) {}
@@ -115,8 +149,8 @@ public class RNJWMediaServiceController implements ServiceConnection {
         boolean handled = service != null
                 ? service.stopOwner(ownerToken, reason)
                 : RNJWMediaService.stopActiveOwner(ownerToken, reason);
-        JWLog.d(TAG, "stopAndUnbind token=" + ownerToken + " handled=" + handled
-                + " reason=" + reason);
+        JWLog.d(TAG, "STOP_AND_UNBIND token=" + ownerToken + " handled=" + handled
+                + " reason=" + reason + " serviceBound=" + (service != null));
         unbindService();
     }
 
@@ -134,7 +168,13 @@ public class RNJWMediaServiceController implements ServiceConnection {
                 this.rnjwMediaSessionHelper,
                 this.rnjwNotificationHelper,
                 this.serviceMediaApi);
-        JWLog.d(TAG, "onServiceConnected token=" + ownerToken + " attached=" + attached);
+        JWLog.d(TAG, "OWNER_CONNECTED token=" + ownerToken + " type=" + ownerType
+                + " generation=" + mediaGeneration + " attached=" + attached);
+        if (attached) {
+            dispatchForegroundReady();
+        } else {
+            foregroundReadyCallback = null;
+        }
     }
 
     public void onServiceDisconnected(ComponentName name) {
