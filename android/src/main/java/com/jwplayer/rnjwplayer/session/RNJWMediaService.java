@@ -85,20 +85,30 @@ public class RNJWMediaService extends Service {
         JWLog.d(TAG, "onCreate()");
     }
 
-    private void promoteToForeground(Notification notification) {
+    /**
+     * Promotes to a mediaPlayback foreground service using the id the notification was actually
+     * posted under. The owner's RNJWNotificationHelper can be built with a custom notificationId,
+     * in which case it posts under that id while this service previously always promoted with
+     * DEFAULT_NOTIFICATION_ID. That mismatch leaves the foreground service bound to an id nothing
+     * updates, so the platform can drop the foreground state and the visible notification is not
+     * the one keeping the service alive. Behaviour is unchanged when the default id is used.
+     */
+    private void promoteToForeground(int notificationId, Notification notification) {
         int serviceType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
                 ? MEDIA_PLAYBACK_SERVICE_TYPE
                 : 0;
         ServiceCompat.startForeground(
                 this,
-                RNJWNotificationHelper.DEFAULT_NOTIFICATION_ID,
+                notificationId,
                 notification,
                 serviceType);
         foreground = true;
     }
 
     private void showBootstrapNotification(String reason) {
-        promoteToForeground(RNJWNotificationHelper.createBootstrapNotification(this));
+        promoteToForeground(
+                RNJWNotificationHelper.DEFAULT_NOTIFICATION_ID,
+                RNJWNotificationHelper.createBootstrapNotification(this));
         JWLog.d(TAG, "foreground bootstrap active; reason=" + reason);
     }
 
@@ -148,7 +158,7 @@ public class RNJWMediaService extends Service {
                     this,
                     newMediaSessionHelper.mediaSessionStateProvider,
                     newServiceMediaApi);
-            promoteToForeground(notification);
+            promoteToForeground(newNotificationHelper.notificationId, notification);
             JWLog.d(TAG, "attachOwner token=" + token + " type=" + ownerType
                     + " generation=" + generation + " epoch=" + ownerEpoch);
         }
