@@ -21,6 +21,7 @@ import androidx.core.app.NotificationCompat;
 import com.jwplayer.rnjwplayer.misc.MediaServiceFactory;
 import com.jwplayer.pub.api.background.ServiceMediaApi;
 import com.jwplayer.rnjwplayer.misc.MediaSessionStateProvider;
+import com.jwplayer.rnjwplayer.utils.JWLog;
 import com.longtailvideo.jwplayer.R.drawable;
 
 public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
@@ -93,6 +94,12 @@ public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
         }
         Notification notification = builder.build();
         this.notificationManager.notify(this.notificationId, notification);
+        // Forced to ERROR level deliberately: without it there is no way to tell from a capture
+        // whether the MediaStyle notification was ever posted. The previous capture had zero
+        // RNJWNotificationHelper lines. Only field reads inside the concatenation — no method
+        // calls, which Java would evaluate regardless of the log level.
+        JWLog.e("RNJWNotificationHelper", "notify(id=" + this.notificationId
+                + ", channel=" + this.notificationChannelId + ", mediaStyle=true)");
         return notification;
     }
 
@@ -137,6 +144,15 @@ public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
                 activityIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         }
+        // Forced to ERROR level deliberately. This method does not post; its only caller
+        // (RNJWMediaService.showBootstrapNotification) immediately posts the result under
+        // DEFAULT_NOTIFICATION_ID via startForeground. RNJWMediaService's promoteToForeground log
+        // derives isMediaStyle from the id alone, so it reports isMediaStyle=true for this
+        // deliberately actionless placeholder. This line is what lets the capture tell a real
+        // MediaStyle notification apart from the placeholder on the same id. Field reads and
+        // string literals only — no method calls inside the concatenation.
+        JWLog.e("RNJWNotificationHelper", "createBootstrapNotification(id=" + DEFAULT_NOTIFICATION_ID
+                + ", channel=" + DEFAULT_CHANNEL_ID + ", mediaStyle=false)");
         return builder.build();
         }
 

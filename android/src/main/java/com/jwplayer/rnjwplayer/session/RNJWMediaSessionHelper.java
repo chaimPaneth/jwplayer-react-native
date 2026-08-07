@@ -1860,11 +1860,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             this.jwPlayer.removeListeners(this,
                 new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED});
             (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
+            // Forced to ERROR level deliberately — see updatePlayerState's cancel tag. Field reads
+            // and string literals only; no method calls inside the concatenation.
+            JWLog.e("RNJWNotificationHelper", "cancel(id=" + notificationHelper.notificationId
+                    + ", owner=RNJWMediaSessionHelper.softCleanup, mediaStyle=true"
+                    + ", branch=hasPlayer)");
             this.jwPlayer = null;
         } else {
             // Even if jwPlayer is null, make sure the media notification is hidden
             try {
                 (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
+                JWLog.e("RNJWNotificationHelper", "cancel(id=" + notificationHelper.notificationId
+                        + ", owner=RNJWMediaSessionHelper.softCleanup, mediaStyle=true"
+                        + ", branch=noPlayer)");
             } catch (Exception ignore) {}
         }
     }
@@ -2046,6 +2054,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         } else {
             RNJWNotificationHelper currentNotificationHelper;
             (currentNotificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(currentNotificationHelper.notificationId);
+            // Forced to ERROR level deliberately: this is the prime suspect for the media
+            // notification vanishing, and it must stay visible at MODE=ERROR for the next capture.
+            // The two operands are enum reference compares, not method calls — playerState here is
+            // necessarily ERROR or IDLE, so the pair identifies the trigger exactly. Nothing inside
+            // the concatenation does work, which Java would evaluate regardless of the log level.
+            JWLog.e("RNJWNotificationHelper", "cancel(id=" + currentNotificationHelper.notificationId
+                    + ", owner=RNJWMediaSessionHelper.updatePlayerState, mediaStyle=true"
+                    + ", stateIsError=" + (playerState == PlayerState.ERROR)
+                    + ", stateIsIdle=" + (playerState == PlayerState.IDLE) + ")");
         }
     }
 

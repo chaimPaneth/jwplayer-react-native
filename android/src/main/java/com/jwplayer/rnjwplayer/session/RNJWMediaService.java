@@ -103,6 +103,30 @@ public class RNJWMediaService extends Service {
                 notification,
                 serviceType);
         foreground = true;
+        // Forced to ERROR level deliberately: this call site produced zero lines in the analysed
+        // capture even at MODE=ALL, and it must stay visible at MODE=ERROR for the next capture.
+        // The isMediaStyle expression is a plain int compare — no probe work inside the
+        // concatenation, which Java would evaluate regardless of the log level.
+        JWLog.e(TAG, "promoteToForeground(id=" + notificationId
+                + ", isMediaStyle=" + (notificationId == RNJWNotificationHelper.DEFAULT_NOTIFICATION_ID)
+                + ")");
+        notifyMediaBrowserOfOwnNotification();
+    }
+
+    /**
+     * Tells com.mediabrowser.MediaBrowserService (when present) that JWPlayer now owns the
+     * user-visible media notification, so it can drop its plain cold-start placeholder. Reflection
+     * keeps this module free of a compile-time dependency on the media-browser lib.
+     */
+    private void notifyMediaBrowserOfOwnNotification() {
+        try {
+            Class<?> serviceClass = Class.forName("com.mediabrowser.MediaBrowserService");
+            serviceClass.getMethod("onJwPlayerNotificationPosted").invoke(null);
+        } catch (ClassNotFoundException ignored) {
+            // Media-browser lib not installed — nothing to notify.
+        } catch (Throwable error) {
+            JWLog.w(TAG, "notifyMediaBrowserOfOwnNotification failed: " + error.getMessage());
+        }
     }
 
     private void showBootstrapNotification(String reason) {
@@ -260,7 +284,11 @@ public class RNJWMediaService extends Service {
     }
 
     private void stopForegroundAndSelf(String reason) {
-        JWLog.d(TAG, "stopForegroundAndSelf reason=" + reason);
+        // Forced to ERROR level deliberately: stopForeground(true) below REMOVES notification 2005,
+        // so at MODE=ERROR the MediaStyle notification could otherwise vanish with no log line at
+        // all. Fires at most a few times per session (transfer-timeout, owner detach), so it does
+        // not spam. Message unchanged from the previous JWLog.d form.
+        JWLog.e(TAG, "stopForegroundAndSelf reason=" + reason);
         foreground = false;
         stopForeground(true);
         stopSelf();
