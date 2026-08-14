@@ -137,9 +137,58 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /**
+     * TEMPORARY DIAGNOSTICS -- remove with the other [AAPIP] instrumentation.
+     *
+     * Answers "what does NATIVE think is playing right now", for any owner. Unlike
+     * checkForActiveHeadlessPlayback (background player only, returns nothing when the UI
+     * player owns the session) this works during locked-phone Android Auto skips, which is
+     * where React state silently goes stale.
+     */
+    @ReactMethod
+    public void getCurrentPlaybackIdentity(Promise promise) {
+        try {
+            String[] ids = com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                    .getPlaybackIdentitySnapshot();
+            WritableMap result = Arguments.createMap();
+            result.putString("resolvedMediaId", ids[0]);
+            result.putString("androidAutoSelectedMediaId", ids[1]);
+            result.putString("externalMediaId", ids[2]);
+            result.putString("appProvidedMediaId", ids[3]);
+            result.putDouble("positionMs", com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                    .getLivePositionMsSnapshot());
+            result.putString("state", com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                    .getPlayerStateSnapshot());
+            promise.resolve(result);
+        } catch (Exception e) {
+            promise.reject("PLAYBACK_IDENTITY_FAILED", e);
+        }
+    }
+
     @ReactMethod
     public void loadPlaylist(final int reactTag, final ReadableArray playlistItems) {
         JWLog.d(TAG, "loadPlaylist(reactTag=" + reactTag + ", itemsLength=" + (playlistItems != null ? playlistItems.size() : -1) + ")");
+
+        // Capture the app-provided post-id mediaId from the raw playlist BEFORE JW's
+        // config parser drops it — the same capture RNJWPlayerView.setConfig performs for
+        // the declarative `playlist` prop. Without it, an app that advances tracks through
+        // this imperative path (e.g. background auto-advance while the Activity is paused)
+        // leaves the static appProvidedMediaId pointing at the PREVIOUS track, so a later
+        // MediaSession skip/completion resolves against the wrong post. Read synchronously:
+        // the ReadableArray is only guaranteed valid for the duration of this bridge call,
+        // not inside the posted runnable below.
+        if (playlistItems != null && playlistItems.size() > 0) {
+            try {
+                ReadableMap firstItem = playlistItems.getMap(0);
+                if (firstItem != null && firstItem.hasKey("mediaId")) {
+                    com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                            .setAppProvidedMediaId(firstItem.getString("mediaId"));
+                }
+            } catch (Exception e) {
+                JWLog.w(TAG, "loadPlaylist: could not capture app-provided mediaId: " + e.getMessage());
+            }
+        }
+
         new Handler(Looper.getMainLooper()).post(() -> {
             RNJWPlayerView playerView = getPlayerView(reactTag);
             if (playerView != null && playerView.mPlayerView != null) {

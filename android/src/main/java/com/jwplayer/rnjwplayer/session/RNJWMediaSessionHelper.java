@@ -170,6 +170,55 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static String appProvidedMediaId = null;
 
     /**
+     * TEMPORARY DIAGNOSTICS -- remove with the other [AAPIP] logging once the Android Auto
+     * desync work is confirmed.
+     *
+     * Reports the ids native currently believes are playing, regardless of WHICH player owns
+     * playback. `checkForActiveHeadlessPlayback` cannot answer this: it only describes the
+     * background player, and returns "no active headless playback" whenever the UI player owns
+     * the session -- which is exactly the case during locked-phone Android Auto skips, so JS
+     * had no way to notice its React state had gone stale.
+     *
+     * Index 0 = resolved app-post id (the one JS can map to a post), 1 = androidAutoSelectedMediaId,
+     * 2 = externalMediaId, 3 = appProvidedMediaId. Any element may be null.
+     */
+    public static String[] getPlaybackIdentitySnapshot() {
+        String resolved = null;
+        if (isAppPostMediaId(androidAutoSelectedMediaId)) {
+            resolved = androidAutoSelectedMediaId.trim();
+        } else if (isAppPostMediaId(externalMediaId)) {
+            resolved = externalMediaId.trim();
+        } else if (isAppPostMediaId(appProvidedMediaId)) {
+            resolved = appProvidedMediaId.trim();
+        }
+        return new String[] {
+            resolved, androidAutoSelectedMediaId, externalMediaId, appProvidedMediaId
+        };
+    }
+
+    /** TEMPORARY DIAGNOSTICS -- live position in ms of whichever player is active, or -1. */
+    public static long getLivePositionMsSnapshot() {
+        RNJWMediaSessionHelper helper = activeInstance;
+        if (helper == null || helper.jwPlayer == null) return -1L;
+        try {
+            return (long) (helper.jwPlayer.getPosition() * 1000.0);
+        } catch (Exception e) {
+            return -1L;
+        }
+    }
+
+    /** TEMPORARY DIAGNOSTICS -- player state of whichever player is active, or "none". */
+    public static String getPlayerStateSnapshot() {
+        RNJWMediaSessionHelper helper = activeInstance;
+        if (helper == null || helper.jwPlayer == null) return "none";
+        try {
+            return String.valueOf(helper.jwPlayer.getState());
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    /**
      * Stores the app-provided post-id mediaId (numeric or "post-<n>") taken from the
      * RN playlist prop. Called from RNJWPlayerView.setConfig before the JW config
      * parser strips it. Non-app-post ids (e.g. JW content UUIDs) are ignored.
@@ -177,7 +226,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public static void setAppProvidedMediaId(String mediaId) {
         if (isAppPostMediaId(mediaId)) {
             appProvidedMediaId = mediaId.trim();
-            JWLog.d(TAG, "setAppProvidedMediaId: appProvidedMediaId=" + appProvidedMediaId);
+            // The app just told us which post it is loading, which makes this the freshest
+            // authoritative id we have — so retire a now-stale androidAutoSelectedMediaId.
+            // That field is only written on an explicit Android Auto selection or when the
+            // live JW item happens to expose an app-post id; for JW-hosted media the live id
+            // is a content UUID, so an app-driven track change (notably background
+            // auto-advance) used to leave it pointing at the PREVIOUS post. Because both
+            // resolvers check it FIRST, a skip then navigated from the wrong post — landing
+            // back on the track already playing and restarting it at 0:00 — and completion
+            // could advance to the just-finished track in a loop. An explicit Android Auto
+            // selection still wins: finishMediaItemSelection/handlePlayFromMediaId write this
+            // field after the fact.
+            if (!appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
+                JWLog.d(TAG, "setAppProvidedMediaId: retiring stale androidAutoSelectedMediaId="
+                        + androidAutoSelectedMediaId + " -> " + appProvidedMediaId);
+                androidAutoSelectedMediaId = appProvidedMediaId;
+            }
+            JWLog.d(TAG, "setAppProvidedMediaId: appProvidedMediaId=" + appProvidedMediaId
+                    + ", androidAutoSelectedMediaId=" + androidAutoSelectedMediaId);
         }
     }
 
@@ -218,6 +284,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (isAppPostMediaId(externalMediaId)) {
             androidAutoSelectedMediaId = externalMediaId.trim();
             return androidAutoSelectedMediaId;
+        }
+
+        // Same fallback resolveMediaIdForCompletion already has, and for the same
+        // reason: when playback was started from the app (not picked in Android Auto)
+        // the live id is a JW content UUID, so both checks above miss and we would hand
+        // the UUID to JS. The JS skip handler only accepts an app post id ("123" /
+        // "post-<n>"), rejects the UUID, and does nothing — while the native fallback
+        // below still runs and restarts the current item at 0:00, because suppression
+        // also requires an app-post id. Falling back to the id the app supplied on the
+        // playlist item fixes both halves: JS can resolve the post and advance, and the
+        // native fallback is correctly suppressed in favour of the RN-owned queue.
+        if (isAppPostMediaId(appProvidedMediaId)) {
+            return appProvidedMediaId.trim();
         }
 
         return androidAutoSelectedMediaId != null ? androidAutoSelectedMediaId : externalMediaId;
@@ -1877,6 +1956,33 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
     }
 
+    /**
+     * Resume position for a media selection, in ms, or -1 when genuinely unknown.
+     *
+     * Prefers the "timepoint" carried in the selection's extras, then falls back to the position
+     * already stored on the device for that media id. The fallback matters because an Android Auto
+     * skip hands over a post from the series-navigation query, which returns a duration but NO
+     * stored position (measured: tp=undefined on every skip dispatch while dur was populated).
+     * With no resume target, hasPendingAndroidAutoResume stays false in onPlaylistItem and the
+     * track starts at 0:00 — the "always 0:00 when skipping from Android Auto while the app is
+     * backgrounded or headless" report. MediaItemsResumeProvider already holds the position for the
+     * browse-tree item and onPlaylistItem already trusts it, so this arms the existing resume
+     * machinery for every selection path, with no network call added to the skip.
+     */
+    private static long resolveSelectionResumeMs(String mediaId, Bundle extras) {
+        long resumeMs = extractResumePosition(extras);
+        if (resumeMs >= 0 || !isAppPostMediaId(mediaId)) {
+            return resumeMs;
+        }
+        long providerResumeMs = queryResumeViaReflection(mediaId);
+        if (providerResumeMs >= 0) {
+            JWLog.d(TAG, "resolveSelectionResumeMs: extras carried no timepoint; using resume"
+                    + " provider position " + providerResumeMs + "ms for mediaId=" + mediaId);
+            return providerResumeMs;
+        }
+        return resumeMs;
+    }
+
     private static long extractResumePosition(Bundle extras) {
         JWLog.d(TAG, "extractResumePosition(extras=" + JWLog.bundleInfo(extras) + ")");
         if (extras == null) return -1;
@@ -2773,7 +2879,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         });
     }
 
-    private long queryResumeViaReflection(String mediaId) {
+    private static long queryResumeViaReflection(String mediaId) {
         JWLog.d(TAG, "queryResumeViaReflection(mediaId=" + mediaId + ")");
         if (mediaId == null || mediaId.isEmpty()) {
             JWLog.d(TAG, "queryResumeViaReflection: mediaId is null or empty, returning -1");
@@ -3015,6 +3121,26 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 java.lang.reflect.Method isSkipPendingMethod = mediaBrowserServiceClass.getMethod("isSkipPending", String.class);
                 Boolean isPending = (Boolean) isSkipPendingMethod.invoke(null, skipToken);
                 if (Boolean.TRUE.equals(isPending)) {
+                    // A single-item playlist has nowhere to skip to: JW's internal skip reloads
+                    // the CURRENT item from the start, which is destructive rather than a no-op --
+                    // the listener loses their place and the session keeps publishing PLAYING at
+                    // position 0, which presents as a progress bar moving with no audio. The JS
+                    // queue owner is the only one that can navigate here, so if it did not ack,
+                    // do nothing instead of restarting the track.
+                    int playlistSize = -1;
+                    try {
+                        if (jwPlayer != null && jwPlayer.getPlaylist() != null) {
+                            playlistSize = jwPlayer.getPlaylist().size();
+                        }
+                    } catch (Exception sizeEx) {
+                        JWLog.w(TAG, "skip-fallback: could not read playlist size: " + sizeEx.getMessage());
+                    }
+                    if (playlistSize >= 0 && playlistSize <= 1) {
+                        JWLog.w(TAG, "skip-fallback suppressed: single-item RN-owned queue"
+                                + " (playlistSize=" + playlistSize + ") skipToken=" + skipToken
+                                + " command=" + direction);
+                        return;
+                    }
                     JWLog.w(TAG, "skip-fallback firing: RN did not ack skipToken=" + skipToken + " command=" + direction);
                     if (serviceMediaApi != null) {
                         if ("next".equals(direction)) {
@@ -3362,7 +3488,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             String iconFromExtras = getImageFromExtras(extras);
             String icon = iconFromExtras != null ? iconFromExtras : "";
 
-            pendingSeekMs = extractResumePosition(extras);
+            pendingSeekMs = resolveSelectionResumeMs(mediaId, extras);
             pendingSeekApplied = false;
 
             externalMediaId = mediaId;
@@ -3405,7 +3531,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         lastSelectionMediaId = mediaId;
         lastSelectionAtMs = nowMs;
 
-        pendingSeekMs = extractResumePosition(extras);
+        pendingSeekMs = resolveSelectionResumeMs(mediaId, extras);
         pendingSeekApplied = false;
         autoHandoffSeekAttempts = 0; // Reset counter for new handoff
         

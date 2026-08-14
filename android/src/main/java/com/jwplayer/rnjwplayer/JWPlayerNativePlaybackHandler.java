@@ -133,6 +133,18 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private boolean backgroundRecoveryInProgress = false;
     private int backgroundRecoveryReloadAttempts = 0;
     private long lastKnownRealPlaybackPositionMs = 0L;
+    /**
+     * A background player that has been retired by cleanupBackgroundPlayer while its
+     * asynchronous setup() may still be in flight. Held only so the first event it emits can
+     * stop it — see retireLateBackgroundPlayer(). Never used for playback.
+     */
+    private JWPlayer retiredBackgroundPlayer = null;
+    /**
+     * The resume position the current background player was created with, in ms. Used as the
+     * handoff snapshot's position while getPosition() still reads 0 (pre-start / seek not yet
+     * committed). Reset per createBackgroundPlayer call.
+     */
+    private long backgroundStartPositionMs = 0L;
     private final ExecutorService artworkExecutor = Executors.newSingleThreadExecutor();
     private static final AtomicLong MEDIA_GENERATION = new AtomicLong(0L);
     private long currentMediaGeneration = 0L;
@@ -716,6 +728,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             if (startTime > 0) {
                 playlistBuilder.startTime(startTime);
             }
+            // Remember the position this player was BUILT to resume from. getPosition() reads 0
+            // until the ExoPlayer exists and the seek commits, so a handoff snapshot taken in that
+            // window would tell the app to open at 0:00 and discard the user's place in the track.
+            // See getComprehensivePlaybackState().
+            backgroundStartPositionMs = Math.max(0L, (long) startTime * 1000L);
             
             // Add image if available
             if (imageUrl != null) {
@@ -1290,6 +1307,17 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         if (observedState == PlayerState.PLAYING || observedState == PlayerState.BUFFERING) {
             return true;
         }
+        // Pre-start window: a background player that has never played yet reports IDLE, and the
+        // rule below would translate that into desiredState="paused". That is wrong for the case
+        // this snapshot exists to serve -- the user just picked something in Android Auto and the
+        // app is opening to adopt it -- because player.setup() builds its ExoPlayer on an internal
+        // thread and the snapshot is taken before playback can possibly have begun. Handing back
+        // "paused" makes the adopting UI mount with autostart=false, so the user has to press play
+        // a SECOND time in the car. Autostart plus "never started" is the same intent-to-play
+        // reasoning already used for network-recovery resumes further down this class.
+        if (autoStartEnabled && !hasStartedPlayback) {
+            return true;
+        }
         if (observedState != null) {
             return false;
         }
@@ -1343,6 +1371,17 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 // Add current position (critical for seamless handoff)
                 try {
                     double currentPosition = backgroundPlayer.getPosition();
+                    // Fall back to the position this player was built to resume from while the live
+                    // playhead still reads 0: setup() creates the ExoPlayer asynchronously, so a
+                    // snapshot taken before it exists (the Android-Auto-selection handoff, which is
+                    // requested within ~2ms of creation) would otherwise report 0 and the adopting
+                    // app would restart the track from the beginning.
+                    if (currentPosition <= 0.0 && !hasStartedPlayback && backgroundStartPositionMs > 0L) {
+                        currentPosition = backgroundStartPositionMs / 1000.0;
+                        JWLog.d(TAG, "📱 JAVA: handoff position not yet live; using intended resume "
+                                + currentPosition + "s (backgroundStartPositionMs="
+                                + backgroundStartPositionMs + ")");
+                    }
                     result.putDouble("currentPosition", currentPosition);
                     JWLog.d(TAG, "📱 JAVA: Current headless position: " + currentPosition + "s");
                 } catch (Exception e) {
@@ -1608,8 +1647,17 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     mediaServiceController.stopAndUnbind("headless-player-stop");
                 }
                 mediaServiceController = null;
-                // The controller has already detached/cleaned this helper through the service.
-                mediaSessionHelper = null;
+                // Deliberately NOT clearing mediaSessionHelper here. The old code assumed the
+                // controller had already detached it through the service, but that only happens
+                // when RNJWMediaService.prepareOwnerTransfer accepts the token — and it rejects
+                // it ("Ignoring stale transfer token=… current=null") whenever the owner has not
+                // attached yet, which is the normal case here: bindService() is asynchronous and
+                // a UI player replacing us arrives within ~80ms, long before onServiceConnected.
+                // Nulling the reference then skipped the explicit detach block below, leaving the
+                // helper subscribed to the player: it went on to receive onPlaylistItem, request
+                // audio focus and TRIGGER PLAY on a player nobody owned any more. Keep the
+                // reference so that block always runs; detachForTransfer() is what removes its
+                // listeners and releases its focus.
             }
             
             // Stop position updates
@@ -1631,9 +1679,19 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     JWLog.w(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Error stopping player: " + e.getMessage());
                 }
                 
-                // Remove event listeners
-                backgroundPlayer.removeListeners(this);
-                JWLog.d(TAG, "🎵 JWPlayerNativePlaybackHandler: 🔧 Event listeners removed");
+                // The stop() above is NOT reliable on its own: createBackgroundPlayer calls
+                // player.setup(config), which builds the ExoPlayer asynchronously on a JWPlayer
+                // internal thread. When a UI player replaces us within the same main-thread frame
+                // (Android Auto selection -> app opens its own player, ~80ms), stop() lands before
+                // that ExoPlayer exists, so it does nothing — and the player then STARTS after
+                // being retired, with every reference to it already nulled. That is the "ghost"
+                // stream: audible, uncontrollable, and only killed by force-stopping the app.
+                //
+                // So keep this handler subscribed and remember the instance. The first event it
+                // emits after retirement (see onReady / onPlay) means its setup finally completed,
+                // and retireLateBackgroundPlayer() stops and unsubscribes it then. Event-driven on
+                // purpose: no polling, no timers.
+                retiredBackgroundPlayer = backgroundPlayer;
                 backgroundPlayer = null;
             }
             
@@ -1822,9 +1880,56 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         }
     }
     
+    /**
+     * Stops a background player that was retired while its setup() was still running.
+     *
+     * cleanupBackgroundPlayer cannot rely on stop(): setup() builds the ExoPlayer on a JWPlayer
+     * internal thread, so a player retired within ~80ms of creation (Android Auto selection
+     * followed by the app opening its own player) ignores that stop and begins playing after the
+     * fact, unreachable and audible until the process dies. This runs on the first event such a
+     * player emits — proof that its setup completed — and shuts it down for good.
+     *
+     * Safe to call from any player event: it acts only when a retired instance exists, and never
+     * touches the live backgroundPlayer.
+     */
+    private boolean retireLateBackgroundPlayer(String event) {
+        JWPlayer retired = retiredBackgroundPlayer;
+        if (retired == null) return false;
+        retiredBackgroundPlayer = null;
+
+        JWLog.w(TAG, "📱 JAVA: retire-late-background-player event=" + event
+                + " state=" + safePlayerState(retired));
+        try {
+            retired.stop();
+        } catch (Exception e) {
+            JWLog.w(TAG, "📱 JAVA: retire-late-background-player stop failed: " + e.getMessage());
+        }
+        try {
+            retired.removeListeners(this);
+        } catch (Exception e) {
+            JWLog.w(TAG, "📱 JAVA: retire-late-background-player removeListeners failed: " + e.getMessage());
+        }
+        // The retired player held audio focus for a stream nobody can control any more.
+        releaseAudioFocus();
+        return true;
+    }
+
+    private String safePlayerState(JWPlayer player) {
+        try {
+            return String.valueOf(player.getState());
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
     // JWPlayer Event Listeners - Enhanced for actual background playback
     @Override
     public void onReady(ReadyEvent readyEvent) {
+        // A retired player reaching ready means its deferred setup just finished; stop it before
+        // it can autostart. Intentionally does not return early: when a NEW background player is
+        // the one reporting ready, its own handling below must still run.
+        retireLateBackgroundPlayer("onReady");
+
         JWLog.d(TAG, "📱 JAVA: 🎵 onReady event - Background player is ready for playback");
         JWLog.d(TAG, "📱 JAVA: 🎵 onReady - Thread: " + Thread.currentThread().getName());
         JWLog.d(TAG, "📱 JAVA: 🎵 onReady - Timestamp: " + System.currentTimeMillis());
@@ -1838,6 +1943,14 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     
     @Override
     public void onPlay(PlayEvent playEvent) {
+        // Backstop for the retirement race in case a retired player starts without us having seen
+        // its onReady (see retireLateBackgroundPlayer). If that retirement is what this event came
+        // from — no live background player exists — stop here: the state below describes real
+        // background playback and must not be set for a player we just shut down.
+        if (retireLateBackgroundPlayer("onPlay") && backgroundPlayer == null) {
+            return;
+        }
+
         JWLog.d(TAG, "📱 JAVA: ✅ onPlay event - Background playback started successfully!");
 
         if ((!hasStartedPlayback || networkStoppedForRecovery) && shouldBlockPlayForNetwork("onPlay")) {
