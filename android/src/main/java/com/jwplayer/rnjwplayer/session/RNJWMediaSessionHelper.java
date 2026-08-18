@@ -225,7 +225,17 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      */
     public static void setAppProvidedMediaId(String mediaId) {
         if (isAppPostMediaId(mediaId)) {
-            appProvidedMediaId = mediaId.trim();
+            String incoming = mediaId.trim();
+            // Only an actual app-driven track CHANGE may retire androidAutoSelectedMediaId.
+            // setConfig re-runs whenever the player view is rebuilt — notably on returning
+            // from PIP — and then re-asserts the SAME post the app already held. Retiring on
+            // such a no-op re-assert clobbered a newer Android Auto selection made while the
+            // app was backgrounded (locked phone + AA skip), so the app snapped back to the
+            // pre-PIP track. Comparing against the previous appProvidedMediaId distinguishes
+            // the two: a real app-driven change (background auto-advance, the case this
+            // retire exists for) moves the id, a rebuild re-assert does not.
+            boolean appTrackChanged = !incoming.equals(appProvidedMediaId);
+            appProvidedMediaId = incoming;
             // The app just told us which post it is loading, which makes this the freshest
             // authoritative id we have — so retire a now-stale androidAutoSelectedMediaId.
             // That field is only written on an explicit Android Auto selection or when the
@@ -237,13 +247,19 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // could advance to the just-finished track in a loop. An explicit Android Auto
             // selection still wins: finishMediaItemSelection/handlePlayFromMediaId write this
             // field after the fact.
-            if (!appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
+            if (appTrackChanged && !appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
                 JWLog.d(TAG, "setAppProvidedMediaId: retiring stale androidAutoSelectedMediaId="
                         + androidAutoSelectedMediaId + " -> " + appProvidedMediaId);
                 androidAutoSelectedMediaId = appProvidedMediaId;
+            } else if (!appTrackChanged
+                    && !appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
+                JWLog.d(TAG, "setAppProvidedMediaId: KEEPING newer androidAutoSelectedMediaId="
+                        + androidAutoSelectedMediaId + " (app re-asserted unchanged "
+                        + appProvidedMediaId + ", likely a player rebuild)");
             }
             JWLog.d(TAG, "setAppProvidedMediaId: appProvidedMediaId=" + appProvidedMediaId
-                    + ", androidAutoSelectedMediaId=" + androidAutoSelectedMediaId);
+                    + ", androidAutoSelectedMediaId=" + androidAutoSelectedMediaId
+                    + ", appTrackChanged=" + appTrackChanged);
         }
     }
 
