@@ -1,5 +1,7 @@
 package com.jwplayer.rnjwplayer;
 
+import android.util.Log;
+
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableMap;
@@ -57,7 +59,14 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
       JWLog.w(TAG, "setControls skipped: view or mPlayerView is null");
       return;
     }
-    view.mPlayerView.getPlayer().setControls(controls);
+    // Add null check for getPlayer() to prevent crashes
+    try {
+      if (view.mPlayerView.getPlayer() != null) {
+        view.mPlayerView.getPlayer().setControls(controls);
+      }
+    } catch (Exception e) {
+      Log.w(TAG, "Error setting controls: " + e.getMessage());
+    }
   }
 
   /**
@@ -72,8 +81,15 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
     if (view == null || view.mPlayerView == null) {
       return;
     }
-    view.mPlayerView.getPlayer().stop();
-    view.setConfig(config);
+    // Add null check for getPlayer() to prevent crashes
+    try {
+      if (view.mPlayerView.getPlayer() != null) {
+        view.mPlayerView.getPlayer().stop();
+      }
+      view.setConfig(config);
+    } catch (Exception e) {
+      Log.w(TAG, "Error recreating player: " + e.getMessage());
+    }
   }
 
   public Map getExportedCustomBubblingEventTypeConstants() {
@@ -144,10 +160,18 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
                     MapBuilder.of(
                             "phasedRegistrationNames",
                             MapBuilder.of("bubbled", "onPlaylistComplete")))
+            .put("topPlaylist",
+                    MapBuilder.of(
+                            "phasedRegistrationNames",
+                            MapBuilder.of("bubbled", "onPlaylist")))
             .put("topPlaylistItem",
                     MapBuilder.of(
                             "phasedRegistrationNames",
                             MapBuilder.of("bubbled", "onPlaylistItem")))
+            .put("topPlaylistItemMetadataChanged",
+                    MapBuilder.of(
+                            "phasedRegistrationNames",
+                            MapBuilder.of("bubbled", "onPlaylistItemMetadataChanged")))
             .put("topSeek",
                     MapBuilder.of(
                             "phasedRegistrationNames",

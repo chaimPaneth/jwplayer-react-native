@@ -46,6 +46,32 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
         self.player.contentKeyDataSource = nil
     }
 
+    // Forwards JWPlayerKit's modal presentations (quality / audio / captions
+    // menus, related items, etc.) up to the top-most view controller in the
+    // key window so they draw over host chrome like UITabBarController. See
+    // GitHub issue #93. Falls back to super.present when self is already the
+    // topmost (e.g. when JW fullscreen is the topmost presented VC).
+    override func present(_ viewControllerToPresent: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
+        assert(Thread.isMainThread, "RNJWPlayerViewController.present must be called on the main thread")
+        if let top = Self.topMostViewController(), top !== self {
+            top.present(viewControllerToPresent, animated: flag, completion: completion)
+        } else {
+            super.present(viewControllerToPresent, animated: flag, completion: completion)
+        }
+    }
+
+    private static func topMostViewController() -> UIViewController? {
+        let keyWindow = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first(where: { $0.isKeyWindow })
+        var top = keyWindow?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+
     // MARK: - JWPlayer Delegate
 
     override func jwplayerIsReady(_ player:JWPlayer) {
@@ -61,7 +87,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
     override func jwplayer(_ player:JWPlayer, failedWithError code:UInt, message:String) {
         super.jwplayer(player, failedWithError:code, message:message)
-        parentView?.onPlayerError?(["error": message, "errorCode": code])
+        parentView?.onPlayerError?(["error": message, "errorCode": code, "description": message])
         parentView?.playerFailed = true
     }
 
@@ -73,12 +99,12 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
     override func jwplayer(_ player:JWPlayer, encounteredWarning code:UInt, message:String) {
         super.jwplayer(player, encounteredWarning:code, message:message)
-        parentView?.onPlayerWarning?(["warning": message])
+        parentView?.onPlayerWarning?(["warning": message, "code": code])
     }
 
     override func jwplayer(_ player:JWPlayer, encounteredAdError code:UInt, message:String) {
         super.jwplayer(player, encounteredAdError:code, message:message)
-        parentView?.onPlayerAdError?(["error": message])
+        parentView?.onPlayerAdError?(["error": message, "code": code])
     }
 
 
@@ -517,12 +543,12 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
     override func jwplayer(_ player:JWPlayer, seekedFrom oldPosition:TimeInterval, to newPosition:TimeInterval) {
         super.jwplayer(player, seekedFrom:oldPosition, to:newPosition)
-        parentView?.onSeek?(["from": oldPosition, "to": newPosition])
+        parentView?.onSeek?(["position": oldPosition, "offset": newPosition])
     }
 
     override func jwplayerHasSeeked(_ player:JWPlayer) {
         super.jwplayerHasSeeked(player)
-        parentView?.onSeeked?([:])
+        parentView?.onSeeked?(["position": player.time.position])
     }
 
     override func jwplayer(_ player:JWPlayer, playbackRateChangedTo rate:Double, at time:TimeInterval) {
@@ -545,7 +571,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 #if USE_GOOGLE_CAST
     override func castController(_ controller:JWCastController, castingBeganWithDevice device:JWCastingDevice) {
         super.castController(controller, castingBeganWithDevice:device)
-        parentView?.onCasting?([:])
+        parentView?.onCasting?(["device": device.name, "active": true, "available": true])
     }
 
     override func castController(_ controller:JWCastController, castingEndedWithError error: Error?) {

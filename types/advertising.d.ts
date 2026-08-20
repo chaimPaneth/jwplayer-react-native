@@ -385,6 +385,26 @@ export interface VmapAdvertisingConfig extends BaseAdvertisingConfig {
    * Alternative way to specify VMAP URL (as string)
    */
   schedule?: string;
+
+  /**
+   * Lift a VMAP-level `<vmap:Extensions>` block down into each `<vmap:AdBreak>`
+   * so per-break consumers (e.g. skippable extensions) see it.
+   *
+   * Only affects inline VMAP XML supplied via `tag`/`schedule`; a remote VMAP
+   * URL is never modified. Defaults to `false`.
+   *
+   * Path support differs by platform because of how each SDK models the config:
+   * - **iOS** — works with both the modern and legacy config paths (the flag lives
+   *   on the single `JWAdsAdvertisingConfigBuilder` that backs VAST and VMAP).
+   * - **Android** — works with the modern config path only. The Android SDK exposes
+   *   the setter solely on `VmapAdvertisingConfig.Builder`, which the legacy
+   *   (`forceLegacyConfig`) path never constructs; use the default modern config to
+   *   set this flag on Android.
+   *
+   * @default false
+   * @platforms iOS, Android
+   */
+  liftsVMAPLevelExtensions?: boolean;
 }
 
 /**
