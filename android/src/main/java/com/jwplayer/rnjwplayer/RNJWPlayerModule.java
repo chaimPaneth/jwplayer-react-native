@@ -17,7 +17,6 @@ import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.uimanager.IllegalViewOperationException;
 import com.facebook.react.uimanager.UIManagerHelper;
-import com.facebook.react.uimanager.UIManagerModule;
 import com.facebook.react.uimanager.common.UIManagerType;
 import com.jwplayer.pub.api.JWPlayer;
 import com.jwplayer.pub.api.PlayerState;

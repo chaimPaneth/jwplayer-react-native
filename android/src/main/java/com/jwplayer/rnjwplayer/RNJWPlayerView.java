@@ -302,9 +302,8 @@ public class RNJWPlayerView extends RelativeLayout implements
         if (!backgroundAudioEnabled || mPlayer == null || mActivity == null) {
             return;
         }
-        doUnbindService();
-        mMediaServiceController = new RNJWMediaServiceController.Builder((AppCompatActivity) mActivity, mPlayer)
-                .build();
+        releaseMediaService(false, "metadata-refresh");
+        setupMediaSessionHelper();
         doBindService();
     }
 
