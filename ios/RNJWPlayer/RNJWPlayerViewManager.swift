@@ -234,13 +234,34 @@ class RNJWPlayerViewManager: RCTViewManager {
             }
             
             if let completion = view.onBeforeNextPlaylistItemCompletion {
+                guard let itemDict = playlistItem as? [String: Any] else {
+                    print("Error: resolveNextPlaylistItem received invalid playlist item data")
+                    completion(nil)
+                    view.onBeforeNextPlaylistItemCompletion = nil
+                    return
+                }
                 do {
-                    let item = try view.getPlayerItem(item: playlistItem as! [String: Any])
-                    completion(item)
+                    let item = try view.getPlayerItem(item: itemDict)
+                    // Ensure completion runs on the main thread — the SDK performs
+                    // UI updates (view hierarchy changes) when loading the next item.
+                    DispatchQueue.main.async {
+                        completion(item)
+                        view.onBeforeNextPlaylistItemCompletion = nil
+
+                        // Apply any config change that was deferred while the callback was pending
+                        if let pendingConfig = view.pendingConfigAfterPlaylistItemCallback {
+                            view.pendingConfigAfterPlaylistItemCallback = nil
+                            view.setConfig(pendingConfig)
+                        }
+                    }
                 } catch {
                     print("Error creating JWPlayerItem: \(error)")
+                    view.onBeforeNextPlaylistItemCompletion = nil
+                    if let pendingConfig = view.pendingConfigAfterPlaylistItemCallback {
+                        view.pendingConfigAfterPlaylistItemCallback = nil
+                        view.setConfig(pendingConfig)
+                    }
                 }
-                view.onBeforeNextPlaylistItemCompletion = nil
             } else {
                 print("Warning: resolveNextPlaylistItem called but no completion handler was set OR completion handler was already called")
             }
@@ -600,5 +621,42 @@ class RNJWPlayerViewManager: RCTViewManager {
             }
         }
     }
-    
+
+    // The `refreshNotification` parameter is part of the JS API for parity with an
+    // Android-side workaround. On iOS JWPlayerKit already refreshes MPNowPlayingInfoCenter /
+    // the Control Center via LockScreenControlsHandler when updateItemMetadata is called,
+    // so this flag is accepted and ignored here.
+    @objc func setPlaylistItemMetadata(_ reactTag: NSNumber, _ title: String?, _ description: String?, _ image: String?, _ refreshNotification: Bool) {
+        DispatchQueue.main.async {
+            guard let view = self.getPlayerView(reactTag: reactTag) else {
+                print("Invalid view returned from registry, expecting RNJWPlayerView")
+                return
+            }
+
+            let posterURL = image.flatMap { URL(string: $0) }
+            var updatedItem: JWPlayerItem?
+
+            if let playerView = view.playerView {
+                playerView.player.updateItemMetadata(title: title, description: description, posterImage: posterURL)
+                updatedItem = playerView.player.currentItem
+            } else if let playerViewController = view.playerViewController {
+                playerViewController.player.updateItemMetadata(title: title, description: description, posterImage: posterURL)
+                updatedItem = playerViewController.player.currentItem
+            } else {
+                return
+            }
+
+            guard let item = updatedItem else { return }
+            do {
+                let data = try JSONSerialization.data(withJSONObject: item.toJSONObject(), options: .prettyPrinted)
+                view.onPlaylistItemMetadataChanged?([
+                    "playlistItem": String(data: data, encoding: .utf8) as Any,
+                    "index": view.currentPlayingIndex
+                ])
+            } catch {
+                print("Error serializing updated playlist item: \(error)")
+            }
+        }
+    }
+
 }

@@ -3,6 +3,22 @@
 .DS_Store
 .history
 
+# AI tools and configs
+CLAUDE.md
+.claude/
+.cursorrules
+.cursor/
+.github/copilot-instructions.md
+.aider*
+.continue/
+.codeium/
+.tabnine/
+.sourcery.yaml
+.cody/
+.amazonq/
+.copilot/
+.windsurf/
+
 # Xcode
 #
 build/
@@ -24,6 +40,7 @@ DerivedData
 project.xcworkspace
 ios/Pods
 ios/Podfile.lock
+ios/frameworks/
 
 
 # Android/IJ
@@ -49,4 +66,9 @@ yarn-error.log
 buck-out/
 \.buckd/
 android/app/libs
+android/bin/
+android/libs/
 android/keystores/debug.keystore
+
+# Generated build info
+Example/app/buildInfo.json

@@ -484,7 +484,7 @@ declare module "@jwplayer/jwplayer-react-native" {
   interface PlayerErrorProps {
     error?: string;
     errorCode?: number;
-    description?: string; // Android Only
+    description?: string;
   }
   interface TimeEventProps {
     position: number;
@@ -500,7 +500,8 @@ declare module "@jwplayer/jwplayer-react-native" {
     loadTime: number;
   }
   interface PlaylistItemEventProps {
-    playlistItem: PlaylistItem
+    playlistItem: PlaylistItem;
+    index?: number;
   }
   interface PlayerErrorEventProps {
     code: string;
@@ -520,11 +521,66 @@ declare module "@jwplayer/jwplayer-react-native" {
   interface CaptionsChangedEventProps {
     index?: number;
   }
-  interface CaptionsListEventProps {
-    index: number;
+  interface CaptionTrack {
+    /** @platform android */
     file?: string;
     label: string;
-    default: string;
+    default: boolean;
+  }
+  interface CaptionsListEventProps {
+    index: number;
+    tracks?: CaptionTrack[];
+    /** @deprecated Use tracks array instead */
+    file?: string;
+    /** @deprecated Use tracks array instead */
+    label?: string;
+    /** @deprecated Use tracks array instead */
+    default?: boolean;
+  }
+  interface CastingEventProps {
+    device?: string;
+    active?: boolean;
+    available?: boolean;
+  }
+  interface CastingDeviceEventProps {
+    device?: string;
+  }
+  interface CastingErrorEventProps {
+    error?: string;
+  }
+  interface CastingDevice {
+    name: string;
+    identifier: string;
+  }
+  interface CastingDevicesAvailableEventProps {
+    /**
+     * JSON-encoded `CastingDevice[]`. Parse with `JSON.parse()` before use.
+     * @platform ios
+     */
+    devices?: string;
+  }
+  interface VisibleEventProps {
+    visible: boolean;
+  }
+  interface ScreenTappedEventProps {
+    x: number;
+    y: number;
+  }
+  interface UpdateBufferEventProps {
+    percent: number;
+    position: number;
+  }
+  interface PlayerSize {
+    width: number;
+    height: number;
+  }
+  interface PlayerSizeChangeEventProps {
+    /**
+     * JSON-encoded `{ oldSize: PlayerSize; newSize: PlayerSize }`.
+     * Parse with `JSON.parse()` before use.
+     * @platform ios
+     */
+    sizes?: string;
   }
   type NativeError = (event: BaseEvent<PlayerErrorEventProps> | BaseEvent<PlayerSetupErrorProps> | BaseEvent<PlayerErrorProps>) => void;
   type NativeWarning = (event: BaseEvent<PlayerWarningEventProps>) => void;
@@ -560,9 +616,39 @@ declare module "@jwplayer/jwplayer-react-native" {
     onControlBarVisible?: (event: BaseEvent<ControlBarVisibleEventProps>) => void;
     onPlaylistComplete?: () => void;
     onPlaylistItem?: (event: BaseEvent<PlaylistItemEventProps>) => void;
+    onPlaylistItemMetadataChanged?: (event: BaseEvent<PlaylistItemEventProps>) => void;
     onCaptionsChanged?: (event: BaseEvent<CaptionsChangedEventProps>) => void;
     onCaptionsList?: (event: BaseEvent<CaptionsListEventProps>) => void;
     onAudioTracks?: () => void;
+    /** @platform ios */
+    onIdle?: () => void;
+    /** @platform ios */
+    onVisible?: (event: BaseEvent<VisibleEventProps>) => void;
+    /** @platform ios */
+    onAttemptPlay?: () => void;
+    /** @platform ios */
+    onUpdateBuffer?: (event: BaseEvent<UpdateBufferEventProps>) => void;
+    /** @platform ios */
+    onScreenTapped?: (event: BaseEvent<ScreenTappedEventProps>) => void;
+    /** @platform ios */
+    onPlayerSizeChange?: (event: BaseEvent<PlayerSizeChangeEventProps>) => void;
+    onCasting?: (event: BaseEvent<CastingEventProps>) => void;
+    /** @platform ios */
+    onCastingDevicesAvailable?: (event: BaseEvent<CastingDevicesAvailableEventProps>) => void;
+    /** @platform ios */
+    onConnectedToCastingDevice?: (event: BaseEvent<CastingDeviceEventProps>) => void;
+    /** @platform ios */
+    onDisconnectedFromCastingDevice?: (event: BaseEvent<CastingErrorEventProps>) => void;
+    /** @platform ios */
+    onConnectionTemporarilySuspended?: () => void;
+    /** @platform ios */
+    onConnectionRecovered?: () => void;
+    /** @platform ios */
+    onConnectionFailed?: (event: BaseEvent<CastingErrorEventProps>) => void;
+    /** @platform ios */
+    onCastingEnded?: (event: BaseEvent<CastingErrorEventProps>) => void;
+    /** @platform ios */
+    onCastingFailed?: (event: BaseEvent<CastingErrorEventProps>) => void;
     shouldComponentUpdate?: (nextProps: any, nextState: any) => boolean;
     onBeforeNextPlaylistItem?: (event: BaseEvent<PlaylistItemEventProps>) => void;
   }
@@ -594,6 +680,12 @@ declare module "@jwplayer/jwplayer-react-native" {
     JWAdEventTypeStarted: 11;
     /// This event relays information about ad companions.
     JWAdEventTypeCompanion: 12;
+    /// This event is reported when the ad has loaded. (Android only)
+    JWAdEventTypeLoaded: 13;
+    /// This event is reported when the ad VAST XML has loaded. (Android only)
+    JWAdEventTypeLoadedXml: 14;
+    /// This event is reported when an ad break was ignored (e.g. because another is playing). (Android only)
+    JWAdEventTypeAdBreakIgnored: 15;
   };
 
   export const JWPlayerState: {
@@ -639,6 +731,33 @@ declare module "@jwplayer/jwplayer-react-native" {
      * @param playlistUrl URL for playlist to load (format for response: json)
      */
     loadPlaylistWithUrl(playlistUrl: string): void;
+    /**
+     * Updates the currently playing playlist item's metadata without reloading.
+     * Only non-null fields are applied; omitted fields leave existing values unchanged.
+     * Fires `onPlaylistItemMetadataChanged` with the updated item on both platforms.
+     *
+     * @param metadata.refreshNotification **Android-only, temporary workaround.**
+     *   When `true` on Android with `backgroundAudioEnabled: true`, the RN bridge cycles the
+     *   foreground MediaService after updating metadata so the lock-screen / notification shade
+     *   rebuilds with the new title and description. Without this flag the JW Android SDK
+     *   updates the MediaSession metadata but leaves the visible notification stale. Expect a
+     *   brief notification flicker and a momentary audio-focus transition while the service
+     *   rebinds.
+     *
+     *   Known limitation: the poster image is downloaded asynchronously by the SDK, so the
+     *   rebuilt notification typically still shows the previous poster. The poster refreshes
+     *   on the next playback state change (pause/play, seek).
+     *
+     *   Remove this flag from your call site once a future JW Android SDK release refreshes the
+     *   notification natively. No-op on iOS — JWPlayerKit already refreshes the lock-screen
+     *   controls via LockScreenControlsHandler.
+     */
+    setPlaylistItemMetadata(metadata: {
+        title?: string | null;
+        description?: string | null;
+        image?: string | null;
+        refreshNotification?: boolean;
+    }): void;
     setFullscreen(fullScreen: boolean): void;
     time(): Promise<number | null>;
     position(): Promise<number | null>;
