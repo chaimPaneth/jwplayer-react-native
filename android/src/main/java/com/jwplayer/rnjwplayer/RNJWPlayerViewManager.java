@@ -57,7 +57,9 @@ public class RNJWPlayerViewManager extends SimpleViewManager<RNJWPlayerView> {
       JWLog.w(TAG, "setControls skipped: view or mPlayerView is null");
       return;
     }
-    view.mPlayerView.getPlayer().setControls(controls);
+    // PiP-aware: deferred while the window is in Picture-in-Picture so the prop cannot bring an
+    // oversized control bar back inside the PiP window. See RNJWPlayerView.setControlsRequested.
+    view.setControlsRequested(controls != null && controls);
   }
 
   /**

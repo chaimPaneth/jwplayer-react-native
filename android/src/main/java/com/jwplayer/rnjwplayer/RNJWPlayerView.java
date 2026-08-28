@@ -7,7 +7,9 @@ import android.app.NotificationManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
@@ -20,8 +22,11 @@ import android.os.Looper;
 import android.view.View;
 import android.view.View.MeasureSpec;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
+import android.view.Gravity;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 
@@ -250,7 +255,31 @@ public class RNJWPlayerView extends RelativeLayout implements
     // can be restored on exit. Null when not in PiP / when this view did not own the
     // PiP transition.
     private Boolean mControlsBeforePip = null;
-
+    // Thin progress line drawn inside the PiP window. Separate from JW's control bar, which is
+    // fully hidden for the duration of PiP because it renders at unscaled size in the small
+    // window. See showPipProgress().
+    private PipProgressView mPipProgressView = null;
+    private Runnable mPipProgressTick = null;
+    private static final long PIP_PROGRESS_TICK_MS = 500L;
+    private static final int PIP_PROGRESS_HEIGHT_DP = 3;
+    // Visibility of JW's own UI overlay views as captured on PiP entry, so it can be put back on
+    // exit. Populated by hideJwUiForPip(), which is the actual enforcement for "no JW control
+    // overlay inside the PiP window" — the SDK's controls flag proved insufficient.
+    private final Map<View, Integer> mJwUiVisibilitySnapshot = new LinkedHashMap<>();
+    private ViewTreeObserver.OnGlobalLayoutListener mPipUiEnforcer = null;
+    // Host-app opt-in (config prop "pipVideoOnly", default false): when true, Picture-in-Picture is
+    // only offered for media that actually has a video track. Audio-only playback then behaves
+    // like iOS — no PiP window, background playback continues through the media session /
+    // notification. See updatePipRegistration().
+    private boolean pipVideoOnly = false;    // Whether the current media has a video track: TRUE / FALSE once JW has reported track
+    // metadata, null while still unknown. Reset on every new item. Unknown deliberately behaves
+    // like video (PiP allowed) so this can never make PiP less available than before for video.
+    private Boolean mHasVideoTrack = null;
+    // Last registration state actually pushed to the SDK, so repeated meta events do not churn
+    // register/deregister calls.
+    private Boolean mPipRegisteredForVideo = null;
+    // Mirrors the config prop "pipEnabled" so updatePipRegistration knows whether PiP is on at all.
+    private boolean mPipEnabled = false;
     // Add completion handler field
     PlaylistItemDecision itemUpdatePromise = null;
 
@@ -392,6 +421,11 @@ public class RNJWPlayerView extends RelativeLayout implements
 
     public void destroyPlayer() {
         JWLog.d(TAG, "destroyPlayer() mPlayer=" + JWLog.id(mPlayer));
+        // Drop the PiP progress overlay and its ticker before anything else so the 2Hz poll can
+        // never touch a released player.
+        hidePipProgress();
+        stopPipUiEnforcer();
+        mJwUiVisibilitySnapshot.clear();
         boolean replacingOwner = PlaybackManager.getInstance().isTransitioning();
         releaseMediaService(
             replacingOwner,
@@ -964,9 +998,13 @@ public class RNJWPlayerView extends RelativeLayout implements
             //    nudgeControlsVisible() is SKIPPED (see isNativeControlsEnabled()) because forcing
             //    JW's own control bar visible for a frame would show its default Play/Pause glyph
             //    even though the app's configured setting says controls should stay off.
+            //
+            // The hide is NOT a one-shot: controls stay suppressed for the whole PiP session and
+            // any request arriving in the meantime is deferred into mControlsBeforePip. See
+            // setControlsRequested().
             if (!isInPip && mControlsBeforePip != null) {
                 JWLog.d(TAG, "applyPipChange: restoring controls=" + mControlsBeforePip + " before SDK notify");
-                try { mPlayer.setControls(mControlsBeforePip); } catch (Throwable ignored) {}
+                applyControlsToPlayer(mControlsBeforePip);
                 mControlsBeforePip = null;
             }
 
@@ -982,7 +1020,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                     mControlsBeforePip = mPlayer.getControls();
                 }
                 JWLog.d(TAG, "applyPipChange: hiding controls for PiP (was " + mControlsBeforePip + ")");
-                try { mPlayer.setControls(false); } catch (Throwable ignored) {}
+                applyControlsToPlayer(false);
             }
 
             View decorView = mActivity.getWindow().getDecorView();
@@ -1014,8 +1052,20 @@ public class RNJWPlayerView extends RelativeLayout implements
                 // Add player view back (the JWP SDK has already calculated the PiP size/aspect off the View)
                 rootView.addView(mPlayerView, layoutParams);
                 mLastHandledPipState = true;
+                // Actual visual enforcement: take JW's overlay views out by visibility, and keep
+                // re-asserting for the rest of the PiP session (the SDK puts them back on its own
+                // after setup() and on item completion). Must run AFTER mLastHandledPipState=true
+                // so enforcePipUiHidden() sees PiP as active.
+                hideJwUiForPip();
+                startPipUiEnforcer();
+                // Added after the player view so it stacks on top of the video. Replaces the
+                // seek bar lost when the whole control container is hidden for PiP.
+                showPipProgress(rootView);
             } else {
                 // Exiting Picture in Picture
+                hidePipProgress();
+                stopPipUiEnforcer();
+                restoreJwUiAfterPip();
 
                 // Exit without a prior enter snapshot means this view instance did
                 // not own the PiP transition. Skip reparenting to avoid applying an
@@ -1072,6 +1122,573 @@ public class RNJWPlayerView extends RelativeLayout implements
         } catch (Throwable t) {
             return "?";
         }
+    }
+
+    /**
+     * Returns whether this view currently owns an active Picture-in-Picture session, i.e.
+     * whether JW's native control bar must stay suppressed. Deliberately keyed on
+     * {@link #mLastHandledPipState} — the same state that owns {@link #mControlsBeforePip} — so
+     * the hide and the restore can never desync. A view that did NOT own the PiP enter never
+     * hid controls and therefore must not suppress them either.
+     */
+    private boolean isPipSuppressingControls() {
+        return Boolean.TRUE.equals(mLastHandledPipState);
+    }
+
+    /**
+     * Applies a host-app request to enable/disable JW's native controls, honouring the
+     * Picture-in-Picture suppression window.
+     *
+     * Android PiP scales the whole activity — including the embedded player view — down into a
+     * small floating window, so a normal-size JW control bar renders oversized on top of the
+     * video. That is the reported "the app's own control elements show up inside the PiP window,
+     * overlapping the PiP window's own controls".
+     *
+     * The single setControls(false) at PiP ENTER (see applyPipChange) is not sufficient, because
+     * the host app re-asserts controls DURING the PiP session. Measured sequence for the All Daf
+     * report (logcat 2026-08-28 10:25):
+     *
+     *   10:25:10.900  RNJWPlayerView:   onComplete()                              // item ends in PiP
+     *   10:25:11.787  RNJWPlayerModule: setControls(reactTag=4118, show=true)     // app expands sheet
+     *   10:25:29.467  RNJWPlayerView:   applyPipChange(isInPip=false) controls=true controlsBeforePip=false
+     *
+     * On completion the app opens the next item and expands its player sheet
+     * (all-mobile-shared usePlayerUIControls.restorePlayer -> setPlayerControls(true)), which
+     * switched JW's control bar back on while the window was still in PiP. Opening a single item
+     * and then entering PiP never hit this, which is why the original fix appeared to work.
+     *
+     * The request is DEFERRED, not dropped: it becomes the new restore target so PiP exit applies
+     * the app's latest intent. That also repairs the mirror-image bug visible on the last log line
+     * above — exit restored the stale pre-PiP value (false) and left the expanded player with no
+     * controls even though the app had asked for them.
+     */
+    public void setControlsRequested(boolean show) {
+        if (isPipSuppressingControls()) {
+            JWLog.d(TAG, "setControlsRequested(" + show + ") deferred: PiP active, recorded as"
+                    + " restore-on-exit target (was " + mControlsBeforePip + ")");
+            mControlsBeforePip = show;
+            // Re-assert suppression: harmless when already hidden, and covers the case where
+            // something else flipped the SDK's controls flag on inside the PiP session.
+            applyControlsToPlayer(false);
+            return;
+        }
+        applyControlsToPlayer(show);
+    }
+
+    /**
+     * Re-applies the controls state after a {@code setup()} call rebuilt the player UI. Both the
+     * playlist-only fast path and {@link #reconfigurePlayer} force PLAYER_CONTROLS_CONTAINER back
+     * into the UiConfig before setup(), which can leave JW's control bar enabled again — including
+     * for a new media item opened while the window is in PiP.
+     *
+     * This is an internal restore of the LIVE state, not a host-app intent, so it must never
+     * overwrite the PiP restore target ({@link #mControlsBeforePip}); it only re-asserts the
+     * suppression while PiP is active.
+     */
+    private void reapplyControlsAfterSetup(boolean liveControlsState) {
+        boolean effective = liveControlsState && !isPipSuppressingControls();
+        if (effective != liveControlsState) {
+            JWLog.d(TAG, "reapplyControlsAfterSetup: PiP active -> forcing controls off"
+                    + " (live state was " + liveControlsState + ")");
+        }
+        applyControlsToPlayer(effective);
+    }
+
+    /**
+     * Single place that touches the SDK's controls flag, so every path is logged and none can
+     * throw through to a caller. Callers decide the PiP-effective value.
+     */
+    private void applyControlsToPlayer(boolean show) {
+        try {
+            if (mPlayer != null) {
+                mPlayer.setControls(show);
+            } else {
+                JWLog.w(TAG, "applyControlsToPlayer(" + show + ") skipped: mPlayer is null");
+            }
+        } catch (Throwable t) {
+            JWLog.w(TAG, "applyControlsToPlayer(" + show + ") failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Hides JW's entire UI overlay for the duration of PiP by VIEW VISIBILITY, not by the SDK's
+     * controls flag.
+     *
+     * Why not setControls(false): it does not hold. Measured on 2026-08-28 with the controls flag
+     * already false and PiP suppression active, the SDK put its control bar back up on its own
+     * less than a second later:
+     *
+     *   11:38:09.001  reassertControlsAfterExternalSetup(controlsBeforeSetup=false) pipSuppressing=true
+     *   11:38:09.986  onControlBarVisibilityChanged(visible=true)
+     *
+     * Every setControls() callsite in this library was already routed through the PiP gate at that
+     * point, so the flag is simply not the thing that governs this overlay once JW rebuilds its UI
+     * (notably after the native next-item setup(), and again when an item completes and JW shows
+     * its replay/idle overlay). Screenshots IMG_0653 / IMG_0654.
+     *
+     * jwplayerview.xml is a FrameLayout with exactly two children: ControlsContainerView (holding
+     * SideSeek, Logo, Overlay -> Error/CenterControls/Controlbar/NextUp/Chapters/Menu/CastingMenu/
+     * Playlist/VastAds) and an ads container. The video surface is NOT inside it.
+     *
+     * Hiding ControlsContainerView outright is WRONG though, and produced the follow-up report
+     * "audio in PiP is now just a black window": JW draws the audio poster/thumbnail as
+     * {@code overlay_poster_img} INSIDE OverlayView, which is inside that container. Audio-only
+     * media has no video surface, so with the container gone the PiP window had nothing left to
+     * draw. ControlsContainerView and OverlayView are therefore passed THROUGH (kept visible and
+     * descended into), and only their non-poster content is hidden — the poster image survives,
+     * while OverlayView's title/description text, which renders at unscaled size in the small
+     * window, does not.
+     *
+     * Matching is by class name rather than by R id so this does not depend on the generated R
+     * package, and descent stops at the first non-pass-through match so we hide containers rather
+     * than leaves. JW recreates these views on setup(), so this is re-asserted from several
+     * triggers — see enforcePipUiHidden().
+     */
+    private void hideJwUiForPip() {
+        if (mPlayerView == null) {
+            return;
+        }
+        try {
+            List<View> targets = new ArrayList<>();
+            collectPipHideTargets(mPlayerView, false, targets);
+            int hidden = 0;
+            for (View target : targets) {
+                if (!mJwUiVisibilitySnapshot.containsKey(target)) {
+                    mJwUiVisibilitySnapshot.put(target, target.getVisibility());
+                }
+                if (target.getVisibility() != View.GONE) {
+                    target.setVisibility(View.GONE);
+                    hidden++;
+                }
+            }
+            if (hidden > 0) {
+                JWLog.d(TAG, "hideJwUiForPip: hid " + hidden + " JW UI view(s) of "
+                        + targets.size() + " found (poster preserved)");
+            }
+        } catch (Throwable t) {
+            JWLog.w(TAG, "hideJwUiForPip failed: " + t.getMessage());
+        }
+    }
+
+    /** Restores the visibility JW's UI views had when PiP was entered. */
+    private void restoreJwUiAfterPip() {
+        if (mJwUiVisibilitySnapshot.isEmpty()) {
+            return;
+        }
+        int restored = 0;
+        for (Map.Entry<View, Integer> entry : mJwUiVisibilitySnapshot.entrySet()) {
+            try {
+                entry.getKey().setVisibility(entry.getValue());
+                restored++;
+            } catch (Throwable ignored) {
+                // View detached between PiP enter and exit; nothing to restore.
+            }
+        }
+        mJwUiVisibilitySnapshot.clear();
+        JWLog.d(TAG, "restoreJwUiAfterPip: restored " + restored + " JW UI view(s)");
+    }
+
+    /**
+     * Collects the views to hide for PiP.
+     *
+     * ControlsContainerView and OverlayView are pass-through: kept visible so the audio poster
+     * they wrap keeps drawing, and descended into. Any other {@code com.jwplayer.ui.views.*} view
+     * is hidden as a whole (its descendants come along). Plain views are only hidden when they sit
+     * INSIDE a passed-through OverlayView — that is the one place where hiding non-JW views is
+     * correct (title / description text). Everywhere else plain views are left alone, which is what
+     * keeps the video surface and the ads container untouched.
+     *
+     * @param insideOverlay true once descent has entered an OverlayView
+     */
+    private void collectPipHideTargets(View root, boolean insideOverlay, List<View> out) {
+        if (root == null) {
+            return;
+        }
+        String className = root.getClass().getName();
+        if (className.startsWith("com.jwplayer.ui.views.")) {
+            String simpleName = root.getClass().getSimpleName();
+            boolean passThrough = "ControlsContainerView".equals(simpleName)
+                    || "OverlayView".equals(simpleName);
+            if (passThrough) {
+                if (root instanceof ViewGroup) {
+                    boolean overlay = insideOverlay || "OverlayView".equals(simpleName);
+                    ViewGroup group = (ViewGroup) root;
+                    for (int i = 0; i < group.getChildCount(); i++) {
+                        collectPipHideTargets(group.getChildAt(i), overlay, out);
+                    }
+                }
+                return;
+            }
+            out.add(root);
+            return;
+        }
+        if (insideOverlay) {
+            if (!isPosterView(root)) {
+                out.add(root);
+            }
+            return;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectPipHideTargets(group.getChildAt(i), false, out);
+            }
+        }
+    }
+
+    /**
+     * True for JW's poster / thumbnail image views, matched on the resource entry name
+     * ({@code overlay_poster_img} and friends) so the audio artwork keeps rendering in PiP.
+     */
+    private boolean isPosterView(View view) {
+        try {
+            int id = view.getId();
+            if (id == View.NO_ID) {
+                return false;
+            }
+            String name = view.getResources().getResourceEntryName(id);
+            return name != null && name.contains("poster");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Re-asserts the PiP overlay hide, but only while this view owns an active PiP session. */
+    private void enforcePipUiHidden() {
+        if (isPipSuppressingControls()) {
+            hideJwUiForPip();
+        }
+    }
+
+    /**
+     * Watches the PiP window's layout passes and re-hides JW's overlay whenever the SDK rebuilds
+     * or re-shows it. A layout listener is used rather than polling alone so the overlay is gone
+     * within the same frame it would have appeared in — the "ugly UI flashes while the next media
+     * loads" report.
+     */
+    private void startPipUiEnforcer() {
+        stopPipUiEnforcer();
+        if (mPlayerView == null) {
+            return;
+        }
+        try {
+            mPipUiEnforcer = this::enforcePipUiHidden;
+            mPlayerView.getViewTreeObserver().addOnGlobalLayoutListener(mPipUiEnforcer);
+        } catch (Throwable t) {
+            JWLog.w(TAG, "startPipUiEnforcer failed: " + t.getMessage());
+            mPipUiEnforcer = null;
+        }
+    }
+
+    private void stopPipUiEnforcer() {
+        if (mPipUiEnforcer == null) {
+            return;
+        }
+        try {
+            if (mPlayerView != null) {
+                mPlayerView.getViewTreeObserver().removeOnGlobalLayoutListener(mPipUiEnforcer);
+            }
+        } catch (Throwable t) {
+            JWLog.w(TAG, "stopPipUiEnforcer failed: " + t.getMessage());
+        }
+        mPipUiEnforcer = null;
+    }
+
+    /**
+     * True when Picture-in-Picture may be used for whatever is currently loaded.
+     *
+     * Always true unless the host app opted into {@code pipVideoOnly} AND JW has positively
+     * reported that the current media carries no video track. "Unknown" counts as allowed, so a
+     * video item never loses PiP because metadata has not arrived yet.
+     */
+    public boolean isPipAllowedForCurrentMedia() {
+        if (!pipVideoOnly) {
+            return true;
+        }
+        return !Boolean.FALSE.equals(mHasVideoTrack);
+    }
+
+    /**
+     * Applies {@code pipVideoOnly} by registering / deregistering the activity with the JW SDK.
+     *
+     * This is the only lever that covers the case the user actually hits: PiP is not entered by
+     * this library on backgrounding — {@code mPlayer.registerActivityForPip(...)} hands that to the
+     * SDK, which auto-enters PiP when the activity is folded away. Gating only the explicit
+     * entry points (the back-button callback and the togglePIP bridge method) would therefore have
+     * left audio media still popping into PiP on fold, so registration itself is withdrawn.
+     *
+     * Never runs while a PiP session is active: tearing down the registration mid-session would
+     * strand the window.
+     */
+    private void updatePipRegistration() {
+        if (mPlayer == null || mActivity == null || !mPipEnabled) {
+            return;
+        }
+        if (isPipSuppressingControls()) {
+            return;
+        }
+        boolean allow = isPipAllowedForCurrentMedia();
+        if (mPipRegisteredForVideo != null && mPipRegisteredForVideo == allow) {
+            return;
+        }
+        try {
+            if (allow) {
+                mPlayer.registerActivityForPip(mActivity, mActivity.getSupportActionBar());
+                registerPipBackCallback();
+                JWLog.d(TAG, "updatePipRegistration: PiP enabled (pipVideoOnly=" + pipVideoOnly
+                        + ", hasVideoTrack=" + mHasVideoTrack + ")");
+            } else {
+                mPlayer.deregisterActivityForPip();
+                unregisterPipBackCallback();
+                JWLog.d(TAG, "updatePipRegistration: PiP withheld for audio-only media"
+                        + " (pipVideoOnly=true)");
+            }
+            mPipRegisteredForVideo = allow;
+        } catch (Throwable t) {
+            JWLog.w(TAG, "updatePipRegistration failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Records whether the current media has a video track from JW's track metadata, then
+     * re-evaluates the PiP registration.
+     *
+     * MetaEvent fires repeatedly and often carries only partial information (ID3 cues, for
+     * instance), so this only draws a conclusion when the payload is actually about tracks:
+     * real video dimensions mean video; an audio mime type with no video mime type means
+     * audio-only. Anything else leaves the previous answer alone.
+     */
+    private void noteTrackMetadata(int width, int height, String videoMimeType, String audioMimeType) {
+        Boolean resolved = null;
+        if (width > 0 && height > 0) {
+            resolved = Boolean.TRUE;
+        } else if (videoMimeType == null && audioMimeType != null) {
+            resolved = Boolean.FALSE;
+        }
+        if (resolved == null || resolved.equals(mHasVideoTrack)) {
+            return;
+        }
+        mHasVideoTrack = resolved;
+        JWLog.d(TAG, "noteTrackMetadata: hasVideoTrack=" + mHasVideoTrack + " (" + width + "x"
+                + height + ", video=" + videoMimeType + ", audio=" + audioMimeType + ")");
+        updatePipRegistration();
+    }
+
+    /** Forgets the current media's track answer; called when a new item is loaded. */
+    private void resetVideoTrackDetection() {
+        if (mHasVideoTrack != null) {
+            JWLog.d(TAG, "resetVideoTrackDetection: clearing hasVideoTrack for new item");
+        }
+        mHasVideoTrack = null;
+    }
+
+    /**
+     * Adds a thin progress line to the PiP window and starts updating it.     *
+     * Why this exists: JW's own control bar carries the seek bar, but it is hidden for the whole
+     * PiP session (see setControlsRequested) because Android scales the activity into the small
+     * window and the control bar would render at unscaled size on top of the video. Hiding it took
+     * the progress indicator with it — the regression reported on 2026-08-28 ("before, a progress
+     * indicator was displayed inside PiP"), introduced by the PiP control-overlay fix add294e
+     * (2026-06-23).
+     *
+     * Rather than un-hide JW's control bar, this draws a PiP-appropriate 3dp line pinned to the
+     * bottom of the PiP window. It is added to the same rootView the player view is reparented
+     * into, AFTER the player view, so it stacks on top of the video. Colours follow the host app's
+     * {@code styling.colors.timeslider} prop so it matches the in-app seek bar accent.
+     *
+     * @param rootView the activity content view the player view was just reparented into
+     */
+    private void showPipProgress(ViewGroup rootView) {
+        if (rootView == null) {
+            return;
+        }
+        hidePipProgress();
+        try {
+            PipProgressView bar = new PipProgressView(getContext());
+            bar.setColors(resolvePipProgressColor(), resolvePipRailColor());
+            int heightPx = Math.max(2, Math.round(
+                    PIP_PROGRESS_HEIGHT_DP * getResources().getDisplayMetrics().density));
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, heightPx);
+            lp.gravity = Gravity.BOTTOM;
+            rootView.addView(bar, lp);
+            mPipProgressView = bar;
+            JWLog.d(TAG, "showPipProgress: PiP progress line attached (" + heightPx + "px)");
+            startPipProgressTicks();
+        } catch (Throwable t) {
+            // Never let a cosmetic overlay break the PiP transition.
+            JWLog.w(TAG, "showPipProgress failed: " + t.getMessage());
+            mPipProgressView = null;
+        }
+    }
+
+    /** Removes the PiP progress line and stops its ticker. Safe to call when nothing is showing. */
+    private void hidePipProgress() {
+        stopPipProgressTicks();
+        PipProgressView bar = mPipProgressView;
+        mPipProgressView = null;
+        if (bar == null) {
+            return;
+        }
+        try {
+            if (bar.getParent() instanceof ViewGroup) {
+                ((ViewGroup) bar.getParent()).removeView(bar);
+            }
+            JWLog.d(TAG, "hidePipProgress: PiP progress line detached");
+        } catch (Throwable t) {
+            JWLog.w(TAG, "hidePipProgress failed: " + t.getMessage());
+        }
+    }
+
+    private void startPipProgressTicks() {
+        stopPipProgressTicks();
+        if (mPlayerView == null) {
+            return;
+        }
+        mPipProgressTick = new Runnable() {
+            @Override
+            public void run() {
+                if (mPipProgressView == null) {
+                    return;
+                }
+                updatePipProgress();
+                // Backstop for any path that neither lays out nor fires a control-bar event.
+                enforcePipUiHidden();
+                if (mPipProgressView != null && mPlayerView != null) {
+                    mPlayerView.postDelayed(this, PIP_PROGRESS_TICK_MS);
+                }
+            }
+        };
+        mPlayerView.post(mPipProgressTick);
+    }
+
+    private void stopPipProgressTicks() {
+        if (mPipProgressTick != null && mPlayerView != null) {
+            mPlayerView.removeCallbacks(mPipProgressTick);
+        }
+        mPipProgressTick = null;
+    }
+
+    /**
+     * Polls the player position rather than listening for time events: the ticker only runs while
+     * the PiP line is attached, 2Hz is plenty for a 3dp bar, and polling stays correct across the
+     * native next-item loads that replace the playlist underneath us.
+     */
+    private void updatePipProgress() {
+        PipProgressView bar = mPipProgressView;
+        if (bar == null) {
+            return;
+        }
+        double position = -1d;
+        double duration = -1d;
+        try {
+            if (mPlayer != null) {
+                position = mPlayer.getPosition();
+                duration = mPlayer.getDuration();
+            }
+        } catch (Throwable ignored) {
+            // Player torn down mid-tick; fall through to the unknown-duration branch.
+        }
+        if (duration <= 0d || position < 0d) {
+            // Live stream, or duration not known yet: show the rail only.
+            bar.setFraction(-1f);
+            return;
+        }
+        bar.setFraction((float) Math.min(1d, position / duration));
+    }
+
+    private int resolvePipProgressColor() {
+        Integer configured = timesliderColor("progress");
+        return configured != null ? configured : Color.WHITE;
+    }
+
+    private int resolvePipRailColor() {
+        Integer configured = timesliderColor("rail");
+        // Default to a translucent white track so the line reads over any video content.
+        return configured != null ? configured : Color.argb(0x59, 0xFF, 0xFF, 0xFF);
+    }
+
+    /** Reads one colour out of the host app's {@code styling.colors.timeslider} prop. */
+    private Integer timesliderColor(String key) {
+        try {
+            if (mColors != null && mColors.hasKey("timeslider")) {
+                ReadableMap timeslider = mColors.getMap("timeslider");
+                if (timeslider != null && timeslider.hasKey(key) && !timeslider.isNull(key)) {
+                    return Color.parseColor("#" + timeslider.getString(key));
+                }
+            }
+        } catch (Throwable ignored) {
+            // Fall back to the defaults above.
+        }
+        return null;
+    }
+
+    /**
+     * Minimal two-rect progress line: rail across the full width, fill up to the current
+     * fraction. A negative fraction means "duration unknown" and draws the rail only.
+     */
+    private static class PipProgressView extends View {
+        private final Paint railPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private float fraction = -1f;
+
+        PipProgressView(Context context) {
+            super(context);
+        }
+
+        void setColors(int progressColor, int railColor) {
+            fillPaint.setColor(progressColor);
+            railPaint.setColor(railColor);
+            invalidate();
+        }
+
+        void setFraction(float value) {
+            float next = value < 0f ? -1f : Math.min(1f, value);
+            if (Math.abs(next - fraction) < 0.0005f) {
+                return;
+            }
+            fraction = next;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int width = getWidth();
+            int height = getHeight();
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+            canvas.drawRect(0f, 0f, width, height, railPaint);
+            if (fraction > 0f) {
+                canvas.drawRect(0f, 0f, width * fraction, height, fillPaint);
+            }
+        }
+    }
+
+    /**
+     * Public entry point for code that called {@code setup()} on THIS view's player from outside
+     * the view — currently the headless / Android Auto next-item load in
+     * {@link JWPlayerNativePlaybackHandler}, which builds a bare PlayerConfig and therefore
+     * re-enables JW's control bar with default styling.
+     *
+     * Two bugs came out of that path, both reported against All Daf on 2026-08-28:
+     *  - when the next item loaded while the window was in PiP, the full-size control overlay
+     *    (title, subtitle, time labels, settings gear, fullscreen, "...") reappeared inside the
+     *    small PiP window (IMG_0651);
+     *  - the same overlay flashed for a moment on every native advance even outside PiP, and a
+     *    collapsed/mini player silently regained JW's control bar.
+     *
+     * Callers must capture {@code getControls()} BEFORE their setup() call and pass it here
+     * immediately after, on the same main-thread runnable, so no frame is drawn in between.
+     */
+    public void reassertControlsAfterExternalSetup(boolean controlsBeforeSetup) {
+        JWLog.d(TAG, "reassertControlsAfterExternalSetup(controlsBeforeSetup=" + controlsBeforeSetup
+                + ") pipSuppressing=" + isPipSuppressingControls());
+        reapplyControlsAfterSetup(controlsBeforeSetup);
+        // setup() rebuilds JW's UI, so the overlay views this view had taken GONE are brand new
+        // and visible again. Re-hide them in the same pass — the flag alone does not hold.
+        enforcePipUiHidden();
     }
 
     /**
@@ -1199,6 +1816,14 @@ public class RNJWPlayerView extends RelativeLayout implements
                     }
                     PlayerState state = mPlayer.getState();
                     if (state == PlayerState.PLAYING || state == PlayerState.BUFFERING) {
+                        if (!isPipAllowedForCurrentMedia()) {
+                            // pipVideoOnly: audio-only media takes the normal back path, so the
+                            // activity finishes and playback continues via the media session.
+                            JWLog.d(TAG, "PiP back-callback: skipping PiP, audio-only media"
+                                    + " and pipVideoOnly=true");
+                            fallbackToDefaultBack();
+                            return;
+                        }
                         JWLog.d(TAG, "PiP back-callback: entering PiP (state=" + state + ")");
                         mPlayer.enterPictureInPictureMode();
                         // Do NOT call default back — activity stays alive and transitions to PiP
@@ -1289,6 +1914,17 @@ public class RNJWPlayerView extends RelativeLayout implements
             mMediaGeneration = (long) prop.getDouble("androidHandoffGeneration");
         } else {
             mMediaGeneration = 0L;
+        }
+        // Developer opt-in, read on every config push so it can be toggled at runtime. Default
+        // false keeps today's behaviour (PiP for audio as well as video).
+        if (prop != null && prop.hasKey("pipVideoOnly") && !prop.isNull("pipVideoOnly")) {
+            boolean requested = prop.getBoolean("pipVideoOnly");
+            if (requested != pipVideoOnly) {
+                pipVideoOnly = requested;
+                JWLog.d(TAG, "setConfig: pipVideoOnly=" + pipVideoOnly);
+                mPipRegisteredForVideo = null;
+                updatePipRegistration();
+            }
         }
         if (mConfig == null || !mConfig.equals(prop)) {
             // Capture the app-provided post-id mediaId from the raw playlist prop BEFORE
@@ -1404,8 +2040,10 @@ public class RNJWPlayerView extends RelativeLayout implements
                 mPlayer.setup(config);
 
                 // Restore the real controls visibility now that the UI group is guaranteed
-                // to be present (setup() above may have re-enabled the control bar).
-                mPlayer.setControls(currentControlsState);
+                // to be present (setup() above may have re-enabled the control bar). Routed
+                // through reapplyControlsAfterSetup so a new item opened while the window is
+                // in PiP cannot bring the oversized control bar back into the PiP window.
+                reapplyControlsAfterSetup(currentControlsState);
 
                 mConfig = prop;
                 return;
@@ -1493,14 +2131,16 @@ public class RNJWPlayerView extends RelativeLayout implements
         // Apply new configuration to existing player
         mPlayer.setup(newConfig);
         
-        // Now manage controls state via API (after setup, when UI groups are in clean state)
+        // Now manage controls state via API (after setup, when UI groups are in clean state).
+        // Both branches go through the PiP-aware helpers so a reconfigure triggered while the
+        // window is in PiP cannot re-enable the oversized control bar (see setControlsRequested).
         if (prop.hasKey("controls")) {
             // Developer explicitly set controls in props - use that value
-            mPlayer.setControls(prop.getBoolean("controls"));
+            setControlsRequested(prop.getBoolean("controls"));
         } else if (!currentControlsState) {
             // Controls were off before reconfigure and no explicit prop provided
             // Restore the off state (after ensuring UI groups are visible)
-            mPlayer.setControls(false);
+            reapplyControlsAfterSetup(false);
         }
         // Note: If controls were on and no prop provided, they'll stay on (default from configureUI)
         
@@ -1821,7 +2461,9 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         // Apply view-specific props
         if (prop.hasKey("controls")) {
-            mPlayerView.getPlayer().setControls(prop.getBoolean("controls"));
+            // PiP-aware: a player recreated while the window is in PiP must stay control-less
+            // and only adopt the prop's value on PiP exit (see setControlsRequested).
+            setControlsRequested(prop.getBoolean("controls"));
         }
 
         if (prop.hasKey("fullScreenOnLandscape")) {
@@ -1869,15 +2511,18 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         // Configure PiP if enabled
         if (mActivity != null && prop.hasKey("pipEnabled")) {
-            boolean pipEnabled = prop.getBoolean("pipEnabled");
-            if (pipEnabled) {
+            mPipEnabled = prop.getBoolean("pipEnabled");
+            if (mPipEnabled) {
                 registerReceiver();
-                mPlayer.registerActivityForPip(mActivity, mActivity.getSupportActionBar());
-                registerPipBackCallback();
+                // Registration itself is decided by updatePipRegistration so the pipVideoOnly
+                // opt-in can withhold PiP for audio-only media.
+                mPipRegisteredForVideo = null;
+                updatePipRegistration();
             } else {
                 mPlayer.deregisterActivityForPip();
                 unRegisterReceiver();
                 unregisterPipBackCallback();
+                mPipRegisteredForVideo = null;
             }
         }
 
@@ -2426,6 +3071,12 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onControlBarVisibilityChanged(ControlBarVisibilityEvent controlBarVisibilityEvent) {
         JWLog.d(TAG, "onControlBarVisibilityChanged(visible=" + controlBarVisibilityEvent.isVisible() + ")");
+        // The SDK announcing its control bar is up is the most direct signal that the PiP overlay
+        // suppression needs re-asserting — this is the event that exposed setControls(false) as
+        // insufficient (see hideJwUiForPip).
+        if (controlBarVisibilityEvent.isVisible()) {
+            enforcePipUiHidden();
+        }
         WritableMap event = Arguments.createMap();
         event.putString("message", "onControlBarVisible");
         event.putBoolean("visible", controlBarVisibilityEvent.isVisible());
@@ -2554,6 +3205,9 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         JWLog.d(TAG, "onPlaylistItem(index=" + playlistItemEvent.getIndex() + ")");
+        // A new item may change audio-only vs video, so the pipVideoOnly answer is re-derived from
+        // the next MetaEvent rather than carried over.
+        resetVideoTrackDetection();
         // Ideally done in onFirstFrame instead
         // if (backgroundAudioEnabled) {
         //     doBindService();
@@ -2653,7 +3307,19 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onMeta(MetaEvent metaEvent) {
         JWLog.d(TAG, "onMeta()");
-
+        // Feeds the pipVideoOnly gate: Metadata carries the decoded track dimensions and mime
+        // types, which is the only reliable way to tell an audio-only item from a video one before
+        // the user folds the app. See noteTrackMetadata().
+        try {
+            com.jwplayer.pub.api.media.meta.Metadata metadata =
+                    metaEvent != null ? metaEvent.getMetadata() : null;
+            if (metadata != null) {
+                noteTrackMetadata(metadata.getWidth(), metadata.getHeight(),
+                        metadata.getVideoMimeType(), metadata.getAudioMimeType());
+            }
+        } catch (Throwable t) {
+            JWLog.w(TAG, "onMeta: track metadata read failed: " + t.getMessage());
+        }
     }
 
     // Picture in Picture events

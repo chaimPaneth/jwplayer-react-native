@@ -520,6 +520,13 @@ export interface JWPlayerConfig {
    * Enable Picture-in-Picture support
    */
   pipEnabled?: boolean;
+  /**
+   * Android only. When true, Picture-in-Picture is only offered for media that actually
+   * has a video track; audio-only playback keeps running in the background through the
+   * media session/notification instead of opening a PiP window (matching iOS).
+   * Defaults to false, i.e. PiP for audio as well as video.
+   */
+  pipVideoOnly?: boolean;
   
   // ========== LEGACY PROPERTIES (for single-item configs) ==========
   // These are applied when using `file` or `sources` instead of `playlist`

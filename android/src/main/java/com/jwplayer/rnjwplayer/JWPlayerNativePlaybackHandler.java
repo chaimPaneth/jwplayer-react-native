@@ -1129,7 +1129,31 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                                             .playlist(java.util.Collections.singletonList(item))
                                             .autostart(true)
                                             .build();
+                                    // setup() below rebuilds JW's UI from this bare config, which
+                                    // re-enables the control bar with default styling. Capture the
+                                    // real controls state first and hand the decision straight back
+                                    // to the owning view, which knows whether PiP is suppressing
+                                    // controls. Without this the full-size overlay reappeared inside
+                                    // the PiP window on a native advance, and flashed on every
+                                    // advance outside PiP.
+                                    // See RNJWPlayerView.reassertControlsAfterExternalSetup.
+                                    boolean controlsBeforeSetup = false;
+                                    try {
+                                        controlsBeforeSetup = uiPlayer.getControls();
+                                    } catch (Exception ignored) {}
+                                    final RNJWPlayerView ownerView =
+                                            PlaybackManager.getInstance().getActiveUiPlayerView();
+
                                     uiPlayer.setup(cfg);
+
+                                    // Same runnable, immediately after setup(), so no frame is
+                                    // drawn with the control bar visible.
+                                    if (ownerView != null) {
+                                        ownerView.reassertControlsAfterExternalSetup(controlsBeforeSetup);
+                                    } else {
+                                        JWLog.w(TAG, "no owning RNJWPlayerView for controls re-assert"
+                                                + " after native setup; leaving SDK default");
+                                    }
                                     // Explicitly start playback for immediate response from AA (in case autostart is gated)
                                     try { uiPlayer.play(); } catch (Exception ignored) {}
                                     // Re-apply persisted playback speed — setup() resets to 1x

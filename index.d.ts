@@ -42,6 +42,13 @@ declare module "@jwplayer/jwplayer-react-native" {
     exitFullScreenOnPortrait?: boolean;
     enableLockScreenControls?: boolean;
     pipEnabled?: boolean;
+    /**
+     * Android only. When true, Picture-in-Picture is only offered for media that actually
+     * has a video track; audio-only playback keeps running in the background through the
+     * media session/notification instead of opening a PiP window (matching iOS).
+     * Defaults to false, i.e. PiP for audio as well as video.
+     */
+    pipVideoOnly?: boolean;
     useTextureView?: boolean;
     allowCrossProtocolRedirectsSupport?: boolean;
     displaytitle?: boolean;
@@ -121,6 +128,13 @@ declare module "@jwplayer/jwplayer-react-native" {
     exitFullScreenOnPortrait?: boolean;
     enableLockScreenControls?: boolean;
     pipEnabled?: boolean;
+    /**
+     * Android only. When true, Picture-in-Picture is only offered for media that actually
+     * has a video track; audio-only playback keeps running in the background through the
+     * media session/notification instead of opening a PiP window (matching iOS).
+     * Defaults to false, i.e. PiP for audio as well as video.
+     */
+    pipVideoOnly?: boolean;
     [key: string]: any;
   }
 
@@ -437,6 +451,13 @@ declare module "@jwplayer/jwplayer-react-native" {
     viewOnly?: boolean;
     enableLockScreenControls?: boolean;
     pipEnabled?: boolean;
+    /**
+     * Android only. When true, Picture-in-Picture is only offered for media that actually
+     * has a video track; audio-only playback keeps running in the background through the
+     * media session/notification instead of opening a PiP window (matching iOS).
+     * Defaults to false, i.e. PiP for audio as well as video.
+     */
+    pipVideoOnly?: boolean;
     offlineMessage?: string;
     offlineImage?: string;
     forceFullScreenOnLandscape?: boolean;

@@ -198,6 +198,24 @@ public class PlaybackManager {
     }
 
     /**
+     * Returns the RNJWPlayerView that currently owns UI playback, or null when the active
+     * handler is not a UI player view.
+     *
+     * Needed by callers that {@code setup()} the UI player from OUTSIDE RNJWPlayerView (the
+     * headless/Android-Auto next-item load in JWPlayerNativePlaybackHandler): setup() rebuilds
+     * JW's UI from a fresh PlayerConfig and re-enables the control bar, so those callers must
+     * hand the controls decision back to the view that knows about PiP suppression. See
+     * RNJWPlayerView.reassertControlsAfterExternalSetup.
+     */
+    public RNJWPlayerView getActiveUiPlayerView() {
+        synchronized (mutex) {
+            return mActivePlayerHandler instanceof RNJWPlayerView
+                    ? (RNJWPlayerView) mActivePlayerHandler
+                    : null;
+        }
+    }
+
+    /**
      * Notify the manager that the UI player's host (activity) went background/foreground.
      * When in background, the UI player should not be considered active for routing.
      */

@@ -304,6 +304,9 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
             if (playerView != null && playerView.mPlayerView != null) {
                 if (playerView.mPlayerView.getPlayer().isInPictureInPictureMode()) {
                     playerView.mPlayerView.getPlayer().exitPictureInPictureMode();
+                } else if (!playerView.isPipAllowedForCurrentMedia()) {
+                    // pipVideoOnly opt-in: audio-only media does not get a PiP window.
+                    JWLog.d(TAG, "togglePIP: ignored, audio-only media and pipVideoOnly=true");
                 } else {
                     playerView.mPlayerView.getPlayer().enterPictureInPictureMode();
                 }
@@ -433,7 +436,10 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         new Handler(Looper.getMainLooper()).post(() -> {
             RNJWPlayerView playerView = getPlayerView(reactTag);
             if (playerView != null && playerView.mPlayerView != null) {
-                playerView.mPlayerView.getPlayer().setControls(show);
+                // PiP-aware: while the window is in Picture-in-Picture this records the request
+                // and applies it on PiP exit instead of showing an oversized control bar inside
+                // the small PiP window. See RNJWPlayerView.setControlsRequested.
+                playerView.setControlsRequested(show);
             }
         });
     }
