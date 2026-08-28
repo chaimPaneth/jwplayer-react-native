@@ -4,6 +4,7 @@ package com.jwplayer.rnjwplayer;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.NotificationManager;
+import android.app.PictureInPictureParams;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
@@ -271,10 +272,14 @@ public class RNJWPlayerView extends RelativeLayout implements
     // only offered for media that actually has a video track. Audio-only playback then behaves
     // like iOS — no PiP window, background playback continues through the media session /
     // notification. See updatePipRegistration().
-    private boolean pipVideoOnly = false;    // Whether the current media has a video track: TRUE / FALSE once JW has reported track
-    // metadata, null while still unknown. Reset on every new item. Unknown deliberately behaves
-    // like video (PiP allowed) so this can never make PiP less available than before for video.
+    private boolean pipVideoOnly = false;
+    // Whether the current media has a video track: TRUE once JW has positively reported video,
+    // null while unproven. Reset on every new item. Never set to FALSE — this SDK emits no signal
+    // that proves audio-only (see noteTrackMetadata), so "unproven" is the audio case in practice
+    // and isPipAllowedForCurrentMedia() denies PiP for it while pipVideoOnly is on.
     private Boolean mHasVideoTrack = null;
+    // Guards the per-item raw track-metadata log line so repeated MetaEvents do not spam it.
+    private boolean mLoggedTrackMetaForItem = false;
     // Last registration state actually pushed to the SDK, so repeated meta events do not churn
     // register/deregister calls.
     private Boolean mPipRegisteredForVideo = null;
@@ -940,6 +945,17 @@ public class RNJWPlayerView extends RelativeLayout implements
     private void handlePipChange(boolean isInPip, Configuration newConfig) {
         JWLog.d(TAG, "handlePipChange(isInPip=" + isInPip + ")");
 
+        // Tripwire, not a guard: if pipVideoOnly is on and PiP was entered anyway, then neither
+        // withdrawing the SDK registration nor clearing autoEnterEnabled stopped it, and the entry
+        // point is somewhere else entirely. Says so explicitly instead of leaving it to be inferred
+        // from the absence of other log lines.
+        if (isInPip && pipVideoOnly && !isPipAllowedForCurrentMedia()) {
+            JWLog.w(TAG, "handlePipChange: ENTERED PiP despite pipVideoOnly gate"
+                    + " (hasVideoTrack=" + mHasVideoTrack
+                    + ", registeredForPip=" + mPipRegisteredForVideo
+                    + ", pipEnabled=" + mPipEnabled + ")");
+        }
+
         // Ignore duplicate callbacks for the same PiP state; they can arrive during
         // config churn and should not re-run view reparenting.
         if (mLastHandledPipState != null && mLastHandledPipState == isInPip) {
@@ -1397,15 +1413,22 @@ public class RNJWPlayerView extends RelativeLayout implements
     /**
      * True when Picture-in-Picture may be used for whatever is currently loaded.
      *
-     * Always true unless the host app opted into {@code pipVideoOnly} AND JW has positively
-     * reported that the current media carries no video track. "Unknown" counts as allowed, so a
-     * video item never loses PiP because metadata has not arrived yet.
+     * Always true unless the host app opted into {@code pipVideoOnly}, in which case PiP is
+     * withheld until JW has POSITIVELY confirmed a video track.
+     *
+     * The default is deny-until-proven-video, not allow-until-proven-audio. Measured on-device
+     * (All Daf, 2026-08-28) JW reports {@code width=-1 height=-1 videoMimeType="" audioMimeType=""}
+     * for audio-only media — i.e. it emits no positive audio signal at all, and an audio item is
+     * indistinguishable from an item whose metadata has not arrived yet. Any rule that tries to
+     * detect audio therefore cannot fire, which is why the two previous attempts (null mime check,
+     * then blank-mime check) both left audio entering PiP. Video, by contrast, IS positively
+     * detectable via its decoded dimensions, so the gate keys off the signal that actually exists.
      */
     public boolean isPipAllowedForCurrentMedia() {
         if (!pipVideoOnly) {
             return true;
         }
-        return !Boolean.FALSE.equals(mHasVideoTrack);
+        return Boolean.TRUE.equals(mHasVideoTrack);
     }
 
     /**
@@ -1422,9 +1445,12 @@ public class RNJWPlayerView extends RelativeLayout implements
      */
     private void updatePipRegistration() {
         if (mPlayer == null || mActivity == null || !mPipEnabled) {
+            JWLog.d(TAG, "updatePipRegistration: skipped (mPlayer=" + (mPlayer != null)
+                    + " mActivity=" + (mActivity != null) + " mPipEnabled=" + mPipEnabled + ")");
             return;
         }
         if (isPipSuppressingControls()) {
+            JWLog.d(TAG, "updatePipRegistration: skipped, PiP session already active");
             return;
         }
         boolean allow = isPipAllowedForCurrentMedia();
@@ -1440,8 +1466,9 @@ public class RNJWPlayerView extends RelativeLayout implements
             } else {
                 mPlayer.deregisterActivityForPip();
                 unregisterPipBackCallback();
-                JWLog.d(TAG, "updatePipRegistration: PiP withheld for audio-only media"
-                        + " (pipVideoOnly=true)");
+                disableSystemAutoEnterPip();
+                JWLog.d(TAG, "updatePipRegistration: PiP withheld, no confirmed video track"
+                        + " (pipVideoOnly=true, hasVideoTrack=" + mHasVideoTrack + ")");
             }
             mPipRegisteredForVideo = allow;
         } catch (Throwable t) {
@@ -1450,36 +1477,78 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
-     * Records whether the current media has a video track from JW's track metadata, then
-     * re-evaluates the PiP registration.
+     * Second, independent lever against auto-entering PiP on fold.
      *
-     * MetaEvent fires repeatedly and often carries only partial information (ID3 cues, for
-     * instance), so this only draws a conclusion when the payload is actually about tracks:
-     * real video dimensions mean video; an audio mime type with no video mime type means
-     * audio-only. Anything else leaves the previous answer alone.
+     * Deregistering with the SDK is the primary mechanism, but it only helps if the SDK enters PiP
+     * via its own lifecycle observer. On Android 12+ an activity can also be auto-entered by the
+     * system itself when {@code PictureInPictureParams.autoEnterEnabled} is set, which survives
+     * anything done at the SDK level. Clearing it here means both routes are closed regardless of
+     * which one the SDK actually uses.
+     *
+     * Only ever clears the flag — the allow path deliberately does not set it, because overwriting
+     * the SDK's params would drop the aspect ratio / source rect hint it configures for the video
+     * PiP window. Re-registering restores whatever the SDK wants.
      */
-    private void noteTrackMetadata(int width, int height, String videoMimeType, String audioMimeType) {
-        Boolean resolved = null;
-        if (width > 0 && height > 0) {
-            resolved = Boolean.TRUE;
-        } else if (videoMimeType == null && audioMimeType != null) {
-            resolved = Boolean.FALSE;
-        }
-        if (resolved == null || resolved.equals(mHasVideoTrack)) {
+    private void disableSystemAutoEnterPip() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || mActivity == null) {
             return;
         }
-        mHasVideoTrack = resolved;
-        JWLog.d(TAG, "noteTrackMetadata: hasVideoTrack=" + mHasVideoTrack + " (" + width + "x"
-                + height + ", video=" + videoMimeType + ", audio=" + audioMimeType + ")");
+        try {
+            mActivity.setPictureInPictureParams(
+                    new PictureInPictureParams.Builder().setAutoEnterEnabled(false).build());
+            JWLog.d(TAG, "disableSystemAutoEnterPip: autoEnterEnabled=false");
+        } catch (Throwable t) {
+            JWLog.w(TAG, "disableSystemAutoEnterPip failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Records that the current media has a video track from JW's track metadata, then
+     * re-evaluates the PiP registration.
+     *
+     * Only ever resolves to TRUE. MetaEvent fires repeatedly with partial payloads (ID3 cues), and
+     * for audio-only media this SDK reports {@code -1x-1} with blank mime types — which is byte for
+     * byte what it also reports before a video item's tracks are decoded. There is consequently no
+     * payload that proves "audio", so no negative branch exists here; absence of proof is handled
+     * by the deny default in {@link #isPipAllowedForCurrentMedia()}.
+     */
+    private void noteTrackMetadata(int width, int height, String videoMimeType, String audioMimeType) {
+        // One line per playlist item, not per MetaEvent (which fires repeatedly with ID3 cues).
+        // Kept permanently: the whole pipVideoOnly gate rests on what this SDK actually reports
+        // here, and that turned out to be neither documented nor intuitive.
+        if (!mLoggedTrackMetaForItem) {
+            mLoggedTrackMetaForItem = true;
+            JWLog.d(TAG, "trackMeta: " + width + "x" + height + " videoMime='" + videoMimeType
+                    + "' audioMime='" + audioMimeType + "'");
+        }
+        boolean hasVideo = (width > 0 && height > 0) || !isBlank(videoMimeType);
+        if (!hasVideo || Boolean.TRUE.equals(mHasVideoTrack)) {
+            return;
+        }
+        mHasVideoTrack = Boolean.TRUE;
+        JWLog.d(TAG, "noteTrackMetadata: video track confirmed (" + width + "x" + height
+                + ", video=" + videoMimeType + ", audio=" + audioMimeType + ")");
         updatePipRegistration();
     }
 
-    /** Forgets the current media's track answer; called when a new item is loaded. */
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    /**
+     * Forgets the current media's track answer; called when a new item is loaded.
+     *
+     * Re-evaluates registration immediately: under deny-until-proven-video, dropping back to
+     * "unknown" must actively withdraw PiP, otherwise a video item's registration would still be
+     * live when the next item turns out to be audio.
+     */
     private void resetVideoTrackDetection() {
         if (mHasVideoTrack != null) {
             JWLog.d(TAG, "resetVideoTrackDetection: clearing hasVideoTrack for new item");
         }
         mHasVideoTrack = null;
+        mLoggedTrackMetaForItem = false;
+        updatePipRegistration();
     }
 
     /**
