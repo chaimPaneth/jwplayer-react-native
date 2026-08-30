@@ -196,6 +196,28 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return lastAppPushChangedTrack;
     }
 
+    // --- cross-track start leak -------------------------------------------------------
+    // The media id the last onPlaylistItem was for, and when it last CHANGED. Needed
+    // because an explicit start supplied by JS is only about the item JS believes is
+    // current: when the native layer advances by itself (background auto-advance, an
+    // Android Auto selection), JS keeps reporting the position of the item it still
+    // thinks is playing, and that value then lands on the NEW item.
+    //
+    // Observed 2026-08-30 13:35 on a locked phone: item 87674 completed naturally at
+    // 27:57 of 28:57, the app advanced to 87728, and the resume resolved twice --
+    //   13:35:52.136  savedPositionMs=0ms (MediaItemsResumeProvider), playlistStartMs=0
+    //                 -> resumeMs=0                                     (correct)
+    //   13:35:52.728  savedPositionMs=0ms, playlistStartMs=12000
+    //                 -> resumeMs=12000  (explicit start wins)          (WRONG)
+    // and 12000ms was then PERSISTED as 87728's saved position. The user lost the first
+    // 12 seconds of a fresh daf, and it would resume there next time. 12000 was RN's own
+    // stale live-position tracker, which had been reading a rebuilding player.
+    private static String lastPlaylistItemMediaId = null;
+    private static long trackSwitchedAtMs = 0L;
+    private static final long CROSS_TRACK_START_WINDOW_MS = 10_000L;
+    /** Agreement tolerance: below this the two sources are saying the same thing. */
+    private static final long CROSS_TRACK_AGREEMENT_MS = 3_000L;
+
     /**
      * TEMPORARY DIAGNOSTICS -- remove with the other [AAPIP] logging once the Android Auto
      * desync work is confirmed.
@@ -2315,6 +2337,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             androidAutoSelectedMediaId = normalizedMediaId;
         }
 
+        // Note when the item the player is on actually CHANGES, so the resume decision
+        // below can tell a same-track foreground rebuild (where JS's explicit start is the
+        // live position and must win) from a fresh track (where it is the PREVIOUS item's
+        // position). Keyed on the item the SDK just handed us, not on externalMediaId,
+        // which handlePlayFromMediaId may already have moved.
+        String itemKey = (inferredMediaId != null && !inferredMediaId.trim().isEmpty())
+                ? inferredMediaId.trim()
+                : extractPrimarySourceFile(incomingItem);
+        if (itemKey != null && !itemKey.equals(lastPlaylistItemMediaId)) {
+            if (lastPlaylistItemMediaId != null) {
+                trackSwitchedAtMs = System.currentTimeMillis();
+                JWLog.d(TAG, "onPlaylistItem: track switched " + lastPlaylistItemMediaId
+                        + " -> " + itemKey + " (explicit JS starts are suspect for the next "
+                        + CROSS_TRACK_START_WINDOW_MS + "ms)");
+            }
+            lastPlaylistItemMediaId = itemKey;
+        }
+
         boolean hasPendingAndroidAutoResume = externalMediaId != null
             && pendingSeekMs != null
             && pendingSeekMs >= 0;
@@ -2383,7 +2423,31 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // Therefore, whenever JS supplied an explicit start it MUST win over the static
             // cache; the cache is only a fallback for when there is no explicit start at all.
             // (Generalizes the earlier stale-zero guard — the stale cached value is not always 0.)
-            if (hasExplicitStart && playlistStartMs >= 0) {
+            //
+            // EXCEPT across a track change. That rule assumes JS's value describes the item the
+            // player is on, which stops being true the moment the native layer advances by
+            // itself: JS keeps reporting the OLD item's position, and it then lands on the new
+            // item (see the trackSwitchedAtMs note above -- 12000ms applied to a fresh daf and
+            // persisted). Inside the switch window the app's own per-item record wins instead,
+            // because that is the only source that is scoped to THIS item. Same-track rebuilds
+            // are untouched, which is what the foreground rewind guard depends on.
+            boolean freshSwitch = trackSwitchedAtMs > 0L
+                    && (System.currentTimeMillis() - trackSwitchedAtMs)
+                        <= CROSS_TRACK_START_WINDOW_MS;
+            boolean crossTrackStartSuspect = freshSwitch
+                    && hasExplicitStart
+                    && savedPositionMs >= 0
+                    && Math.abs(playlistStartMs - savedPositionMs) > CROSS_TRACK_AGREEMENT_MS;
+
+            if (crossTrackStartSuspect) {
+                resumeMs = savedPositionMs;
+                JWLog.w(TAG, "onPlaylistItem: cross-track explicit start REFUSED for mediaId="
+                        + externalMediaId + " -- JS asked for " + playlistStartMs
+                        + "ms within " + CROSS_TRACK_START_WINDOW_MS
+                        + "ms of a track change, but this item's own recorded position is "
+                        + savedPositionMs + "ms (" + positionSource + "); using that."
+                        + " JS was still reporting the previous item's position.");
+            } else if (hasExplicitStart && playlistStartMs >= 0) {
                 resumeMs = playlistStartMs;
                 JWLog.d(TAG, "onPlaylistItem: using explicit JS starttime resumeMs=" + resumeMs + "ms (live position; preferred over static cache savedPositionMs=" + savedPositionMs + "ms)");
             } else if (savedPositionMs >= 0) {
