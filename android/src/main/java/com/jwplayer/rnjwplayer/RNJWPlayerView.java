@@ -18,6 +18,7 @@ import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.os.Build;
+import android.os.SystemClock;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
@@ -129,6 +130,7 @@ import com.jwplayer.pub.api.fullscreen.delegates.DialogLayoutDelegate;
 import com.jwplayer.pub.api.fullscreen.delegates.SystemUiDelegate;
 import com.jwplayer.pub.api.license.LicenseUtil;
 import com.jwplayer.pub.api.media.captions.Caption;
+import com.jwplayer.pub.api.media.playlists.MediaSource;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
 import com.jwplayer.rnjwplayer.session.RNJWMediaServiceController;
 import com.jwplayer.rnjwplayer.utils.JWLog;
@@ -269,6 +271,32 @@ public class RNJWPlayerView extends RelativeLayout implements
     // overlay inside the PiP window" — the SDK's controls flag proved insufficient.
     private final Map<View, Integer> mJwUiVisibilitySnapshot = new LinkedHashMap<>();
     private ViewTreeObserver.OnGlobalLayoutListener mPipUiEnforcer = null;
+    // ── Foreground-rebuild playhead snapshot ────────────────────────────────────────────────
+    // The live playhead captured the moment the app comes back to the foreground (PiP exit /
+    // unlock / background return), BEFORE the RN layer re-pushes its declarative config. On that
+    // return the app re-sends the playlist for the track that is already playing, and the
+    // playlist-only fast path in setConfig() rebuilds the player at the item's starttime — so a
+    // starttime that is behind the real playhead rewinds playback. See
+    // resolveForegroundRebuildStartOverrideSec() for why the JS-supplied value cannot be trusted
+    // here and why native is the only layer that can tell.
+    private String mForegroundRebuildFile = null;
+    private long mForegroundRebuildPositionMs = -1L;
+    private long mForegroundRebuildCapturedAtMs = 0L;
+    // The snapshot is only meant to cover the config burst that immediately follows the
+    // foreground transition (observed: three pushes within ~85ms of onHostResume). Anything later
+    // is an ordinary update and must be honoured as sent.
+    private static final long FOREGROUND_REBUILD_SNAPSHOT_TTL_MS = 15_000L;
+    // Ignore sub-second disagreement: the SDK's own resume rounding routinely differs from the
+    // requested start by a few hundred ms and that is not a rewind.
+    private static final long FOREGROUND_REBUILD_MIN_REWIND_MS = 2_000L;
+    // Identity of the item the player is on, and the one before it. Maintained from the SDK's
+    // own playlist-item events, so it reflects native/SDK advances the RN layer never saw.
+    private String mCurrentItemFile = null;
+    private String mPreviousItemFile = null;
+    // A stale revert is only credible as part of the foreground config burst itself (measured at
+    // ~0.5s after the transition). Kept much tighter than the rewind TTL so a real user tap made
+    // seconds after returning to the app is never mistaken for stale state.
+    private static final long FOREGROUND_REVERT_WINDOW_MS = 6_000L;
     // Host-app opt-in (config prop "pipVideoOnly", default false): when true, Picture-in-Picture is
     // only offered for media that actually has a video track. Audio-only playback then behaves
     // like iOS — no PiP window, background playback continues through the media session /
@@ -468,6 +496,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         hidePipProgress();
         stopPipUiEnforcer();
         mJwUiVisibilitySnapshot.clear();
+        // The snapshot describes a player instance that is going away; a rebuilt player must not
+        // inherit it (file identity and the TTL would usually reject it, but do not rely on that).
+        clearForegroundRebuildSnapshot();
         boolean replacingOwner = PlaybackManager.getInstance().isTransitioning();
         releaseMediaService(
             replacingOwner,
@@ -1025,6 +1056,13 @@ public class RNJWPlayerView extends RelativeLayout implements
             return;
         }
 
+        // Snapshot the real playhead BEFORE the RN layer re-pushes its config. On PiP exit the app
+        // re-sends the playlist for the track already playing, and if its starttime is stale the
+        // rebuild would rewind playback. See resolveForegroundRebuildStartOverrideSec().
+        if (!isInPip) {
+            captureForegroundRebuildPlayhead("pip-exit");
+        }
+
         // Defer the layout work until after the activity finishes its lifecycle pass.
         // Running synchronously from inside onPictureInPictureModeChanged() reparents
         // the view before the system has measured the PiP window, which causes the
@@ -1281,6 +1319,207 @@ public class RNJWPlayerView extends RelativeLayout implements
         } catch (Throwable t) {
             JWLog.w(TAG, "applyControlsToPlayer(" + show + ") failed: " + t.getMessage());
         }
+    }
+
+    /**
+     * Records the live playhead of the track that is currently loaded, for use by the config
+     * rebuild that immediately follows a foreground transition. Called from the PiP-exit and
+     * host-resume callbacks, both of which run BEFORE the RN layer re-pushes its config.
+     *
+     * Reads the SDK, not any cached value: this is the only position in the process that is
+     * guaranteed to still be correct after a spell of locked-screen background playback.
+     *
+     * Keeps the FURTHEST position seen for the same file inside the TTL window, because the two
+     * callers fire a few tens of ms apart and the later one can read a player the rebuild has
+     * already begun to tear down (position 0).
+     */
+    private void captureForegroundRebuildPlayhead(String reason) {
+        if (mPlayer == null) {
+            return;
+        }
+        try {
+            String file = currentPlayerItemFile();
+            long positionMs = (long) (mPlayer.getPosition() * 1000d);
+            if (file == null || positionMs <= 0L) {
+                JWLog.d(TAG, "captureForegroundRebuildPlayhead(" + reason + "): nothing to capture"
+                        + " (file=" + file + ", positionMs=" + positionMs + ")");
+                return;
+            }
+            boolean sameFileInWindow = file.equals(mForegroundRebuildFile)
+                    && isForegroundRebuildSnapshotFresh();
+            if (sameFileInWindow && positionMs <= mForegroundRebuildPositionMs) {
+                JWLog.d(TAG, "captureForegroundRebuildPlayhead(" + reason + "): keeping furthest"
+                        + " existing snapshot " + mForegroundRebuildPositionMs + "ms (read "
+                        + positionMs + "ms)");
+                return;
+            }
+            mForegroundRebuildFile = file;
+            mForegroundRebuildPositionMs = positionMs;
+            mForegroundRebuildCapturedAtMs = SystemClock.elapsedRealtime();
+            JWLog.d(TAG, "captureForegroundRebuildPlayhead(" + reason + "): positionMs="
+                    + positionMs + " file=" + file);
+        } catch (Throwable t) {
+            JWLog.w(TAG, "captureForegroundRebuildPlayhead(" + reason + ") failed: "
+                    + t.getMessage());
+        }
+    }
+
+    private boolean isForegroundRebuildSnapshotFresh() {
+        return mForegroundRebuildCapturedAtMs > 0L
+                && (SystemClock.elapsedRealtime() - mForegroundRebuildCapturedAtMs)
+                        <= FOREGROUND_REBUILD_SNAPSHOT_TTL_MS;
+    }
+
+    /**
+     * Returns the start position (seconds) the same-track rebuild should actually use, or null to
+     * honour the incoming config unchanged.
+     *
+     * Why this is needed. On a foreground return the app re-sends its declarative config with the
+     * playlist item's starttime refreshed to what JS believes the live position is. JS derives that
+     * from a polled sample of the playhead, and that sample stops advancing while the screen is
+     * locked and the activity is stopped — so after a spell of background playback it holds the
+     * position from when the app was last awake. The fast path then rebuilds the player at that
+     * value and playback jumps backwards. Reproduced 2026-08-28: an item auto-advanced inside PiP
+     * played on to 8:17 with the screen locked, and the rebuild on unlock reloaded it at 2:07
+     * (config starttime 127, logcat 17:21:00.680 "playlistStartMs=127000ms (from extras)").
+     *
+     * Movement is corrected in ONE direction only. A request to start LATER than the live playhead
+     * is honoured untouched — that is a genuine seek or an Android Auto handoff resume, and both
+     * must keep working. Only a request to start EARLIER than where playback already is gets
+     * pinned to the live playhead, because on this path that can only be stale state: a real
+     * backwards seek arrives through seekTo() on the bridge, never as a playlist config push.
+     *
+     * Scoped by file identity rather than by comparing successive props, because the props are not
+     * a reliable anchor here — the observed burst pushed a different mediaId first and corrected
+     * itself on the next push, so a prop-to-prop "same track" test is defeated by the flap while
+     * the file the PLAYER is on is not.
+     */
+    private Double resolveForegroundRebuildStartOverrideSec(String incomingFile,
+                                                           Double requestedStartSec) {
+        if (mForegroundRebuildFile == null || mForegroundRebuildPositionMs <= 0L) {
+            return null;
+        }
+        if (!isForegroundRebuildSnapshotFresh()) {
+            JWLog.d(TAG, "resolveForegroundRebuildStartOverride: snapshot expired, clearing");
+            clearForegroundRebuildSnapshot();
+            return null;
+        }
+        if (incomingFile == null || !mForegroundRebuildFile.equals(incomingFile)) {
+            return null;
+        }
+        long requestedMs = requestedStartSec == null ? 0L : (long) (requestedStartSec * 1000d);
+        if (requestedMs + FOREGROUND_REBUILD_MIN_REWIND_MS >= mForegroundRebuildPositionMs) {
+            return null;
+        }
+        double overrideSec = mForegroundRebuildPositionMs / 1000d;
+        JWLog.d(TAG, "resolveForegroundRebuildStartOverride: pinning same-track rebuild to live"
+                + " playhead " + mForegroundRebuildPositionMs + "ms, ignoring requested start "
+                + requestedMs + "ms (rewind of " + (mForegroundRebuildPositionMs - requestedMs)
+                + "ms)");
+        return overrideSec;
+    }
+
+    private void clearForegroundRebuildSnapshot() {
+        mForegroundRebuildFile = null;
+        mForegroundRebuildPositionMs = -1L;
+        mForegroundRebuildCapturedAtMs = 0L;
+    }
+
+    /**
+     * File URL of the item the player is currently on, or null when it cannot be determined.
+     * Prefers the item's own file and falls back to its first media source, which is the shape
+     * the media-session layer already relies on (see extractPrimarySourceFile there).
+     */
+    private String currentPlayerItemFile() {
+        try {
+            if (mPlayer == null) {
+                return null;
+            }
+            return playlistItemFile(mPlayer.getPlaylistItem());
+        } catch (Throwable ignored) {
+            // Fall through to null: the override is skipped and the config is honoured as sent.
+        }
+        return null;
+    }
+
+    /** File URL of a PlaylistItem: its own file, else its first media source. */
+    private String playlistItemFile(PlaylistItem item) {
+        try {
+            if (item == null) {
+                return null;
+            }
+            String file = item.getFile();
+            if (file != null && !file.trim().isEmpty()) {
+                return file.trim();
+            }
+            List<MediaSource> sources = item.getSources();
+            if (sources != null && !sources.isEmpty() && sources.get(0) != null) {
+                String sourceFile = sources.get(0).getFile();
+                if (sourceFile != null && !sourceFile.trim().isEmpty()) {
+                    return sourceFile.trim();
+                }
+            }
+        } catch (Throwable ignored) {
+            // Treated as unknown.
+        }
+        return null;
+    }
+
+    /**
+     * True when an incoming playlist-only update is the RN layer re-asserting the item the
+     * player already advanced AWAY from, during the config burst that follows a foreground
+     * transition. That push is stale state, not an instruction.
+     *
+     * Reproduced 2026-08-29 with the automated 12-step harness: an item was skipped to inside
+     * PiP, played on to 3:47, and on PiP exit the RN layer re-pushed the PREVIOUS item, which
+     * the fast path then loaded and seeked to the new item's playhead (logcat 23:01:18.695
+     * "app re-asserted unchanged 137108, likely a playlist re-push" -> 23:01:18.915
+     * "seekTo(time=195.0)"). The user sees the elapsed time jump and the wrong title.
+     *
+     * The media-session layer already defends itself against exactly this ("KEEPING newer
+     * androidAutoSelectedMediaId"); this extends the same scepticism to the player rebuild.
+     *
+     * Deliberately narrow, so a real user action is never swallowed: it fires only for the ONE
+     * file we just left, only while the player is genuinely on a different item, and only inside
+     * a short window after the foreground transition. Tapping any OTHER item is unaffected.
+     */
+    private boolean isStaleRevertPush(String incomingFile) {
+        if (incomingFile == null || mPreviousItemFile == null || mCurrentItemFile == null) {
+            return false;
+        }
+        if (!incomingFile.equals(mPreviousItemFile) || incomingFile.equals(mCurrentItemFile)) {
+            return false;
+        }
+        if (mForegroundRebuildCapturedAtMs <= 0L
+                || SystemClock.elapsedRealtime() - mForegroundRebuildCapturedAtMs
+                        > FOREGROUND_REVERT_WINDOW_MS) {
+            return false;
+        }
+        String live = currentPlayerItemFile();
+        return live != null && live.equals(mCurrentItemFile);
+    }
+
+    /** First playlist item's startTime (seconds) as sent by RN, or null when absent. */
+    private Double firstPlaylistStartTimeFromConfig(ReadableMap configProp) {
+        try {
+            if (configProp != null && configProp.hasKey("playlist")) {
+                ReadableArray playlist = configProp.getArray("playlist");
+                if (playlist != null && playlist.size() > 0) {
+                    ReadableMap first = playlist.getMap(0);
+                    if (first != null) {
+                        // JS sends the SDK's lowercase spelling; the legacy path uses camelCase.
+                        for (String key : new String[]{"starttime", "startTime"}) {
+                            if (first.hasKey(key) && !first.isNull(key)) {
+                                return first.getDouble(key);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Treated as "no explicit start".
+        }
+        return null;
     }
 
     /**
@@ -2107,6 +2346,28 @@ public class RNJWPlayerView extends RelativeLayout implements
                 String newFirstFile = firstPlaylistFileFromConfig(prop);
                 boolean sameTrack = previousFirstFile != null && previousFirstFile.equals(newFirstFile);
 
+                // Pin a same-track rebuild to the live playhead when the incoming starttime is
+                // behind it. Keyed on the file the PLAYER is on rather than on `sameTrack` above,
+                // because a foreground return can push a corrective burst in which one push names
+                // a different item — that flap defeats a prop-to-prop comparison but not the
+                // player's own identity. Null means "honour the config as sent".
+                Double requestedStartSec = firstPlaylistStartTimeFromConfig(prop);
+                Double startOverrideSec =
+                        resolveForegroundRebuildStartOverrideSec(newFirstFile, requestedStartSec);
+
+                // Stale foreground re-push of the item we already advanced away from: rebuilding
+                // would swap the listener back to the previous item AND carry the current item's
+                // playhead onto it. Leave the player alone -- it is already on the right item at
+                // the right position. mConfig is still updated so this push is not re-evaluated.
+                if (isStaleRevertPush(newFirstFile)) {
+                    JWLog.w(TAG, "Playlist-only fast update IGNORED: stale re-push of the previous"
+                            + " item (" + newFirstFile + ") while the player is on " + mCurrentItemFile
+                            + " -- keeping live item, refusing revert"
+                            + " (requestedStart=" + requestedStartSec + "s)");
+                    mConfig = prop;
+                    return;
+                }
+
                 PlayerConfig oldConfig = mPlayer.getConfig();
                 // Capture the controls-enabled state BEFORE setup() so we can restore the
                 // caller's intended visibility after forcing the UI group below.
@@ -2155,7 +2416,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         .advertisingConfig(oldConfig.getAdvertisingConfig())
                         .stretching(oldConfig.getStretching())
                         .uiConfig(createUiConfigWithControlsContainer(mPlayer, oldConfig.getUiConfig()))
-                        .playlist(Util.createPlaylist(mPlaylistProp))
+                        .playlist(Util.createPlaylist(mPlaylistProp, startOverrideSec))
                         .allowCrossProtocolRedirects(oldConfig.getAllowCrossProtocolRedirects())
                         .preload(oldConfig.getPreload())
                         .useTextureView(oldConfig.useTextureView())
@@ -2294,7 +2555,10 @@ public class RNJWPlayerView extends RelativeLayout implements
             String warningMessage = "⚠️ Google IMA advertising is not enabled. " +
                 "To use IMA ads, add 'RNJWPlayerUseGoogleIMA = true' to your app/build.gradle ext {} block. " +
                 "Current client: " + clientValue + ". Player will load without ads.";
-            Log.w(TAG, warningMessage);
+            // Merge fix (headless <- headless-v1.6.0): upstream used a raw android.util.Log here,
+            // which the headless line does not import -- all logging is funnelled through JWLog so
+            // it can be gated centrally. Routed through JWLog.w to keep that invariant.
+            JWLog.w(TAG, warningMessage);
         }
     }
     
@@ -3448,6 +3712,16 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         JWLog.d(TAG, "onPlaylistItem(index=" + playlistItemEvent.getIndex() + ")");
+        // Remember what we advanced AWAY from. Used by the fast path to recognise a stale
+        // foreground re-push: the RN layer does not always learn about a native/SDK item
+        // advance, so on the next foreground transition it can re-assert the item that was
+        // playing BEFORE the advance. See resolveStaleRevertPush().
+        String incomingFile = playlistItemFile(playlistItemEvent.getPlaylistItem());
+        if (incomingFile != null && !incomingFile.equals(mCurrentItemFile)) {
+            mPreviousItemFile = mCurrentItemFile;
+            mCurrentItemFile = incomingFile;
+            JWLog.d(TAG, "onPlaylistItem: item identity " + mPreviousItemFile + " -> " + mCurrentItemFile);
+        }
         // A new item may change audio-only vs video, so the pipVideoOnly answer is re-derived from
         // the next MetaEvent rather than carried over.
         resetVideoTrackDetection();
@@ -3656,6 +3930,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
 
         JWLog.d(TAG, "onHostResume() sessionDepth=" + sessionDepth + ", isInBackground=" + isInBackground);
+        // Same reason as the PiP-exit capture: this runs before the RN config re-push, and covers
+        // the plain lock-screen / background return where no PiP transition occurred.
+        captureForegroundRebuildPlayhead("host-resume");
         // Notify playback routing that UI is foregrounded again
         try {
             PlaybackManager.getInstance().setUiInBackground(false);

@@ -85,6 +85,26 @@ public class Util {
     }
 
     public static List<PlaylistItem> createPlaylist(ReadableArray playlistItems) {
+        return createPlaylist(playlistItems, null);
+    }
+
+    /**
+     * Builds the SDK playlist from the RN prop, optionally forcing the FIRST item's start
+     * position (seconds).
+     *
+     * The override exists so a same-track rebuild can be pinned to the live playhead instead of
+     * the start position the JS layer supplied -- see
+     * {@code RNJWPlayerView.resolveForegroundRebuildStartOverrideSec}. It is written into the raw
+     * JSON before {@link JsonHelper#parsePlaylistItemJson} sees it, so the resulting PlaylistItem
+     * reports it from {@code getStartTime()} too. That matters: the media-session layer re-reads
+     * {@code getStartTime()} in onPlaylistItem and arms its own resume seek from it, so overriding
+     * here fixes the SDK setup AND the pending seek in one place.
+     *
+     * Both spellings are set because the two parse paths disagree: the JSON path uses the SDK's
+     * lowercase "starttime", the legacy {@link #getPlaylistItem} path reads "startTime".
+     */
+    public static List<PlaylistItem> createPlaylist(ReadableArray playlistItems,
+                                                    Double firstItemStartTimeOverrideSeconds) {
         List<PlaylistItem> playlist = new ArrayList<>();
         if (playlistItems == null || playlistItems.size() <= 0)
             return playlist;
@@ -98,6 +118,10 @@ public class Util {
             // Try since legacy config may or may not conform to this standard
             try {
                 obj = MapUtil.toJSONObject(playlistItem);
+                if (j == 0 && firstItemStartTimeOverrideSeconds != null) {
+                    obj.put("starttime", firstItemStartTimeOverrideSeconds.doubleValue());
+                    obj.put("startTime", firstItemStartTimeOverrideSeconds.doubleValue());
+                }
                 item = JsonHelper.parsePlaylistItemJson(obj);
             } catch (Exception ex) {
                 Log.e("createPlaylist", ex.toString());
@@ -106,6 +130,10 @@ public class Util {
                 playlist.add(item);
             } else {
                 // Try to use the legacy format
+                if (j == 0 && firstItemStartTimeOverrideSeconds != null) {
+                    Log.w("createPlaylist", "JSON parse failed for item 0; startTime override "
+                            + firstItemStartTimeOverrideSeconds + "s not applied on legacy path");
+                }
                 PlaylistItem newPlayListItem = getPlaylistItem((playlistItem));
                 playlist.add(newPlayListItem);
             }
