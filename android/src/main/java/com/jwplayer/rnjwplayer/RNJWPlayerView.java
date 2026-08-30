@@ -1487,6 +1487,16 @@ public class RNJWPlayerView extends RelativeLayout implements
         if (incomingFile == null || mPreviousItemFile == null || mCurrentItemFile == null) {
             return false;
         }
+        // A push that CHANGES the app's post is an instruction, never a stale re-assert -- even
+        // when it names the item we just left. Reproduced 2026-08-30 (locked-screen run, logcat
+        // 09:56:39.272): Android Auto had moved to Chulin 121, the app's own rebuild had already
+        // dragged the player onto its stale post (Chullin 122), and RN's NEXT push -- the
+        // correction, carrying appTrackChanged=true -- looked exactly like a revert to the
+        // previous item from here. Refusing it cemented the wrong track on screen. Without this
+        // exit the guard turns a self-healing flap into a permanent regression.
+        if (com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.didLastAppPushChangeTrack()) {
+            return false;
+        }
         if (!incomingFile.equals(mPreviousItemFile) || incomingFile.equals(mCurrentItemFile)) {
             return false;
         }
@@ -1497,6 +1507,56 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
         String live = currentPlayerItemFile();
         return live != null && live.equals(mCurrentItemFile);
+    }
+
+    /**
+     * True when an incoming config would switch the player AWAY from the item Android Auto is on,
+     * because the app is re-asserting a post it has not noticed moving. Applies to EVERY setConfig
+     * branch, which is what distinguishes it from isStaleRevertPush().
+     *
+     * Why a second, broader gate was needed. isStaleRevertPush() only guards the playlist-only
+     * fast path. The locked-screen repro on 2026-08-30 never reached that path: more than the
+     * playlist differed, so setConfig took requiresPlayerRecreation() -> reconfigurePlayer(),
+     * which had no gate at all. The damage sequence from that capture:
+     *
+     *   09:56:31.315  onStartedWakingUp                       (phone unlocked, step 9)
+     *   09:56:34.481  captureForegroundRebuildPlayhead(pip-exit): positionMs=606366
+     *                 file=.../48677.m3u8                      (live item = Chulin 121, from AA)
+     *   09:56:34.572  setAppProvidedMediaId: KEEPING newer androidAutoSelectedMediaId=48677
+     *                 (app re-asserted unchanged 262485, likely a player rebuild)
+     *   09:56:34.573  "Reconfiguring existing player without recreation"
+     *   09:56:35.210  onPlaylistItem: item identity .../48677.m3u8 -> .../TwmDOHJk.m3u8
+     *                 PlaylistItem JSON: {"title":"Chullin 122 (uned..."}   <- WRONG ITEM LOADED
+     *
+     * The media-session layer had already diagnosed it in the line above ("KEEPING newer") and
+     * then let the rebuild proceed anyway. This gate acts on that diagnosis.
+     *
+     * Deliberately narrow, so opening a new item is never swallowed: it fires only inside the
+     * short window after a foreground transition, only when the player is genuinely on another
+     * file, and only when the app did NOT change its own post id -- a real navigation always does.
+     */
+    private boolean shouldKeepLiveItemForForegroundRebuild(String incomingFile) {
+        if (incomingFile == null || mPlayer == null) {
+            return false;
+        }
+        if (!isForegroundRebuildSnapshotFresh()) {
+            return false;
+        }
+        String live = currentPlayerItemFile();
+        if (live == null || live.equals(incomingFile)) {
+            return false;
+        }
+        if (com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.didLastAppPushChangeTrack()) {
+            return false;
+        }
+        if (!com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                .isAppTrackStaleVsAndroidAuto()) {
+            return false;
+        }
+        JWLog.w(TAG, "setConfig IGNORED: app re-asserted a stale post while the player is on the"
+                + " Android Auto selection -- keeping live item " + live
+                + ", refusing switch to " + incomingFile);
+        return true;
     }
 
     /** First playlist item's startTime (seconds) as sent by RN, or null when absent. */
@@ -2323,6 +2383,23 @@ public class RNJWPlayerView extends RelativeLayout implements
             // First time setup - need to create player view
             if (mPlayer == null) {
                 this.createPlayerView(prop);
+                mConfig = prop;
+                return;
+            }
+
+            // Before choosing a branch: refuse a foreground rebuild that would drag the player
+            // off the item Android Auto is on. Both the fast path below and the reconfigure path
+            // further down would otherwise load the app's stale post -- and the reconfigure path
+            // is the one the locked-screen repro actually took. See
+            // shouldKeepLiveItemForForegroundRebuild() for the captured sequence.
+            //
+            // mConfig is still advanced to `prop` so this push is not re-evaluated on the next
+            // diff; only the PLAYER is left alone. RN's own corrective push (which carries a
+            // changed post id) is unaffected and will be honoured normally.
+            if (shouldKeepLiveItemForForegroundRebuild(firstPlaylistFileFromConfig(prop))) {
+                if (prop.hasKey("playlist")) {
+                    mPlaylistProp = prop.getArray("playlist");
+                }
                 mConfig = prop;
                 return;
             }

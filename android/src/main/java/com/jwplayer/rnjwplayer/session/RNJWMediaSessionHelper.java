@@ -169,6 +169,33 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // event. Like androidAutoSelectedMediaId, it is NOT overwritten by JW callbacks.
     private static String appProvidedMediaId = null;
 
+    // Whether the app's most recent setAppProvidedMediaId CHANGED the post or merely re-asserted
+    // the one it already held. The distinction is the difference between a user action and stale
+    // state: setConfig re-runs on every player rebuild (notably a PIP/lock return) and re-asserts
+    // the app's current post, whereas navigating to another post moves the id. RNJWPlayerView
+    // needs it to decide whether an incoming config that switches item is an instruction or a
+    // regression -- see shouldKeepLiveItemForForegroundRebuild().
+    private static boolean lastAppPushChangedTrack = false;
+
+    /**
+     * True when the app's last-asserted post is NOT the item Android Auto selected.
+     *
+     * Both ids are written only by authoritative events (an explicit Android Auto selection, or
+     * the app declaring which post it is loading), so a divergence means one side is behind. When
+     * it coincides with the app merely re-asserting its previous post
+     * ({@link #didLastAppPushChangeTrack()} == false), the app is the stale one.
+     */
+    public static boolean isAppTrackStaleVsAndroidAuto() {
+        return appProvidedMediaId != null
+                && androidAutoSelectedMediaId != null
+                && !appProvidedMediaId.equals(androidAutoSelectedMediaId);
+    }
+
+    /** @see #lastAppPushChangedTrack */
+    public static boolean didLastAppPushChangeTrack() {
+        return lastAppPushChangedTrack;
+    }
+
     /**
      * TEMPORARY DIAGNOSTICS -- remove with the other [AAPIP] logging once the Android Auto
      * desync work is confirmed.
@@ -235,6 +262,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // the two: a real app-driven change (background auto-advance, the case this
             // retire exists for) moves the id, a rebuild re-assert does not.
             boolean appTrackChanged = !incoming.equals(appProvidedMediaId);
+            lastAppPushChangedTrack = appTrackChanged;
             appProvidedMediaId = incoming;
             // The app just told us which post it is loading, which makes this the freshest
             // authoritative id we have — so retire a now-stale androidAutoSelectedMediaId.
