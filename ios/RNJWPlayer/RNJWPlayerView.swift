@@ -171,11 +171,11 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
     @objc func rotated(notification: Notification) {
         if UIDevice.current.orientation.isLandscape {
-            print("Landscape")
+            JWLog.d("Landscape")
         }
 
         if UIDevice.current.orientation.isPortrait {
-            print("Portrait")
+            JWLog.d("Portrait")
         }
 
         self.layoutSubviews()
@@ -191,7 +191,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         if (license != nil) {
             JWPlayerKitLicense.setLicenseKey(license!)
         } else {
-            print("JW SDK License key not set.")
+            JWLog.d("JW SDK License key not set.")
         }
     }
 
@@ -244,7 +244,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             let configuration = try JWPlayerConfigurationBuilder().configuration(json: config).build()
             playerViewController.player.configurePlayer(with: configuration)
         } catch {
-            print(error)
+            JWLog.e("\(error)")
         }
     }
 
@@ -254,7 +254,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         // onBeforeNextPlaylistItem firing and resolveNextPlaylistItem being called.
         // Reconfiguring the player during this window crashes the SDK.
         if onBeforeNextPlaylistItemCompletion != nil {
-            print("Warning: setConfig deferred — playlist item callback pending resolution")
+            JWLog.w("Warning: setConfig deferred — playlist item callback pending resolution")
             pendingConfigAfterPlaylistItemCallback = config
             return
         }
@@ -275,20 +275,20 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
         // Compare dictionaries without the playlist key
         if (currentConfigCopy == nil) || !dictionariesAreEqual(configCopy, currentConfigCopy!) {
-            print("There are differences other than the 'playlist' key.")
+            JWLog.d("There are differences other than the 'playlist' key.")
 
             if (currentConfigCopy != nil) {
                 let diffKeys = keysForDifferingValues(in: configCopy, and: currentConfigCopy!)
-                print("There are differences in these keys: \(diffKeys)")
+                JWLog.d("There are differences in these keys: \(diffKeys)")
             } else {
-                print("It's a new config")
+                JWLog.d("It's a new config")
             }
 
             setNewConfig(config: config)
         } else {
             // Compare original dictionaries
             if !dictionariesAreEqual(currentConfig, config) {
-                print("The only difference is the 'playlist' key.")
+                JWLog.d("The only difference is the 'playlist' key.")
 
                 // Check if player is in PiP mode before loading new playlist
                 var isPipActive = false
@@ -356,7 +356,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     setNewConfig(config: config)
                 }
             } else {
-                print("There are no differences.")
+                JWLog.d("There are no differences.")
             }
         }
     }
@@ -370,7 +370,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
         // Prevent re-entrant calls while player is being recreated
         if isRecreatingPlayer {
-            print("Warning: Player recreation already in progress, queueing this config change")
+            JWLog.w("Warning: Player recreation already in progress, queueing this config change")
             // Override any pending config with the latest one
             pendingPlayerConfig = config
             return
@@ -378,14 +378,14 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         
         // Cancel any existing pending configuration
         if pendingPlayerConfig != nil {
-            print("Warning: Overriding pending content switch")
+            JWLog.w("Warning: Overriding pending content switch")
             playerConfigTimeout?.invalidate()
             pendingPlayerConfig = nil
         }
         
         // Validate config
         guard !config.isEmpty else {
-            print("Error: Empty config provided to recreatePlayerWithConfig")
+            JWLog.e("Error: Empty config provided to recreatePlayerWithConfig")
             return
         }
         
@@ -403,7 +403,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
         if isPipActive {
             guard let pipController = pipController else {
-                print("Warning: PiP appears active but controller is nil, proceeding with direct switch")
+                JWLog.w("Warning: PiP appears active but controller is nil, proceeding with direct switch")
                 proceedWithConfigChange(config: config)
                 return
             }
@@ -413,7 +413,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             // Set a timeout to prevent infinite waiting
             playerConfigTimeout = Timer.scheduledTimer(withTimeInterval: maxPendingTime, repeats: false) { [weak self] _ in
                 guard let self = self else { return }
-                print("Warning: PiP close timeout reached, forcing content switch")
+                JWLog.w("Warning: PiP close timeout reached, forcing content switch")
                 if let pendingConfig = self.pendingPlayerConfig {
                     self.pendingPlayerConfig = nil
                     self.proceedWithConfigChange(config: pendingConfig)
@@ -431,13 +431,13 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         if isFullscreen && requiresPlayerRecreation(config) {
             // Only exit fullscreen if we need to recreate the player
             // For reconfiguration, fullscreen state will be preserved automatically
-            print("Fullscreen active and recreation needed - exiting fullscreen first")
+            JWLog.d("Fullscreen active and recreation needed - exiting fullscreen first")
             pendingPlayerConfig = config
             
             // Set a timeout to prevent infinite waiting
             playerConfigTimeout = Timer.scheduledTimer(withTimeInterval: maxPendingTime, repeats: false) { [weak self] _ in
                 guard let self = self else { return }
-                print("Warning: Fullscreen exit timeout reached, forcing content switch")
+                JWLog.w("Warning: Fullscreen exit timeout reached, forcing content switch")
                 if let pendingConfig = self.pendingPlayerConfig {
                     self.pendingPlayerConfig = nil
                     self.proceedWithConfigChange(config: pendingConfig)
@@ -478,10 +478,10 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         
         // Decide: recreate or reconfigure?
         if requiresPlayerRecreation(config) {
-            print("Player recreation required - performing full recreation")
+            JWLog.d("Player recreation required - performing full recreation")
             completePlayerRecreation(config: config)
         } else {
-            print("Reconfiguring existing player without recreation (optimized)")
+            JWLog.d("Reconfiguring existing player without recreation (optimized)")
             reconfigurePlayer(config: config)
         }
     }
@@ -511,10 +511,10 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             let oldLicense = currentConfig["license"] as? String
             if newLicense != oldLicense {
                 if newLicense != nil && oldLicense != nil {
-                    print("License changed from '\(oldLicense!)' to '\(newLicense!)' - recreation required")
+                    JWLog.d("License changed from '\(oldLicense!)' to '\(newLicense!)' - recreation required")
                     return true
                 } else if newLicense == nil || oldLicense == nil {
-                    print("License presence changed - recreation required")
+                    JWLog.d("License presence changed - recreation required")
                     return true
                 }
             }
@@ -524,12 +524,12 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         let newViewOnly = config["viewOnly"] as? Bool ?? false
         let oldViewOnly = currentConfig["viewOnly"] as? Bool ?? false
         if newViewOnly != oldViewOnly {
-            print("viewOnly mode changed - recreation required")
+            JWLog.d("viewOnly mode changed - recreation required")
             return true
         }
         
         // All other changes can be handled by reconfiguration (optimized path!)
-        print("iOS: Using reconfiguration path (optimized)")
+        JWLog.d("iOS: Using reconfiguration path (optimized)")
         return false
     }
     
@@ -539,14 +539,14 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     private func reconfigurePlayer(config: [String: Any]) {
         guard let playerViewController = playerViewController else {
             // No player exists, need to create
-            print("No player exists - falling back to recreation")
+            JWLog.d("No player exists - falling back to recreation")
             completePlayerRecreation(config: config)
             return
         }
         
         // Prevent re-entrant calls during reconfiguration (Issue #192 - Error 180001)
         if isRecreatingPlayer {
-            print("Warning: Reconfiguration already in progress, queueing this config change")
+            JWLog.w("Warning: Reconfiguration already in progress, queueing this config change")
             pendingPlayerConfig = config
             return
         }
@@ -606,7 +606,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         // loadPlaylist keeps the session alive and the new content — including its
         // DRM sources and userInfo — flows through to the receiver automatically.
         if isActivelyCasting {
-            print("Casting active - using loadPlaylist to preserve cast session")
+            JWLog.d("Casting active - using loadPlaylist to preserve cast session")
 
             let loadItems: ([JWPlayerItem]) -> Void = { [weak self] items in
                 guard let self = self, let playerViewController = self.playerViewController else {
@@ -614,7 +614,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     return
                 }
                 guard !items.isEmpty else {
-                    print("Error: No valid playlist items found in config during cast")
+                    JWLog.e("Error: No valid playlist items found in config during cast")
                     self.isRecreatingPlayer = false
                     return
                 }
@@ -627,12 +627,12 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 if playlistItemCallback {
                     self.setupPlaylistItemCallback()
                 }
-                print("Playlist loaded during cast session (items: \(items.count))")
+                JWLog.d("Playlist loaded during cast session (items: \(items.count))")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     guard let self = self else { return }
                     self.isRecreatingPlayer = false
                     if let queuedConfig = self.pendingPlayerConfig {
-                        print("Processing queued config change after cast loadPlaylist")
+                        JWLog.d("Processing queued config change after cast loadPlaylist")
                         self.pendingPlayerConfig = nil
                         self.recreatePlayerWithConfig(queuedConfig)
                     }
@@ -735,7 +735,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             } else {
                 guard let data = try? JSONSerialization.data(withJSONObject: config, options: .prettyPrinted),
                       let jwConfig = try? JWJSONParser.config(from: data) else {
-                    print("Failed to parse config - falling back to recreation")
+                    JWLog.d("Failed to parse config - falling back to recreation")
                     completePlayerRecreation(config: config)
                     return
                 }
@@ -755,7 +755,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
             // Fullscreen state is automatically preserved by the view controller
             // No need to manually restore it
-            print("Player reconfigured successfully (fullscreen: \(wasFullscreen))")
+            JWLog.d("Player reconfigured successfully (fullscreen: \(wasFullscreen))")
 
             // Clear the reconfiguration flag after a delay to ensure SDK completes initialization
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -764,14 +764,14 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
                 // If there's a queued config change, process it now
                 if let queuedConfig = self.pendingPlayerConfig {
-                    print("Processing queued config change after reconfiguration")
+                    JWLog.d("Processing queued config change after reconfiguration")
                     self.pendingPlayerConfig = nil
                     self.recreatePlayerWithConfig(queuedConfig)
                 }
             }
 
         } catch {
-            print("Error during reconfiguration: \(error) - falling back to recreation")
+            JWLog.e("Error during reconfiguration: \(error) - falling back to recreation")
             isRecreatingPlayer = false  // Clear flag before fallback
             completePlayerRecreation(config: config)
         }
@@ -830,14 +830,14 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 if let player = (self.playerView?.player ?? self.playerViewController?.player) as? JWPlayer {
                     self.castController = JWCastController(player: player)
                     self.castController.delegate = self
-                    print("Cast controller recreated after full player recreation")
+                    JWLog.d("Cast controller recreated after full player recreation")
                 }
             }
             #endif
 
             // If there's a queued config change, process it now
             if let queuedConfig = self.pendingPlayerConfig {
-                print("Processing queued config change")
+                JWLog.d("Processing queued config change")
                 self.pendingPlayerConfig = nil
                 self.recreatePlayerWithConfig(queuedConfig)
             }
@@ -946,7 +946,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     }
                 } else {
                     guard let resolvedConfig = preBuiltConfig ?? jwConfig else {
-                        print("Failed to build JWPlayerConfiguration from config")
+                        JWLog.d("Failed to build JWPlayerConfiguration from config")
                         settingConfig = false
                         return
                     }
@@ -962,7 +962,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 }
 
             } catch {
-                print(error)
+                JWLog.e("\(error)")
             }
         } else {
             pendingConfig = true
@@ -978,43 +978,43 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     func setupPlaylistItemCallback() {
         hasTriggeredFirstPlaylistItemCallback = false
         playerViewController.player.setPlaylistItemCallback { [weak self] item, index, completion in
-            print("setPlaylistItemCallback called with index \(index)")
+            JWLog.d("setPlaylistItemCallback called with index \(index)")
             guard let self = self else {
-                print("setPlaylistItemCallback: self is nil, resuming normally")
+                JWLog.d("setPlaylistItemCallback: self is nil, resuming normally")
                 completion(item)
                 return
             }
             
             // Skip only the very first callback after initial setup
             if !self.hasTriggeredFirstPlaylistItemCallback {
-                print("Skipping first onBeforeNextPlaylistItem callback for initial video load")
+                JWLog.d("Skipping first onBeforeNextPlaylistItem callback for initial video load")
                 self.hasTriggeredFirstPlaylistItemCallback = true
                 completion(item)
                 return
             }
 
             if let onBeforeNextPlaylistItem = self.onBeforeNextPlaylistItem {
-                print("Storing completion handler and triggering onBeforeNextPlaylistItem")
+                JWLog.d("Storing completion handler and triggering onBeforeNextPlaylistItem")
                 // Store the completion handler first, before any other operations
                 self.onBeforeNextPlaylistItemCompletion = completion
-                print("Completion handler stored: \(self.onBeforeNextPlaylistItemCompletion != nil)")
+                JWLog.d("Completion handler stored: \(self.onBeforeNextPlaylistItemCompletion != nil)")
 
                 do {
                     let data = try JSONSerialization.data(withJSONObject: item.toJSONObject(), options: [.prettyPrinted])
                     let jsonString = String(data: data, encoding: .utf8) ?? "{}"
 
-                    print("Triggering onBeforeNextPlaylistItem with index \(index)")
-                    print("Completion handler before event: \(self.onBeforeNextPlaylistItemCompletion != nil)")
+                    JWLog.d("Triggering onBeforeNextPlaylistItem with index \(index)")
+                    JWLog.d("Completion handler before event: \(self.onBeforeNextPlaylistItemCompletion != nil)")
 
                     // Pass the playlist item to the React Native side
                     onBeforeNextPlaylistItem([
                         "playlistItem": jsonString,
                         "index": index
                     ])
-                    print("Completion handler after event: \(self.onBeforeNextPlaylistItemCompletion != nil)")
+                    JWLog.d("Completion handler after event: \(self.onBeforeNextPlaylistItemCompletion != nil)")
                 
                 } catch {
-                    print("Error serializing playlist item: \(error)")
+                    JWLog.e("Error serializing playlist item: \(error)")
                     self.onBeforeNextPlaylistItemCompletion?(item) // Call completion handler directly on error
                     self.onBeforeNextPlaylistItemCompletion = nil
                     // Apply any deferred config change
@@ -1024,7 +1024,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     }
                 }
             } else {
-                print("No onBeforeNextPlaylistItem handler set, calling completion directly")
+                JWLog.d("No onBeforeNextPlaylistItem handler set, calling completion directly")
                 completion(item)
             }
         }
@@ -1103,7 +1103,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     skinStylingBuilder.timeSliderStyle(timeSliderStyle)
                 } catch let error {
                     // Handle error when building time slider style
-                    print("Error building time slider style: \(error.localizedDescription)")
+                    JWLog.e("Error building time slider style: \(error.localizedDescription)")
                 }
 
                 let buttons: AnyObject! = colorsDict["buttons"] as AnyObject
@@ -1181,7 +1181,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 skinStylingBuilder.captionStyle(captionStyle)
             } catch let error {
                 // Handle error when building time slider style
-                print("Error building caption style: \(error.localizedDescription)")
+                JWLog.e("Error building caption style: \(error.localizedDescription)")
             }
         }
 
@@ -1208,7 +1208,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 skinStylingBuilder.menuStyle(jwMenuStyle)
             } catch let error {
                 // Handle error when building time slider style
-                print("Error building menu style: \(error.localizedDescription)")
+                JWLog.e("Error building menu style: \(error.localizedDescription)")
             }
         }
 
@@ -1219,7 +1219,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 playerViewController.styling = skinStyling
             }
         } catch {
-            print(error)
+            JWLog.e("\(error)")
         }
     }
 
@@ -1490,7 +1490,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             do {
                 playerViewController.nextUpStyle = try nextUpBuilder.build()
             } catch {
-                print(error)
+                JWLog.e("\(error)")
             }
         }
 
@@ -1535,7 +1535,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 let configuration: JWPlayerConfiguration = try configBuilder.build()
                 pvc.player.configurePlayer(with: configuration)
             } catch {
-                print(error)
+                JWLog.e("\(error)")
             }
             
             pvc.parentView = nil
@@ -1704,7 +1704,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             let data = try JSONSerialization.data(withJSONObject: sizesDict, options: .prettyPrinted)
             self.onPlayerSizeChange?(["sizes": data])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -1730,7 +1730,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             let data = try JSONSerialization.data(withJSONObject: sizesDict, options: .prettyPrinted)
             self.onPlayerSizeChange?(["sizes": data])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -1796,7 +1796,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             DispatchQueue.main.async {
                 guard let self = self else { completion(nil, error); return }
                 guard let data = data, error == nil else {
-                    print("Error fetching JW Platform playlist URL: \(error?.localizedDescription ?? "unknown")")
+                    JWLog.e("Error fetching JW Platform playlist URL: \(error?.localizedDescription ?? "unknown")")
                     completion(nil, error)
                     return
                 }
@@ -1847,7 +1847,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         let request = URLRequest(url: finalUrl)
         let task = URLSession.shared.dataTask(with: request) { (data, response, error) in
             if let error = error {
-                print("Error fetching FairPlay certificate: \(error.localizedDescription)")
+                JWLog.e("Error fetching FairPlay certificate: \(error.localizedDescription)")
                 handler(nil)
                 return
             }
@@ -1874,7 +1874,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
         URLSession.shared.dataTask(with: ckcRequest) { (data, response, error) in
             if let error = error {
-                print("Error fetching FairPlay license: \(error.localizedDescription)")
+                JWLog.e("Error fetching FairPlay license: \(error.localizedDescription)")
                 handler(nil, nil, nil)
                 return
             }
@@ -2067,7 +2067,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             let data:Data! = try JSONSerialization.data(withJSONObject: item.toJSONObject(), options:.prettyPrinted)
             self.onPlaylistItem?(["playlistItem": String(data:data, encoding:String.Encoding.utf8) as Any, "index": index])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
 
 //        item.addObserver(self, forKeyPath:"playbackLikelyToKeepUp", options:.new, context:nil)
@@ -2132,7 +2132,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
             self.onPlaylist?(["playlist": String(data:data as Data, encoding:String.Encoding.utf8) as Any])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -2213,6 +2213,9 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     func initAudioSession(category:String?, categoryOptions:[String]?, mode:String?) {
         self.setObservers()
 
+        JWLog.d("initAudioSession - requested category=\(category ?? "nil") "
+              + "options=\(categoryOptions ?? []) mode=\(mode ?? "nil")")
+
         var somethingChanged:Bool = false
 
         if !(category == audioCategory) || (categoryOptions != nil && !categoryOptions!.elementsEqual(audioCategoryOptions)) {
@@ -2231,9 +2234,17 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         if somethingChanged {
             do {
                 try audioSession.setActive(true)
-                print("setActive - success")
+                JWLog.d("setActive - success")
             } catch {
-                print("setActive - error: @%@", error)
+                JWLog.e("setActive - error: \(error)")
+            }
+            // The EFFECTIVE state, which is what actually governs background audio and
+            // route selection. It can differ from what was requested: if setCategory
+            // failed, the session keeps whatever category was already in force, and
+            // nothing else logs that divergence.
+            if let session = audioSession {
+                JWLog.d("initAudioSession - effective category=\(session.category.rawValue) "
+                      + "mode=\(session.mode.rawValue) options=\(session.categoryOptions.rawValue)")
             }
         }
     }
@@ -2241,9 +2252,9 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     func deinitAudioSession() {
         do {
             try audioSession?.setActive(false, options: .notifyOthersOnDeactivation)
-            print("setUnactive - success")
+            JWLog.d("setUnactive - success")
         } catch {
-            print("setUnactive - error: @%@", error)
+            JWLog.e("setUnactive - error: \(error)")
         }
         audioSession = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [:]
@@ -2343,9 +2354,32 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         
         do {
             try audioSession.setCategory(category, options: options)
-            print("setCategory - success")
+            JWLog.d("setCategory - success (category=\(category.rawValue) options=\(categoryOptions ?? []) raw=\(options.rawValue))")
         } catch {
-            print("setCategory - error: @%@", error)
+            // An error path that does not name its own inputs is undiagnosable: this call
+            // failed reproducibly with OSStatus -50 (paramErr) and the old message showed
+            // neither the category nor the options, so there was nothing to act on.
+            JWLog.e("setCategory - error: \(error)")
+            JWLog.e("setCategory - FAILED category=\(category.rawValue) "
+                  + "requestedOptions=\(categoryOptions ?? []) resolvedRaw=\(options.rawValue)")
+            // AVAudioSession rejects the whole call if ANY option is illegal for the
+            // category, so the requested category is never applied at all.
+            var illegal: [String] = []
+            if let opts = categoryOptions {
+                if opts.contains("AllowBluetooth"),
+                   category != .record, category != .playAndRecord {
+                    illegal.append("AllowBluetooth is only valid with Record or "
+                                   + "PlayAndRecord. For playback use AllowBluetoothA2DP, "
+                                   + "which is already the default for .playback")
+                }
+                // NOT flagged: InterruptSpokenAudioAndMix. Its raw value is 17 (0b10001),
+                // which already carries the mixWithOthers bit, so Apple's "must also set
+                // mixWithOthers" requirement is satisfied by the constant itself. An
+                // earlier version of this diagnostic wrongly reported it as illegal.
+            }
+            if !illegal.isEmpty {
+                JWLog.e("setCategory - illegal combination: " + illegal.joined(separator: "; "))
+            }
         }
     }
 
@@ -2383,10 +2417,16 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         if (mode != nil) {
             do {
                 try audioSession.setMode(mode)
-                print("setMode - success")
+                JWLog.d("setMode - success (mode=\(mode.rawValue))")
             } catch {
-                print("setMode - error: @%@", error)
+                JWLog.e("setMode - error: \(error)")
+                JWLog.e("setMode - FAILED requested=\(modeName ?? "nil") resolved=\(mode.rawValue)")
             }
+        } else {
+            // Previously silent: an unrecognised mode string fell through every branch and
+            // the function returned without setting anything and without logging, so a typo
+            // in the JS config was indistinguishable from success.
+            JWLog.w("setMode - IGNORED unrecognised mode name \(modeName ?? "nil")")
         }
     }
     
@@ -2407,7 +2447,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 } else if (playerViewController != nil) {
                     playerViewController.player.pause()
                 }
-                print("handleInterruption :- Pause")
+                JWLog.d("handleInterruption :- Pause")
             }
         case .ended:
             guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
@@ -2417,7 +2457,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 DispatchQueue.main.async { [self] in
                     try? audioSession.setActive(true, options: .notifyOthersOnDeactivation) // optional but safe
                     (playerView?.player ?? playerViewController?.player)?.play()
-                    print("handleInterruption :- Play")
+                    JWLog.d("handleInterruption :- Play")
                 }
             } else {
                 // Interruption ended. Playback should not resume.
@@ -2429,7 +2469,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     } else if (playerViewController != nil) {
                         playerViewController.player.pause()
                     }
-                    print("handleInterruption :- Pause")
+                    JWLog.d("handleInterruption :- Pause")
                 }
             }
         @unknown default:
@@ -2616,7 +2656,7 @@ extension RNJWPlayerView: JWCastDelegate {
 
             self.onConnectedToCastingDevice?(["device": String(data:data as Data, encoding:String.Encoding.utf8) as Any])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
     
@@ -2650,7 +2690,7 @@ extension RNJWPlayerView: JWCastDelegate {
 
             self.onCastingDevicesAvailable?(["devices": String(data:data as Data, encoding:String.Encoding.utf8) as Any])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
     

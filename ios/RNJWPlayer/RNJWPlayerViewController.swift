@@ -136,7 +136,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
             let data = try JSONSerialization.data(withJSONObject: sizesDict, options: .prettyPrinted)
             parentView?.onPlayerSizeChange?(["sizes": data])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -162,7 +162,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
             let data = try JSONSerialization.data(withJSONObject: sizesDict, options: .prettyPrinted)
             parentView?.onPlayerSizeChange?(["sizes": data])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -235,7 +235,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
         let request = URLRequest(url: fairplayCertUrl)
         let task = URLSession.shared.dataTask(with: request) { (data, response, error) in
             if let error = error {
-                print("Error fetching FairPlay certificate: \(error.localizedDescription)")
+                JWLog.e("Error fetching FairPlay certificate: \(error.localizedDescription)")
                 handler(nil)
                 return
             }
@@ -263,7 +263,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
         URLSession.shared.dataTask(with: ckcRequest as URLRequest) { (data, response, error) in
             if let error = error {
-                print("Error fetching FairPlay license: \(error.localizedDescription)")
+                JWLog.e("Error fetching FairPlay license: \(error.localizedDescription)")
                 handler(nil, nil, nil)
                 return
             }
@@ -461,7 +461,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
             parentView?.onPlaylistItem?(["playlistItem": String(data:data, encoding:String.Encoding.utf8) as Any, "index": index])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
 
 //        item.addObserver(self, forKeyPath:"playbackLikelyToKeepUp", options:.new, context:nil)
@@ -528,7 +528,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
             parentView?.onPlaylist?(["playlist": String(data:data as Data, encoding:String.Encoding.utf8) as Any])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -596,7 +596,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
             parentView?.onConnectedToCastingDevice?(["device": String(data:data as Data, encoding:String.Encoding.utf8) as Any])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
@@ -634,7 +634,7 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
             parentView?.onCastingDevicesAvailable?(["devices": String(data:data as Data, encoding:String.Encoding.utf8) as Any])
         } catch {
-            print("Error converting dictionary to JSON data: \(error)")
+            JWLog.e("Error converting dictionary to JSON data: \(error)")
         }
     }
 
