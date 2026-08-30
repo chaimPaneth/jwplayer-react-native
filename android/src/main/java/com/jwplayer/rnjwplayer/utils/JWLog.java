@@ -4,6 +4,7 @@ import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.ReadableType;
 
+import android.os.SystemClock;
 import android.util.Log;
 
 /**
@@ -35,8 +36,60 @@ public final class JWLog {
     public static void setLoggingMode(Mode mode) { MODE = (mode != null ? mode : Mode.DISABLED); }
     public static Mode getLoggingMode() { return MODE; }
 
-    private static boolean allowAll() { return MODE == Mode.ALL; }
-    private static boolean allowErrors() { return MODE == Mode.ALL || MODE == Mode.ERROR; }
+    private static boolean allowAll() { return MODE == Mode.ALL || verboseRequestedAtRuntime(); }
+    private static boolean allowErrors() { return MODE == Mode.ALL || MODE == Mode.ERROR || verboseRequestedAtRuntime(); }
+
+    /**
+     * Runtime escape hatch, so a field diagnosis does not require a rebuild.
+     *
+     * MODE ships as ERROR (see above) which is correct for production, but it also hides every
+     * decision marker -- Resolving resume position, the stale-post gate, the rewind guard. A
+     * 2026-08-30 Android Auto seek-then-PiP-exit report could not be diagnosed at all from a
+     * release build for exactly that reason.
+     *
+     * Log.isLoggable reads the standard `log.tag.<TAG>` system property, so verbose output is
+     * enabled per-device with no code change and no rebuild:
+     *
+     *     adb shell setprop log.tag.JWLog DEBUG      # on
+     *     adb shell setprop log.tag.JWLog ERROR      # off (or reboot)
+     *
+     * This is the Android counterpart of the iOS JW_LOG environment variable.
+     *
+     * The property is polled rather than read once, because it is set while the app is already
+     * running -- but it is cached for RUNTIME_FLAG_TTL_MS so that production (MODE=ERROR, where
+     * every d/v call has to consult it) pays a long comparison instead of a property read on each
+     * of the ~120 call sites, some of which sit on the layout path.
+     */
+    private static final long RUNTIME_FLAG_TTL_MS = 500L;
+    private static volatile long runtimeFlagCheckedAtMs = -RUNTIME_FLAG_TTL_MS - 1L;
+    private static volatile boolean runtimeFlagValue = false;
+
+    private static boolean verboseRequestedAtRuntime() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - runtimeFlagCheckedAtMs >= RUNTIME_FLAG_TTL_MS) {
+            boolean enabled;
+            try {
+                enabled = Log.isLoggable("JWLog", Log.DEBUG);
+            } catch (Throwable ignored) {
+                enabled = false;
+            }
+            runtimeFlagValue = enabled;
+            runtimeFlagCheckedAtMs = now;
+        }
+        return runtimeFlagValue;
+    }
+
+    /**
+     * True when verbose (debug/verbose level) output would actually be emitted.
+     *
+     * Java has no lazy log arguments, so every JWLog.d(...) call builds its message even when the
+     * level is off. Callers that assemble an expensive diagnostic string -- multi-field decision
+     * traces, anything that walks a ReadableMap -- must guard it with this so production does no
+     * work at all:
+     *
+     *     if (JWLog.isVerbose()) { JWLog.d(TAG, "TRACE " + ...expensive...); }
+     */
+    public static boolean isVerbose() { return allowAll(); }
 
     private static String fullTag(String rawTag) { return (rawTag != null ? rawTag : "JWLog"); }
 

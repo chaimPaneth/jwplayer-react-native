@@ -1536,26 +1536,66 @@ public class RNJWPlayerView extends RelativeLayout implements
      * file, and only when the app did NOT change its own post id -- a real navigation always does.
      */
     private boolean shouldKeepLiveItemForForegroundRebuild(String incomingFile) {
+        // GATE_TRACE: every exit below is logged with the inputs. Without this the gate was a
+        // black box -- four silent early returns and a log line only on refusal -- so a user
+        // report of "opened Series B, got Series A" could not be attributed to this gate or
+        // cleared of it. Do not remove: this is the only place the decision is observable.
+        //
+        // Built only when verbose logging is actually on, so production does no work here. The
+        // REFUSE case still logs its own unconditional warning below.
+        final boolean trace = JWLog.isVerbose();
+        String traceMsg = null;
+        if (trace) {
+            String liveForTrace = null;
+            try {
+                liveForTrace = currentPlayerItemFile();
+            } catch (Throwable ignore) {
+                // fall through with null; the trace still records the rest
+            }
+            traceMsg = "GATE_TRACE shouldKeepLiveItem: incoming=" + incomingFile
+                    + ", live=" + liveForTrace
+                    + ", snapshotFresh=" + isForegroundRebuildSnapshotFresh()
+                    + ", snapshotAgeMs=" + (mForegroundRebuildCapturedAtMs <= 0L ? -1L
+                            : SystemClock.elapsedRealtime() - mForegroundRebuildCapturedAtMs)
+                    + ", " + com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                            .describeTrackState();
+        }
+
         if (incomingFile == null || mPlayer == null) {
+            if (trace) { JWLog.d(TAG, traceMsg + " -> ALLOW (no incoming file or no player)"); }
             return false;
         }
         if (!isForegroundRebuildSnapshotFresh()) {
+            if (trace) {
+                JWLog.d(TAG, traceMsg + " -> ALLOW (no fresh foreground snapshot; not a rebuild"
+                        + " window)");
+            }
             return false;
         }
         String live = currentPlayerItemFile();
         if (live == null || live.equals(incomingFile)) {
+            if (trace) { JWLog.d(TAG, traceMsg + " -> ALLOW (player already on the incoming file)"); }
             return false;
         }
         if (com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.didLastAppPushChangeTrack()) {
+            if (trace) {
+                JWLog.d(TAG, traceMsg + " -> ALLOW (app changed its own post id: genuine"
+                        + " navigation)");
+            }
             return false;
         }
         if (!com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
                 .isAppTrackStaleVsAndroidAuto()) {
+            if (trace) {
+                JWLog.d(TAG, traceMsg + " -> ALLOW (app post agrees with the Android Auto"
+                        + " selection)");
+            }
             return false;
         }
         JWLog.w(TAG, "setConfig IGNORED: app re-asserted a stale post while the player is on the"
                 + " Android Auto selection -- keeping live item " + live
                 + ", refusing switch to " + incomingFile);
+        if (trace) { JWLog.w(TAG, traceMsg + " -> REFUSE"); }
         return true;
     }
 
@@ -2334,6 +2374,47 @@ public class RNJWPlayerView extends RelativeLayout implements
      */
     public void setConfig(ReadableMap prop) {
         JWLog.d(TAG, "setConfig(propKeys=" + (prop != null ? prop.toHashMap().keySet() : null) + ")");
+        // PUSH_TRACE: the identity and start position RN is asking for, logged BEFORE any gate
+        // runs. Needed because "which item did RN actually request, and when" was not recoverable
+        // from the log -- only the gate's verdict was. Skipped entirely unless verbose logging is
+        // on, so production never walks the playlist map to build it.
+        if (prop != null && JWLog.isVerbose()) {
+            try {
+                String pushedFile = null;
+                Double pushedStart = null;
+                String pushedTitle = null;
+                int playlistSize = -1;
+                if (prop.hasKey("playlist") && !prop.isNull("playlist")) {
+                    com.facebook.react.bridge.ReadableArray pl = prop.getArray("playlist");
+                    if (pl != null) {
+                        playlistSize = pl.size();
+                        if (pl.size() > 0) {
+                            ReadableMap first = pl.getMap(0);
+                            if (first != null) {
+                                if (first.hasKey("file") && !first.isNull("file")) {
+                                    pushedFile = first.getString("file");
+                                }
+                                if (first.hasKey("title") && !first.isNull("title")) {
+                                    pushedTitle = first.getString("title");
+                                }
+                                if (first.hasKey("starttime") && !first.isNull("starttime")) {
+                                    pushedStart = first.getDouble("starttime");
+                                }
+                            }
+                        }
+                    }
+                }
+                JWLog.d(TAG, "PUSH_TRACE setConfig: file=" + pushedFile
+                        + ", title=" + pushedTitle
+                        + ", starttime=" + pushedStart
+                        + ", live=" + currentPlayerItemFile()
+                        + ", playlistSize=" + playlistSize
+                        + ", " + com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                                .describeTrackState());
+            } catch (Throwable t) {
+                JWLog.d(TAG, "PUSH_TRACE setConfig: unavailable (" + t.getMessage() + ")");
+            }
+        }
         if (prop != null && prop.hasKey("androidHandoffGeneration")
                 && !prop.isNull("androidHandoffGeneration")) {
             mMediaGeneration = (long) prop.getDouble("androidHandoffGeneration");

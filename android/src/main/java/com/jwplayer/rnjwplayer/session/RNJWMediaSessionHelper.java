@@ -196,6 +196,21 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return lastAppPushChangedTrack;
     }
 
+    /**
+     * One-line dump of the track-identity state the foreground-rebuild gates decide on.
+     *
+     * Added 2026-08-30 because a user report -- opening a Series B item while in PiP loaded a
+     * Series A item instead -- could not be attributed from the log. The gate returns early on
+     * four separate conditions and only logged the one that refused, so a refusal that never
+     * happened and a refusal that happened for a different reason were indistinguishable.
+     */
+    public static String describeTrackState() {
+        return "appProvidedMediaId=" + appProvidedMediaId
+                + ", androidAutoSelectedMediaId=" + androidAutoSelectedMediaId
+                + ", lastAppPushChangedTrack=" + lastAppPushChangedTrack
+                + ", appTrackStaleVsAA=" + isAppTrackStaleVsAndroidAuto();
+    }
+
     // --- cross-track start leak -------------------------------------------------------
     // The media id the last onPlaylistItem was for, and when it last CHANGED. Needed
     // because an explicit start supplied by JS is only about the item JS believes is
@@ -2625,18 +2640,49 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         long eventPositionMs = (long) (positionSeconds * 1000L);
         int androidVersion = Build.VERSION.SDK_INT;
 
-        // CRITICAL: During Android Auto handoff, completely ignore spurious 0 seeks
-        // Android 12/14 emit a second seek-to-0 after the correct resume seek - this must be blocked
+        // CRITICAL: completely ignore spurious 0 seeks whenever a non-zero resume is pending.
+        // Android 12/14 emit a second seek-to-0 after the correct resume seek - this must be blocked.
         // Guard: only suppress the 0 event when the RESUME TARGET itself is > 0.
         // If target IS 0 (fresh/never-played media), position=0 is correct — don't loop.
-        if (isPlayingFromAndroidAuto && pendingSeekMs != null && pendingSeekMs > 0 && eventPositionMs == 0) {
-            JWLog.d(TAG, "onSeeked: IGNORING spurious 0 seek during AA handoff (pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ")");
-            // If we haven't successfully applied the pending seek yet, re-seek to the correct target
+        //
+        // NOT gated on isPlayingFromAndroidAuto any more. Reproduced 2026-08-30 on a PiP-exit
+        // return: the app re-asserted the item, resetAndroidAutoFlag() had already cleared the AA
+        // flag ("Not Android Auto handoff (isPlayingFromAndroidAuto=false), applying pending seek
+        // normally"), the resume seek to 354000ms was issued while the player was still IDLE, and
+        // the SDK swallowed it. onSeeked then arrived with position=0.0 while
+        // effectivePositionMs fell back to lastRequestedSeekPositionMs=354000, so the completion
+        // block below saw delta=0, marked the seek applied and cleared it. The player was really at
+        // 0 and playback restarted from the beginning -- storeSeekPosition even tried to persist 0
+        // and only its own zero-overwrite guard prevented losing the position. The AA path had this
+        // protection all along; the foreground-rebuild path did not.
+        if (pendingSeekMs != null && pendingSeekMs > 0 && eventPositionMs == 0) {
+            JWLog.d(TAG, "onSeeked: IGNORING spurious 0 seek (pendingSeekMs=" + pendingSeekMs
+                    + ", applied=" + pendingSeekApplied + ", fromAndroidAuto="
+                    + isPlayingFromAndroidAuto + ")");
+            // Re-seek only when the player can actually honour it. Re-issuing while IDLE is what
+            // got swallowed in the first place, so an unready player is left to
+            // applyPendingSeekWhenReady, which runs on the next ready/play callback.
             if (!pendingSeekApplied && jwPlayer != null) {
-                JWLog.d(TAG, "onSeeked: Re-seeking to pendingSeekMs=" + pendingSeekMs + " after spurious 0");
-                suppressNextSeekCallback = true;
-                lastRequestedSeekPositionMs = pendingSeekMs;
-                jwPlayer.seek(pendingSeekMs / 1000.0);
+                PlayerState stateNow = null;
+                try {
+                    stateNow = jwPlayer.getState();
+                } catch (Exception ignore) {
+                    // treat an unreadable state as not ready
+                }
+                boolean ready = stateNow != null
+                        && stateNow != PlayerState.IDLE
+                        && stateNow != PlayerState.ERROR;
+                if (ready) {
+                    JWLog.d(TAG, "onSeeked: Re-seeking to pendingSeekMs=" + pendingSeekMs
+                            + " after spurious 0 (state=" + stateNow + ")");
+                    suppressNextSeekCallback = true;
+                    lastRequestedSeekPositionMs = pendingSeekMs;
+                    jwPlayer.seek(pendingSeekMs / 1000.0);
+                } else {
+                    JWLog.d(TAG, "onSeeked: player not ready (state=" + stateNow + "); KEEPING"
+                            + " pendingSeekMs=" + pendingSeekMs
+                            + " for applyPendingSeekWhenReady instead of re-seeking now");
+                }
             }
             return; // Don't process the spurious 0 event at all
         }
