@@ -466,6 +466,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // Block only the immediate auto-play callback that fires right after we force completion
     private static final long AUTO_PLAY_SUPPRESS_WINDOW_MS = 350L;
 
+    // The app supplies a duration with every playlist item, and that is what first reaches the
+    // media session metadata. When it understates the real media length, Android Auto renders a
+    // position past the end of a progress bar that is already pinned at 100% (observed: a 2448s
+    // stream declared as 2436s showed "40:44 / 40:36"). Once the player knows the real length we
+    // republish it. Only material disagreements are acted on, so a normal item never republishes.
+    private static final long DURATION_REFRESH_MIN_DELTA_MS = 1500L;
+    private long lastRepublishedDurationMs = -1L;
+
     private void captureDurationSnapshot() {
         try {
             double durationSeconds = -1.0;
@@ -483,6 +491,86 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         } catch (Exception durationEx) {
             JWLog.w(TAG, "captureDurationSnapshot failed: " + durationEx.getMessage());
+        }
+    }
+
+    /**
+     * Republish the session's DURATION metadata once the player knows the real media length.
+     *
+     * The value published by {@link #updatePlaylistItem} comes from the playlist item, i.e. from
+     * whatever the app declared. Reads the live length straight off the player rather than through
+     * {@link #getCurrentDurationMs()}, which falls back to the cached declared value and so can
+     * never expose a disagreement.
+     */
+    private void refreshSessionDurationFromPlayer(String reason) {
+        if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null) {
+            return;
+        }
+
+        double durationSeconds = -1.0;
+        try {
+            if (jwPlayer != null) {
+                durationSeconds = jwPlayer.getDuration();
+            } else if (serviceMediaApi != null && serviceMediaApi.getPlayer() != null) {
+                durationSeconds = serviceMediaApi.getPlayer().getDuration();
+            }
+        } catch (Exception durationEx) {
+            JWLog.w(TAG, "refreshSessionDurationFromPlayer: duration lookup failed " + durationEx.getMessage());
+            return;
+        }
+
+        if (durationSeconds <= 0) {
+            return; // player does not know the length yet
+        }
+        long liveDurationMs = (long) (durationSeconds * 1000L);
+
+        MediaMetadataCompat existing;
+        try {
+            existing = this.mediaSessionStateProvider.mediaSessionCompat.getController().getMetadata();
+        } catch (Exception metadataEx) {
+            JWLog.w(TAG, "refreshSessionDurationFromPlayer: metadata read failed " + metadataEx.getMessage());
+            return;
+        }
+        if (existing == null) {
+            return; // nothing published yet; updatePlaylistItem owns the first publish
+        }
+
+        long publishedDurationMs = existing.getLong("android.media.metadata.DURATION");
+        if (publishedDurationMs <= 0) {
+            return;
+        }
+
+        long delta = Math.abs(liveDurationMs - publishedDurationMs);
+        if (delta < DURATION_REFRESH_MIN_DELTA_MS) {
+            JWLog.d(TAG, "DURATION_REFRESH: live duration " + liveDurationMs + "ms agrees with published "
+                    + publishedDurationMs + "ms (delta=" + delta + "ms) reason=" + reason + " -> no change");
+            return;
+        }
+
+        // Guard against churn from a live duration that wobbles while the stream is still parsing.
+        if (lastRepublishedDurationMs > 0
+                && Math.abs(liveDurationMs - lastRepublishedDurationMs) < DURATION_REFRESH_MIN_DELTA_MS) {
+            return;
+        }
+
+        JWLog.w(TAG, "DURATION_REFRESH: live duration " + liveDurationMs + "ms disagrees with app-declared "
+                + publishedDurationMs + "ms (delta=" + delta + "ms) reason=" + reason
+                + " -> republishing metadata with the live value");
+
+        try {
+            MediaMetadataCompat.Builder builder = new MediaMetadataCompat.Builder(existing);
+            builder.putLong("android.media.metadata.DURATION", liveDurationMs);
+            this.mediaSessionStateProvider.mediaSessionCompat.setMetadata(builder.build());
+            lastKnownDurationMs = liveDurationMs;
+            lastRepublishedDurationMs = liveDurationMs;
+
+            if (this.serviceMediaApi != null
+                    && this.rnjwNotificationHelper != null
+                    && this.mediaSessionStateProvider.mediaSessionCompat.isActive()) {
+                this.rnjwNotificationHelper.showNotification(this.context, this.mediaSessionStateProvider, this.serviceMediaApi);
+            }
+        } catch (Exception publishEx) {
+            JWLog.w(TAG, "refreshSessionDurationFromPlayer: republish failed " + publishEx.getMessage());
         }
     }
 
@@ -1004,6 +1092,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // the network-recovery paths. Released for every other state to protect battery.
         setPlaybackLocksActive(state == PlaybackStateCompat.STATE_PLAYING
                 || state == PlaybackStateCompat.STATE_BUFFERING);
+
+        // By the time we publish PLAYING the player normally knows the real media length, so this
+        // is the first point at which an understated app-declared duration can be corrected. No-op
+        // unless the two disagree materially.
+        if (state == PlaybackStateCompat.STATE_PLAYING) {
+            refreshSessionDurationFromPlayer("playing-state-publish");
+        }
     }
 
     /**
@@ -2297,6 +2392,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             long durationMs = (long)(playlistItem.getDuration() * 1000);
             builder.putLong("android.media.metadata.DURATION", durationMs);
             lastKnownDurationMs = durationMs;
+            // This publish puts the app-declared value back in charge, so allow the player's real
+            // length to override it again once it is known for this item.
+            lastRepublishedDurationMs = -1L;
         }
 
         if (currentItem != null) {
