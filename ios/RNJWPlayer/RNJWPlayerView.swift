@@ -341,14 +341,15 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                     }
                 }
 
-                if let playerViewController = playerViewController {
-                    // We must treat PiP mode differently and setup as a new config
-                    // or else the player will become unresponsive
-                    if isPipActive {
-                        setNewConfig(config: config)
-                    } else {
-                        playerViewController.player.loadPlaylist(items: playlistArray)
-                    }
+                if playerViewController != nil {
+                    // Swap the item on the player that already exists, on every path —
+                    // not only while PiP happens to be open. `loadPlaylist(items:)` leaves
+                    // the controller-backed player unresponsive, which pushed consumers to
+                    // remount the whole native view for each track instead; a remount
+                    // releases the layer an open Picture-in-Picture window renders, so the
+                    // system tears the window down mid-playlist. Reconfiguring keeps one
+                    // player and one layer, so the advance continues inside the open window.
+                    applyPlaylistInPlace(config: config)
                 } else if let playerView = playerView {
                     // If you use player only, consider doing a simpliar check for PiP as above
                     playerView.player.loadPlaylist(items: playlistArray)
@@ -357,6 +358,33 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
                 }
             } else {
                 JWLog.d("There are no differences.")
+            }
+        }
+    }
+
+    /// Loads the incoming playlist onto the controller-backed player that is already
+    /// alive, instead of replacing that player.
+    ///
+    /// The playhead and the layer a Picture-in-Picture window renders both belong to
+    /// `playerViewController.player`. Reconfiguring that instance is the only item swap
+    /// that keeps both, so playback can move to the next track while a PiP window stays
+    /// open. Destroying and rebuilding the player — or letting the view be remounted —
+    /// hands the system a dead layer and it closes the window.
+    ///
+    /// `autostart` is re-applied explicitly afterwards: an advance triggered from an open
+    /// PiP window happens while the host app is not foreground-active, and the
+    /// configuration's own autostart does not reliably begin playback in that state.
+    func applyPlaylistInPlace(config: [String: Any]) {
+        setNewConfig(config: config)
+
+        guard let wantsAutostart = config["autostart"] as? Bool, wantsAutostart else { return }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let player = self?.playerViewController?.player else { return }
+
+            let state = player.getState()
+            if state != .playing && state != .buffering {
+                player.play()
             }
         }
     }
