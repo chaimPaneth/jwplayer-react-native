@@ -61,7 +61,6 @@ import com.jwplayer.pub.api.events.SeekedEvent;
 import com.jwplayer.pub.api.events.listeners.AdvertisingEvents;
 import com.jwplayer.pub.api.events.listeners.VideoPlayerEvents;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
-import com.mediabrowser.MediaSessionSingleton;
 import com.jwplayer.rnjwplayer.utils.JWLog;
 
 import org.json.JSONException;
@@ -826,7 +825,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         // Get the (possibly new) singleton
-        MediaSessionCompat newSession = MediaSessionSingleton.getInstance(self.context);
+        MediaSessionCompat newSession = RNJWSharedMediaSession.get(self.context);
 
         // Check if the reference actually changed
         MediaSessionCompat currentSession = (self.mediaSessionStateProvider != null)
@@ -901,7 +900,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         this.jwPlayer = serviceMediaApi.getPlayer();
         Context currentContext = this.context;
-        this.mediaSessionStateProvider =  new MediaSessionStateProvider(MediaSessionSingleton.getInstance(currentContext));
+        this.mediaSessionStateProvider =  new MediaSessionStateProvider(RNJWSharedMediaSession.get(currentContext));
         setupNetworkCallback();
 
         // Attach callback (was previously intentionally omitted)

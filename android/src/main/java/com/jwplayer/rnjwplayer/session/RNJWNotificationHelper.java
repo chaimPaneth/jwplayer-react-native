@@ -80,6 +80,18 @@ public class RNJWNotificationHelper extends MediaSessionCompat.Callback {
             description = builder.build();
         }
         String channelId = this.notificationChannelId;
+        // The MediaStyle below dereferences the session for its token. A null session only happens
+        // on a build whose media-browser integration is broken (see RNJWSharedMediaSession): the
+        // library is present but its contract is unreachable. Skipping the notification is not an
+        // option — the caller feeds this straight into startForeground(), and a media-playback FGS
+        // without its notification loses foreground state and Android stops background playback.
+        // Post the bootstrap notification instead: same id and channel, already what this service
+        // posts before any owner attaches, so playback survives with placeholder controls.
+        if (stateProvider == null || stateProvider.mediaSessionCompat == null) {
+            JWLog.e("RNJWNotificationHelper", "showNotification: no media session available"
+                    + " — posting bootstrap notification to keep the service foregrounded");
+            return createBootstrapNotification(context);
+        }
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId);
         serviceMediaApi.addNotificationActions(context, builder);
         builder.setContentTitle(description.getTitle()).setContentText(description.getSubtitle()).setSubText(description.getDescription()).setLargeIcon(description.getIconBitmap()).setOnlyAlertOnce(true).setStyle((new androidx.media.app.NotificationCompat.MediaStyle()).setMediaSession(stateProvider.mediaSessionCompat.getSessionToken()).setShowActionsInCompactView(serviceMediaApi.getCompactActions())).setVisibility(NotificationCompat.VISIBILITY_PUBLIC).setSmallIcon(this.smallIconResId).setDeleteIntent(serviceMediaApi.getActionIntent(context, 86));

@@ -32,6 +32,11 @@ android {
         versionCode 1
         versionName "1.0"
 
+        // Ships with the AAR into every consuming app. Required because
+        // react-native-android-media-browser reaches into this library by reflection only, so R8
+        // cannot see those call sites and would strip or rename the targets.
+        consumerProguardFiles "consumer-rules.pro"
+
         buildConfigField "boolean", "IS_NEW_ARCHITECTURE_ENABLED", isNewArchitectureEnabled().toString()
 
         ndk {
@@ -152,7 +157,6 @@ dependencies {
     // and androidx.core.app.PictureInPictureModeChangedInfo (1.4.0+).
     implementation 'androidx.activity:activity:1.8.2'
 
-    implementation project(':react-native-android-media-browser')
 }
 
 task verifyHostPipManifestConfigChanges {

@@ -68,7 +68,7 @@ import android.os.Build;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.support.v4.media.MediaMetadataCompat;
-import com.mediabrowser.MediaSessionSingleton;
+import com.jwplayer.rnjwplayer.session.RNJWSharedMediaSession;
 
 // Lifecycle imports for JWPlayer
 import androidx.lifecycle.Lifecycle;
@@ -102,7 +102,6 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private RNJWMediaSessionHelper mediaSessionHelper;
     private RNJWNotificationHelper notificationHelper;
     private RNJWMediaServiceController mediaServiceController;
-    private MediaSessionCompat sharedMediaSession;
     
     // Audio focus management
     private AudioManager audioManager;
@@ -182,7 +181,6 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         this.audioManager = (AudioManager) this.context.getSystemService(Context.AUDIO_SERVICE);
         
         // Get shared media session from MediaBrowser
-        this.sharedMediaSession = MediaSessionSingleton.getInstance(this.context);
     }
     
     private String stringOrNull(Object value) {
@@ -306,6 +304,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     }
 
     private void publishBackgroundPausedForNetwork(String reason) {
+        // Resolved per call, never cached in a field: media-browser may release and
+        // recreate the shared session, and a stale reference publishes into a dead one.
+        final MediaSessionCompat sharedMediaSession = RNJWSharedMediaSession.get(this.context);
         long positionMs = rememberBackgroundPosition(reason);
         isPlaying = false;
         networkStoppedForRecovery = true;
@@ -805,6 +806,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 // imageUrl already declared earlier in createBackgroundPlayer; reuse it here
                 if (imageUrl != null) {
                     boolean needFetch = true;
+                    final MediaSessionCompat sharedMediaSession =
+                            RNJWSharedMediaSession.get(this.context);
                     if (sharedMediaSession != null) {
                         try {
                             MediaMetadataCompat md = sharedMediaSession.getController().getMetadata();
@@ -844,6 +847,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Called when notification is dismissed or app needs to cleanup
      */
     public void stopAndCleanup() {
+        // Resolved per call, never cached in a field: media-browser may release and
+        // recreate the shared session, and a stale reference publishes into a dead one.
+        final MediaSessionCompat sharedMediaSession = RNJWSharedMediaSession.get(this.context);
         JWLog.d(TAG, "📱 JAVA: stopAndCleanup called - stopping all background playback");
         boolean replacingOwner = PlaybackManager.getInstance().isTransitioning();
         
@@ -1010,6 +1016,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Transfer playback to UI player (stop background, return current state)
      */
     public Map<String, Object> transferToUIPlayer() {
+        // Resolved per call, never cached in a field: media-browser may release and
+        // recreate the shared session, and a stale reference publishes into a dead one.
+        final MediaSessionCompat sharedMediaSession = RNJWSharedMediaSession.get(this.context);
         JWLog.d(TAG, "transferToUIPlayer()");
         Map<String, Object> currentState = getCurrentBackgroundPlayerInfo();
         if (backgroundPlayer != null) {
@@ -1591,6 +1600,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Update MediaSession with current position
      */
     private void updateMediaSessionPosition() {
+        // Resolved per call, never cached in a field: media-browser may release and
+        // recreate the shared session, and a stale reference publishes into a dead one.
+        final MediaSessionCompat sharedMediaSession = RNJWSharedMediaSession.get(this.context);
         JWLog.d(TAG, "updateMediaSessionPosition()");
         if (backgroundPlayer != null) {
             try {
@@ -2084,6 +2096,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      */
     private void updateMediaSessionMetadata(String title, String subtitle, String iconUrl, Map<String, Object> post) {
         JWLog.d(TAG, "updateMediaSessionMetadata(title=" + JWLog.safe(title) + ", subtitle=" + JWLog.safe(subtitle) + ")");
+        // Resolved per call, never cached in a field: media-browser may release and
+        // recreate the shared session, and a stale reference publishes into a dead one.
+        final MediaSessionCompat sharedMediaSession = RNJWSharedMediaSession.get(this.context);
         if (sharedMediaSession == null) {
             return;
         }
@@ -2268,14 +2283,21 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 JWLog.d(TAG, "ARTWORK_DEBUG: fetching album art " + imageUrl);
                 InputStream in = new URL(imageUrl).openStream();
                 Bitmap bmp = BitmapFactory.decodeStream(in);
-                if (bmp != null && sharedMediaSession != null) {
+                if (bmp != null) {
                     mainHandler.post(() -> {
                         try {
-                            MediaMetadataCompat current = sharedMediaSession.getController().getMetadata();
+                            // Resolved here, on the main thread, rather than when the fetch was
+                            // scheduled: the download can outlive a session release/recreate.
+                            MediaSessionCompat session = RNJWSharedMediaSession.get(this.context);
+                            if (session == null) {
+                                JWLog.w(TAG, "ARTWORK_DEBUG: no media session, skipping album art");
+                                return;
+                            }
+                            MediaMetadataCompat current = session.getController().getMetadata();
                             MediaMetadataCompat.Builder builder = new MediaMetadataCompat.Builder(current);
                             builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bmp);
                             builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bmp);
-                            sharedMediaSession.setMetadata(builder.build());
+                            session.setMetadata(builder.build());
                             JWLog.d(TAG, "ARTWORK_DEBUG: album art applied to session");
                         } catch (Exception e) {
                             JWLog.w(TAG, "ARTWORK_DEBUG: failed applying bitmap: " + e.getMessage());

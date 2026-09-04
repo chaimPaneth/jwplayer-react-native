@@ -11,7 +11,6 @@ import com.facebook.react.common.MapBuilder;
 import com.facebook.react.uimanager.SimpleViewManager;
 import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.annotations.ReactProp;
-import com.mediabrowser.MediaSessionSingleton;
 import android.support.v4.media.session.MediaSessionCompat;
 import com.jwplayer.rnjwplayer.utils.JWLog;
 
