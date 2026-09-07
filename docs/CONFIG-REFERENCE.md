@@ -581,6 +581,25 @@ const playlistItem: JWPlaylistItem = {
   // Playback
   starttime: 0,      // Start position in seconds
   duration: 600,     // Duration in seconds
+
+  // Live streams only: target offset from the live edge in seconds.
+  // Positions playback further behind the live edge so captions have
+  // more time to process. A target, not a guarantee: the native SDKs
+  // clamp values to 5-45s, and the stream's own hold-back may constrain
+  // the result further. Omit or use 0 for default behavior. Ignored for
+  // VOD. Must be set on a playlist item as shown here — a root-level
+  // value is not applied on all platforms.
+  // Requires iOS SDK 4.27.0+ / Android SDK 4.26.0+
+  liveSyncDuration: 15,
+
+  // iOS only: what VoiceOver reads for the title / description shown in
+  // the player UI, instead of the text itself. Use these to correct
+  // misreadings (e.g. "3m" read as "meters" rather than "minutes").
+  // Ignored on Android. Requires iOS SDK 4.28.0+
+  titleAccessibilityLabel: 'Three minute highlights',
+  titleAccessibilityHint: 'Recorded live from Sunday\'s game',
+  descriptionAccessibilityLabel: 'Best plays from Sunday',
+  descriptionAccessibilityHint: 'Includes the game-winning goal',
   
   // Tracks
   tracks: [

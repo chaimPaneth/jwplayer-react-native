@@ -18,10 +18,10 @@ import JWPlayerKit
 
 class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     JWAdDelegate, JWAVDelegate, JWPlayerViewDelegate,
-    JWPlayerViewControllerFullScreenDelegate, JWPlayerViewControllerUIDelegate,
+    JWPlayerViewControllerUIDelegate,
     JWPlayerViewControllerRelatedDelegate, JWDRMContentKeyDataSource,
     JWTimeEventListener, AVPictureInPictureControllerDelegate
-{ 
+{
     
     // MARK: - RNJWPlayer allocation
 
@@ -1314,12 +1314,37 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
             itemBuilder.description(description)
         }
 
+        // VoiceOver overrides for the title / description shown in the player UI.
+        // Only meaningful when the SDK's own UI renders them (not viewOnly).
+        if let titleAccessibilityLabel = item["titleAccessibilityLabel"] as? String {
+            itemBuilder.titleAccessibilityLabel(titleAccessibilityLabel)
+        }
+
+        if let titleAccessibilityHint = item["titleAccessibilityHint"] as? String {
+            itemBuilder.titleAccessibilityHint(titleAccessibilityHint)
+        }
+
+        if let descriptionAccessibilityLabel = item["descriptionAccessibilityLabel"] as? String {
+            itemBuilder.descriptionAccessibilityLabel(descriptionAccessibilityLabel)
+        }
+
+        if let descriptionAccessibilityHint = item["descriptionAccessibilityHint"] as? String {
+            itemBuilder.descriptionAccessibilityHint(descriptionAccessibilityHint)
+        }
+
         if let image = item["image"] as? String, let imageURL = URL(string: image) {
             itemBuilder.posterImage(imageURL)
         }
 
         if let startTime = item["startTime"] as? Double {
             itemBuilder.startTime(startTime)
+        }
+
+        // "_nativeLiveSyncDuration" is the key the SDK writes when serializing an
+        // item back out (e.g. in playlist-item event payloads), so accept both to
+        // survive a round-trip through getPlayerItem.
+        if let liveSyncDuration = (item["liveSyncDuration"] ?? item["_nativeLiveSyncDuration"]) as? Double {
+            itemBuilder.liveSyncDuration(liveSyncDuration)
         }
 
         if let recommendations = item["recommendations"] as? String, let recURL = URL(string: recommendations) {
@@ -1770,22 +1795,10 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         self.onControlBarVisible?(["visible": isVisible])
     }
 
-    func playerViewControllerWillGoFullScreen(_ controller:JWPlayerViewController) -> JWFullScreenViewController? {
-        self.onFullScreenRequested?([:])
-        return nil
-    }
-
-    func playerViewControllerDidGoFullScreen(_ controller:JWPlayerViewController) {
-        self.onFullScreen?([:])
-    }
-
-    func playerViewControllerWillDismissFullScreen(_ controller:JWPlayerViewController) {
-        self.onFullScreenExitRequested?([:])
-    }
-
-    func playerViewControllerDidDismissFullScreen(_ controller:JWPlayerViewController) {
-        self.onFullScreenExit?([:])
-    }
+    // Fullscreen present/dismiss delegate methods live on RNJWPlayerViewController,
+    // the object actually registered as the SDK's fullScreenDelegate (see
+    // RNJWPlayerViewController.setDelegates()) — this view is never assigned that
+    // role, so they don't belong here.
 
     func playerViewController(_ controller:JWPlayerViewController, relatedMenuClosedWithMethod method: JWRelatedInteraction) {
 

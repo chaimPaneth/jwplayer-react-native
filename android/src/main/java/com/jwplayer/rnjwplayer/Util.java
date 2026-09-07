@@ -203,6 +203,11 @@ public class Util {
             itemBuilder.startTime(startTime);
         }
 
+        if (playlistItem.hasKey("liveSyncDuration")) {
+            double liveSyncDuration = playlistItem.getDouble("liveSyncDuration");
+            itemBuilder.liveSyncDuration(liveSyncDuration);
+        }
+
         if (playlistItem.hasKey("duration")) {
             int duration = playlistItem.getInt("duration");
             itemBuilder.duration(duration);
