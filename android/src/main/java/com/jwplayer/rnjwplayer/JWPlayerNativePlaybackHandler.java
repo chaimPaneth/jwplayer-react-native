@@ -324,7 +324,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                                PlaybackStateCompat.ACTION_SEEK_TO |
                                PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
                                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
-                               PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID);
+                               PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID |
+                               RNJWMediaSessionHelper.SEARCH_ACTIONS);
             try {
                 PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
                 if (existing != null) {
@@ -879,7 +880,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                                PlaybackStateCompat.ACTION_STOP |
                                PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
                                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
-                               PlaybackStateCompat.ACTION_SEEK_TO);
+                               PlaybackStateCompat.ACTION_SEEK_TO |
+                               RNJWMediaSessionHelper.SEARCH_ACTIONS);
                 // Preserve custom actions (e.g. Android Auto speed button)
                 try {
                     PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
@@ -1047,7 +1049,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                         .setActions(PlaybackStateCompat.ACTION_PLAY | 
                                    PlaybackStateCompat.ACTION_PAUSE | 
                                    PlaybackStateCompat.ACTION_STOP |
-                                   PlaybackStateCompat.ACTION_SEEK_TO);
+                                   PlaybackStateCompat.ACTION_SEEK_TO |
+                                   RNJWMediaSessionHelper.SEARCH_ACTIONS);
                     // Preserve custom actions (e.g. Android Auto speed button)
                     try {
                         PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
@@ -1642,7 +1645,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                                    PlaybackStateCompat.ACTION_SEEK_TO |
                                    PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
                                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
-                                   PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID);
+                                   PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID |
+                                   RNJWMediaSessionHelper.SEARCH_ACTIONS);
                     // Preserve custom actions (e.g. Android Auto speed button)
                     try {
                         PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();
@@ -2153,7 +2157,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                            PlaybackStateCompat.ACTION_STOP |
                            PlaybackStateCompat.ACTION_SEEK_TO |
                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                           PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS);
+                           PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
+                           RNJWMediaSessionHelper.SEARCH_ACTIONS);
             // Preserve custom actions (e.g. Android Auto speed button)
             try {
                 PlaybackStateCompat existing = sharedMediaSession.getController().getPlaybackState();

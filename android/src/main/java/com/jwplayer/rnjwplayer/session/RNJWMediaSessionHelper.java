@@ -69,6 +69,24 @@ import org.json.JSONObject;
 public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener, VideoPlayerEvents.OnSeekListener, VideoPlayerEvents.OnSeekedListener {
     private static final String TAG = "RNJWMediaSessionHelper";
 
+    /**
+     * Voice-search capabilities that must be present on EVERY playback state
+     * written to the shared MediaSession.
+     *
+     * This library shares its MediaSession with
+     * com.mediabrowser.MediaBrowserService, which advertises search support, but
+     * every state update here and in JWPlayerNativePlaybackHandler rebuilds the
+     * action mask from scratch. Any mask that omits these silently revokes the
+     * search capability, and Assistant then refuses to route a spoken
+     * "play &lt;something&gt;" to the app — worst of all while audio is playing,
+     * which is exactly when voice control is wanted.
+     *
+     * OR this into every action mask written to the shared session.
+     */
+    public static final long SEARCH_ACTIONS =
+            PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH
+            | PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH;
+
     private static final java.util.regex.Pattern MANIFEST_PATTERN = java.util.regex.Pattern.compile(".*/manifests/([^/?]+)\\.m3u8(?:\\?.*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern HLS_PATTERN = java.util.regex.Pattern.compile(".*/(\\d+)/hls/.*", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern APP_POST_MEDIA_ID_PATTERN = java.util.regex.Pattern.compile("^(post-)?\\d+$", java.util.regex.Pattern.CASE_INSENSITIVE);
@@ -1010,7 +1028,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 PlaybackStateCompat.ACTION_SEEK_TO |
                 PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
                 PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
-                PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID;
+                PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID |
+                SEARCH_ACTIONS;
 
         if (serviceMediaApi != null) {
             try {
@@ -3045,7 +3064,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID |
                     PlaybackStateCompat.ACTION_SEEK_TO |
                     PlaybackStateCompat.ACTION_SKIP_TO_NEXT |
-                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS;
+                    PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
+                    SEARCH_ACTIONS;
 
             if (this.serviceMediaApi != null) {
                 try {
