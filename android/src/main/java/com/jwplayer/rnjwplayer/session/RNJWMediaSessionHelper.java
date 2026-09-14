@@ -591,6 +591,29 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
     }
 
+    /**
+     * Forwards a voice search command to com.mediabrowser.MediaBrowserService,
+     * which owns the search pipeline (JS bridge, result selection, error
+     * publishing). Reflection keeps this library independent of the
+     * media-browser library, matching how the two already interoperate.
+     */
+    private boolean forwardVoiceSearchToMediaBrowser(String query, String mode) {
+        try {
+            Class<?> mbsClass = Class.forName("com.mediabrowser.MediaBrowserService");
+            java.lang.reflect.Method handle = mbsClass.getMethod(
+                    "handleVoiceSearchFromSession", String.class, String.class);
+            Object accepted = handle.invoke(null, query, mode);
+            boolean ok = accepted instanceof Boolean && (Boolean) accepted;
+            if (!ok) {
+                JWLog.w(TAG, "forwardVoiceSearchToMediaBrowser: not accepted (mode=" + mode + ", query=\"" + query + "\")");
+            }
+            return ok;
+        } catch (Exception e) {
+            JWLog.w(TAG, "forwardVoiceSearchToMediaBrowser: failed — " + e.getMessage());
+            return false;
+        }
+    }
+
     // MediaSession callback to handle transport controls on Android 13/14+
     private final MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
         @Override
@@ -641,6 +664,37 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         public void onPlayFromMediaId(String mediaId, Bundle extras) {
             JWLog.d(TAG, "mediaSessionCallback.onPlayFromMediaId(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ")");
             performMediaItemSelection(mediaId, extras);
+        }
+
+        /**
+         * Voice "play <something>".
+         *
+         * Required because setCallback() on the shared MediaSession REPLACES the
+         * callback rather than chaining: once a player exists this callback owns
+         * every transport command, so without these overrides Assistant's
+         * dispatched search was silently dropped even though the action mask
+         * advertised the capability.
+         */
+        @Override
+        public void onPlayFromSearch(String query, Bundle extras) {
+            JWLog.d(TAG, "mediaSessionCallback.onPlayFromSearch(query=\"" + query + "\", extras=" + JWLog.bundleInfo(extras) + ")");
+            // An empty query means "just play something" — performPlay() already
+            // continues what is loaded, which is the wanted behaviour here.
+            if (query == null || query.trim().isEmpty()) {
+                performPlay();
+                return;
+            }
+            forwardVoiceSearchToMediaBrowser(query, "play");
+        }
+
+        /** Voice prepare-from-search. Must not start playback. */
+        @Override
+        public void onPrepareFromSearch(String query, Bundle extras) {
+            JWLog.d(TAG, "mediaSessionCallback.onPrepareFromSearch(query=\"" + query + "\")");
+            if (query == null || query.trim().isEmpty()) {
+                return;
+            }
+            forwardVoiceSearchToMediaBrowser(query, "prepare");
         }
 
         @Override
@@ -2081,10 +2135,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
 
             try {
-                // 1) Publish a no‑playback state so controllers/AA drop Now Playing
+                // 1) Publish a no‑playback state so controllers/AA drop Now Playing.
+                //    Actions are NOT cleared to 0: voice search is a static capability
+                //    of the app, not a function of what is playing. Assistant reads this
+                //    mask to decide whether it can hand "play X" to us, so a mask of 0
+                //    on an idle app makes the app unaddressable by voice until something
+                //    republishes a mask — which is why search had to be opened first.
+                //    STATE_NONE is what drops Now Playing; the mask does not affect that.
                 PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
                         .setState(PlaybackStateCompat.STATE_NONE, 0L, 0f)
-                        .setActions(0L);
+                        .setActions(SEARCH_ACTIONS);
                 // Preserve custom actions (like Android Auto speed button set by
                 // MediaBrowserService) so they survive the helper destroy/recreate
                 // cycle during media switches.  Without this, the speed custom action
@@ -2312,7 +2372,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             notificationCapabilities | 
             PlaybackStateCompat.ACTION_SEEK_TO | 
             PlaybackStateCompat.ACTION_SKIP_TO_NEXT | 
-            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS);
+            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
+            SEARCH_ACTIONS);
         byte playbackState = 0;
         switch (playerState) {
             case PLAYING:
