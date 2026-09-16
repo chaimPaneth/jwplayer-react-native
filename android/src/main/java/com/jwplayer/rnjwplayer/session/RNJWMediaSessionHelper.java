@@ -87,6 +87,35 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH
             | PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH;
 
+    /**
+     * Mask for a session with no player attached.
+     *
+     * Assistant expects the supported playback actions to be advertised at all times,
+     * including during initialization, and it reads them before it sends the first
+     * command. A search-only mask says "you may ask me to search but I cannot play",
+     * so a spoken "play X" has nothing to dispatch to. ACTION_PLAY is what makes the
+     * idle app a legal target for playback; STATE_NONE, not the mask, is what keeps
+     * Now Playing off the head unit.
+     */
+    public static final long IDLE_ACTIONS =
+            PlaybackStateCompat.ACTION_PLAY
+            | PlaybackStateCompat.ACTION_PLAY_PAUSE
+            | SEARCH_ACTIONS;
+
+    /**
+     * Playback transport actions this app supports whenever a player exists.
+     *
+     * Podcast-style content must advertise Play, Pause, Stop and Seek To. These are
+     * ORed in unconditionally rather than taken from getNotificationCapabilities(),
+     * which is empty while the player is IDLE — exactly the stopped-with-content
+     * moment when voice control is wanted.
+     */
+    public static final long TRANSPORT_ACTIONS =
+            PlaybackStateCompat.ACTION_PLAY
+            | PlaybackStateCompat.ACTION_PAUSE
+            | PlaybackStateCompat.ACTION_PLAY_PAUSE
+            | PlaybackStateCompat.ACTION_STOP;
+
     private static final java.util.regex.Pattern MANIFEST_PATTERN = java.util.regex.Pattern.compile(".*/manifests/([^/?]+)\\.m3u8(?:\\?.*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern HLS_PATTERN = java.util.regex.Pattern.compile(".*/(\\d+)/hls/.*", java.util.regex.Pattern.CASE_INSENSITIVE);
     private static final java.util.regex.Pattern APP_POST_MEDIA_ID_PATTERN = java.util.regex.Pattern.compile("^(post-)?\\d+$", java.util.regex.Pattern.CASE_INSENSITIVE);
@@ -2136,15 +2165,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
             try {
                 // 1) Publish a no‑playback state so controllers/AA drop Now Playing.
-                //    Actions are NOT cleared to 0: voice search is a static capability
-                //    of the app, not a function of what is playing. Assistant reads this
-                //    mask to decide whether it can hand "play X" to us, so a mask of 0
-                //    on an idle app makes the app unaddressable by voice until something
-                //    republishes a mask — which is why search had to be opened first.
-                //    STATE_NONE is what drops Now Playing; the mask does not affect that.
+                //    Actions are NOT cleared to 0, and not reduced to search bits either:
+                //    Assistant reads this mask to decide whether it can hand "play X" to
+                //    us, and a mask without ACTION_PLAY says the app cannot start playback,
+                //    so the command is never dispatched. STATE_NONE is what drops Now
+                //    Playing; the mask does not affect that.
                 PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder()
                         .setState(PlaybackStateCompat.STATE_NONE, 0L, 0f)
-                        .setActions(SEARCH_ACTIONS);
+                        .setActions(IDLE_ACTIONS);
                 // Preserve custom actions (like Android Auto speed button set by
                 // MediaBrowserService) so they survive the helper destroy/recreate
                 // cycle during media switches.  Without this, the speed custom action
@@ -2370,6 +2398,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         long notificationCapabilities = this.serviceMediaApi.getNotificationCapabilities();
         playbackStateBuilder.builder.setActions(
             notificationCapabilities | 
+            TRANSPORT_ACTIONS |
             PlaybackStateCompat.ACTION_SEEK_TO | 
             PlaybackStateCompat.ACTION_SKIP_TO_NEXT | 
             PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS |
