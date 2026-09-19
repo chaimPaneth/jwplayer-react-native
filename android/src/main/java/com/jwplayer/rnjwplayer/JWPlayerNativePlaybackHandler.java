@@ -333,7 +333,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     }
                 }
             } catch (Exception ignored) {}
-            sharedMediaSession.setPlaybackState(builder.build());
+            { PlaybackStateCompat outgoingState = builder.build(); logHandlerStateWrite(sharedMediaSession, outgoingState); sharedMediaSession.setPlaybackState(outgoingState); }
             sharedMediaSession.setActive(true);
         }
 
@@ -693,6 +693,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
 
             String title = stringOrNull(postData.get("title"));
             String mediaId = stringOrNull(postData.get("mediaId"));
+                Map<String, Object> playingInfo = playingInfoManager != null
+                    ? playingInfoManager.getCurrentPlayingInfo() : null;
+                String subtitle = playingInfo != null ? stringOrNull(playingInfo.get("subtitle")) : null;
 
             int duration = 0;
             Object durationObj = postData.get("duration");
@@ -718,6 +721,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             PlaylistItem.Builder playlistBuilder = new PlaylistItem.Builder()
                     .file(playbackUrl)
                     .title(title != null ? title : "Unknown Title")
+                    .description(subtitle)
                     .mediaId(mediaId != null ? mediaId : "unknown");
 
             // Add duration if available
@@ -889,7 +893,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                         }
                     }
                 } catch (Exception ignored) {}
-                sharedMediaSession.setPlaybackState(builder.build());
+                { PlaybackStateCompat outgoingState = builder.build(); logHandlerStateWrite(sharedMediaSession, outgoingState); sharedMediaSession.setPlaybackState(outgoingState); }
             }
             
             JWLog.d(TAG, "📱 JAVA: stopAndCleanup completed successfully");
@@ -988,6 +992,79 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         JWLog.d(TAG, "isBackgroundPlayerActive() -> " + (backgroundPlayer != null && isPlaying));
         return backgroundPlayer != null && isPlaying;
     }
+
+    /**
+     * DIAGNOSTIC ONLY: records this owner's writes to the shared MediaSession, in the same
+     * STATEWRITE format RNJWMediaSessionHelper uses, so two owners that disagree are attributable
+     * in one grep.
+     *
+     * Added 2026-09-19. Until now only the helper's write sites were instrumented, while this class
+     * has five and MediaBrowserService eleven — so the capture in which Android Auto and the app
+     * showed two different clocks (logcat_android17_2026-09-19_12-19-29) could not rule this owner
+     * in or out. Changes no behaviour.
+     */
+    private void logHandlerStateWrite(MediaSessionCompat session, PlaybackStateCompat outgoing) {
+        if (!JWLog.isVerbose() || outgoing == null) {
+            return;
+        }
+        String site = "unknown";
+        try {
+            site = Thread.currentThread().getStackTrace()[3].getMethodName();
+        } catch (Throwable ignored) {}
+        int previousState = -1;
+        long previousPositionMs = -1L;
+        try {
+            PlaybackStateCompat previous = session != null
+                    ? session.getController().getPlaybackState() : null;
+            if (previous != null) {
+                previousState = previous.getState();
+                previousPositionMs = previous.getPosition();
+            }
+        } catch (Throwable ignored) {}
+        long liveMs = -1L;
+        try {
+            if (backgroundPlayer != null) {
+                liveMs = (long) (backgroundPlayer.getPosition() * 1000d);
+            }
+        } catch (Throwable ignored) {}
+        JWLog.d(TAG, "STATEWRITE[handler." + site + "] newState=" + outgoing.getState()
+                + " newPosition=" + outgoing.getPosition() + "ms speed=" + outgoing.getPlaybackSpeed()
+                + " backgroundLive=" + liveMs + "ms"
+                + " previousState=" + previousState
+                + " previousPosition=" + previousPositionMs + "ms");
+    }
+
+    /**
+     * Whether the background player is ready to actually accept a {@code seek()} call right now,
+     * as opposed to still IDLE/loading a just-selected item, where JW silently swallows
+     * {@code seek()} with no callback at all.
+     * Mirrors {@code RNJWMediaSessionHelper.isStateReadyForSeek} exactly — keep the two in step.
+     * {@code isPlayerReady}/{@code isBackgroundPlayerActive} do not answer this: the former is
+     * never actually set true anywhere in this class, and the latter reflects "is playing", not
+     * "is ready for a seek".
+     *
+     * BUFFERING requires a known duration: measured 2026-09-18, a seek dispatched while a freshly
+     * selected item was still loading (state BUFFERING, duration still 0) was swallowed, and the
+     * session then published the lost target while playback ran from 0. Accepting BUFFERING on its
+     * own admitted precisely that case.
+     */
+    public boolean isBackgroundPlayerReadyForSeek() {
+        if (backgroundPlayer == null) {
+            return false;
+        }
+        double duration = 0;
+        PlayerState state = null;
+        try {
+            duration = backgroundPlayer.getDuration();
+            state = backgroundPlayer.getState();
+        } catch (Exception ignored) {
+            // fall through with duration == 0, state == null
+        }
+        if (state == PlayerState.PLAYING || state == PlayerState.PAUSED) {
+            return true;
+        }
+        return state == PlayerState.BUFFERING && duration > 0;
+    }
     
     /**
      * Get current background player info for session coordination
@@ -1057,7 +1134,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                             }
                         }
                     } catch (Exception ignored) {}
-                    sharedMediaSession.setPlaybackState(builder.build());
+                    { PlaybackStateCompat outgoingState = builder.build(); logHandlerStateWrite(sharedMediaSession, outgoingState); sharedMediaSession.setPlaybackState(outgoingState); }
                 }
             } catch (Exception e) {
                 JWLog.e(TAG, "Error during background player transfer", e);
@@ -1652,7 +1729,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                             }
                         }
                     } catch (Exception ignored) {}
-                    sharedMediaSession.setPlaybackState(builder.build());
+                    { PlaybackStateCompat outgoingState = builder.build(); logHandlerStateWrite(sharedMediaSession, outgoingState); sharedMediaSession.setPlaybackState(outgoingState); }
                     sharedMediaSession.setActive(true);
                 }
 
@@ -2163,7 +2240,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     }
                 }
             } catch (Exception ignored) {}
-            sharedMediaSession.setPlaybackState(builder.build());
+            { PlaybackStateCompat outgoingState = builder.build(); logHandlerStateWrite(sharedMediaSession, outgoingState); sharedMediaSession.setPlaybackState(outgoingState); }
         } catch (Exception e) {
             JWLog.e(TAG, "Error updating MediaSession metadata", e);
         }

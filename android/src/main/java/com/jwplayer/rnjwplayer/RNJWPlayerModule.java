@@ -408,9 +408,45 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void seekTo(final int reactTag, final double time) {
         JWLog.d(TAG, "seekTo(reactTag=" + reactTag + ", time=" + time + ")");
+        // Measured 2026-09-18 (capture logcat_android17_2026-09-18_17-29-06): 0.9s after an
+        // Android Auto track change 10647 -> 10646 on a locked phone, the JS restore path issued
+        // seekTo(time=1798.0) — the PREVIOUS item's position plus elapsed — against the NEW item.
+        // React only adopted the switch 11s later (setAppProvidedMediaId ... appTrackChanged=true),
+        // so at that moment its post AND the position it derived from it were both stale.
+        //
+        // The guard cannot live in JS: React's own state is the stale side, so it has no
+        // synchronous way to know. Native does — an AA selection that the app has not yet
+        // re-asserted leaves androidAutoSelectedMediaId ahead of appProvidedMediaId, and
+        // setAppProvidedMediaId retires the former the moment the app adopts the track. So the
+        // mismatch IS the "React has not caught up" window, and any seek position computed from
+        // React's view during it belongs to a different item. Drop it rather than moving the
+        // player behind the session's back — this entry point writes straight to the player and
+        // never arms the helper's seek target, so a stale push here is invisible to the
+        // MediaSession.
+        try {
+            String[] identity = com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                    .getPlaybackIdentitySnapshot();
+            String androidAutoSelectedMediaId = identity[1];
+            String appProvidedMediaId = identity[3];
+            if (androidAutoSelectedMediaId != null && appProvidedMediaId != null
+                    && !androidAutoSelectedMediaId.equals(appProvidedMediaId)) {
+                JWLog.w(TAG, "seekTo: DROPPED stale JS seek to " + time
+                        + "s — app has not adopted the native item yet (native="
+                        + androidAutoSelectedMediaId + ", app=" + appProvidedMediaId + ")");
+                return;
+            }
+        } catch (Exception identityError) {
+            // Never let the guard break a legitimate seek: on any failure fall through and seek.
+            JWLog.w(TAG, "seekTo: identity check failed, seeking anyway: "
+                    + identityError.getMessage());
+        }
         new Handler(Looper.getMainLooper()).post(() -> {
             RNJWPlayerView playerView = getPlayerView(reactTag);
             if (playerView != null && playerView.mPlayerView != null) {
+                // This seek is a COMMAND the position model can see, so anchor it rather than
+                // leaving the model to discover the jump through bounded reacquisition.
+                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                        .noteAppOriginatedSeek((long) (time * 1000d));
                 playerView.mPlayerView.getPlayer().seek(time);
             }
         });

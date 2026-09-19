@@ -58,6 +58,7 @@ import com.jwplayer.pub.api.events.PlaylistItemEvent;
 import com.jwplayer.pub.api.media.playlists.MediaSource;
 import com.jwplayer.pub.api.events.SeekEvent;
 import com.jwplayer.pub.api.events.SeekedEvent;
+import com.jwplayer.pub.api.events.TimeEvent;
 import com.jwplayer.pub.api.events.listeners.AdvertisingEvents;
 import com.jwplayer.pub.api.events.listeners.VideoPlayerEvents;
 import com.jwplayer.pub.api.media.playlists.PlaylistItem;
@@ -66,7 +67,7 @@ import com.jwplayer.rnjwplayer.utils.JWLog;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener, VideoPlayerEvents.OnSeekListener, VideoPlayerEvents.OnSeekedListener {
+public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteListener, AdvertisingEvents.OnAdErrorListener, AdvertisingEvents.OnAdPlayListener, AdvertisingEvents.OnAdSkippedListener, VideoPlayerEvents.OnBufferListener, VideoPlayerEvents.OnErrorListener, VideoPlayerEvents.OnPauseListener, VideoPlayerEvents.OnPlayListener, VideoPlayerEvents.OnPlaylistCompleteListener, VideoPlayerEvents.OnPlaylistItemListener, VideoPlayerEvents.OnSeekListener, VideoPlayerEvents.OnSeekedListener, VideoPlayerEvents.OnTimeListener {
     private static final String TAG = "RNJWMediaSessionHelper";
 
     private static final java.util.regex.Pattern MANIFEST_PATTERN = java.util.regex.Pattern.compile(".*/manifests/([^/?]+)\\.m3u8(?:\\?.*)?$", java.util.regex.Pattern.CASE_INSENSITIVE);
@@ -231,6 +232,35 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static final long CROSS_TRACK_START_WINDOW_MS = 10_000L;
     /** Agreement tolerance: below this the two sources are saying the same thing. */
     private static final long CROSS_TRACK_AGREEMENT_MS = 3_000L;
+    private final SeekAcceptanceState seekState = new SeekAcceptanceState();
+    /**
+     * Authoritative position outside the seek window. See {@link PositionModel} — it accepts an SDK
+     * sample only when the sample agrees with where playback must be, or when a command we issued
+     * explains the disagreement, and it reacquires on bounded coherent disagreement so it can never
+     * be stranded on a stale anchor.
+     */
+    private final PositionModel positionModel = new PositionModel();
+    // Throttles the per-publish seek-disagreement diagnostics (PROJECTED/HELD/UNCONFIRMED): these
+    // are emitted on every resolvePublishPositionMs/onTime call while a target is pending, which
+    // measured 2026-09-18 at ~20Hz and wrapped the entire logcat main buffer in well under 1s.
+    private static final long SEEK_DISAGREEMENT_LOG_INTERVAL_MS = 1_000L;
+    private long lastSeekDisagreementLogAtMs = 0L;
+    /** DIAGNOSTIC: at most one POSITION_TRUTH line per second (onTime ticks far faster). */
+    private static final long POSITION_TRUTH_LOG_INTERVAL_MS = 1_000L;
+    private long lastPositionTruthLogAtMs = 0L;
+    /**
+     * DIAGNOSTIC: how far a published position must fall BEHIND the anchor already being served
+     * before it is flagged. Above the 3s agreement tolerance so ordinary jitter and rebuffer
+     * rounding stay quiet, low enough to catch the measured 1213ms-after-953931ms collapse.
+     */
+    private static final long ANCHOR_REGRESSION_LOG_THRESHOLD_MS = 5_000L;
+    /**
+     * How far the position a controller is DISPLAYING may drift from the model before the session is
+     * corrected. Above the model's own 1.5s agreement tolerance so ordinary jitter never triggers a
+     * write, far below the 42-minute divergence measured on 2026-09-19.
+     */
+    private static final long RECONCILE_DIVERGENCE_THRESHOLD_MS = 3_000L;
+    private long lastSeekDisagreementLogTargetMs = Long.MIN_VALUE;
 
     /**
      * TEMPORARY DIAGNOSTICS -- remove with the other [AAPIP] logging once the Android Auto
@@ -751,6 +781,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             return;
         }
 
+        // Never persist a position that disagrees with a seek still in flight. JW 4.26.0 echo events
+        // carry the stale playhead (or a spurious 0), and those were overwriting the real resume
+        // point: measured 2026-09-16, a seek to 457027ms persisted 0ms, one to 763518ms persisted
+        // 1726ms, and a BACKWARD seek to 260403ms persisted 716038ms. Symmetric on purpose — the
+        // stale playhead sits ahead of the target on a backward seek. Not gated on the AA handoff,
+        // because the corruption was reproduced on an ordinary user seek.
+        if (seekState.blocksStore(position, SystemClock.elapsedRealtime())) {
+            JWLog.d(TAG, "storeSeekPosition: BLOCKED storing " + position
+                    + "ms disagreeing with in-flight seek target " + seekState.targetInFlightMs() + "ms");
+            return;
+        }
+
         if (resetToStartAfterSeekCompletion && position > 0) {
             JWLog.d(TAG, "storeSeekPosition: override due to pending completion reset");
             position = 0L;
@@ -760,7 +802,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // During AA Skip Next/Prev, storeSeekPosition(0) can fire after externalMediaId got refreshed
         // back to the OLD mediaId via inferMediaIdFromPlaylistItem, which would wipe the legitimate
         // resume position saved seconds earlier by the periodic progress sync.
-        if (position == 0) {
+        if (position == 0 && seekState.targetInFlightMs() != 0L && lastRequestedSeekPositionMs != 0L) {
             Long existing = lastKnownPositionCache.get(externalMediaId);
             if (existing != null && existing > 0) {
                 JWLog.d(TAG, "storeSeekPosition: BLOCKED zero overwrite for mediaId=" + externalMediaId + " (existing=" + existing + "ms)");
@@ -958,7 +1000,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // DON'T set callback here - MediaBrowserService already has the callback set
         // and it will delegate to us when needed via static methods or fallback to direct handling
         
-        this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED});
+        this.jwPlayer.addListeners(this, new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED, EventType.TIME});
         JWPlayer currentJwPlayer = this.jwPlayer;
         // Only seed playlist when there is no active background/service session
         try {
@@ -988,6 +1030,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private void updatePlaybackState(JWPlayer player, int state, Long overridePositionMs) {
         JWLog.d(TAG, "updatePlaybackState(player=" + JWLog.id(player) + ", state=" + state + ", overridePositionMs=" + (overridePositionMs == null ? "null" : overridePositionMs) + ")");
         if (this.mediaSessionStateProvider == null || this.mediaSessionStateProvider.mediaSessionCompat == null || player == null) {
+            // DIAGNOSTIC: a publish that silently does not happen is indistinguishable in a capture
+            // from one that was never attempted. Measured 2026-09-19 (capture
+            // logcat_android17_2026-09-19_12-19-29): after returning to the app the helper emitted
+            // ZERO state writes for 14s while playback continued, so Android Auto extrapolated from
+            // a stale anchor and showed a different clock from the app — and nothing said why.
+            JWLog.w(TAG, "PUBSKIP[helper.updatePlaybackState] state=" + state
+                    + " override=" + overridePositionMs
+                    + " reason=" + (player == null ? "player-null"
+                        : this.mediaSessionStateProvider == null ? "stateProvider-null"
+                        : "mediaSession-null")
+                    + " activeInstance=" + (activeInstance == this ? "self" : JWLog.id(activeInstance))
+                    + " self=" + JWLog.id(this));
             return;
         }
 
@@ -995,11 +1049,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (overridePositionMs != null) {
             positionMs = overridePositionMs;
         } else {
-            try {
-                positionMs = (long) (player.getPosition() * 1000);
-            } catch (Exception e) {
-                positionMs = 0;
-            }
+            positionMs = resolvePublishPositionMs(player, state);
         }
 
         long actions =
@@ -1042,7 +1092,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             } catch (Exception ignored) {}
         }
 
-        float speed = (state == PlaybackStateCompat.STATE_PLAYING) ? currentSpeed : 0.0f;
+        float speed = state == PlaybackStateCompat.STATE_PLAYING && seekState.targetInFlightMs() < 0
+            ? currentSpeed : 0.0f;
 
         PlaybackStateCompat.Builder builder = new PlaybackStateCompat.Builder()
                 .setState(state, positionMs, speed)
@@ -1079,6 +1130,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
 
         try {
+            logPlaybackStateWrite("helper.updatePlaybackState", state, positionMs, speed,
+                    overridePositionMs);
             this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(builder.build());
             this.mediaSessionStateProvider.mediaSessionCompat.setActive(true);
         } catch (Exception ex) {
@@ -1910,7 +1963,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private long rememberPlaybackPosition(String reason) {
         long positionMs = getCurrentPositionMs();
-        if (positionMs >= 0) {
+        if (positionMs >= 0 && !seekState.blocksStore(positionMs, SystemClock.elapsedRealtime())) {
             lastKnownRealPlaybackPositionMs = positionMs;
             storeSeekPosition(lastKnownRealPlaybackPositionMs);
         }
@@ -2025,7 +2078,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, 
                                     EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, 
                                     EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, 
-                                    EventType.SEEK, EventType.SEEKED});
+                                    EventType.SEEK, EventType.SEEKED, EventType.TIME});
                 JWLog.d(TAG, "detachForTransfer() - removed player listeners");
             } catch (Exception e) {
                 JWLog.w(TAG, "detachForTransfer() - error removing listeners: " + e.getMessage());
@@ -2112,7 +2165,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // --- Player/notification cleanup ---
         if (this.jwPlayer != null) {
             this.jwPlayer.removeListeners(this,
-                new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED});
+                new EventType[]{EventType.PLAY, EventType.PAUSE, EventType.BUFFER, EventType.ERROR, EventType.PLAYLIST_ITEM, EventType.PLAYLIST_COMPLETE, EventType.AD_PLAY, EventType.AD_SKIPPED, EventType.AD_COMPLETE, EventType.AD_ERROR, EventType.SEEK, EventType.SEEKED, EventType.TIME});
             (notificationHelper = this.rnjwNotificationHelper).notificationManager.cancel(notificationHelper.notificationId);
             // Forced to ERROR level deliberately — see updatePlayerState's cancel tag. Field reads
             // and string literals only; no method calls inside the concatenation.
@@ -2314,19 +2367,26 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
         
         // Get player position
-        // Use actual player position, not controller extras
+        // Routed through resolvePublishPositionMs, NOT a raw getPosition(): measured 2026-09-16,
+        // this writer had the last word after every Android Auto seek and published the PREVIOUS
+        // seek's position (606296ms after a seek to 861057ms), which is what made the head unit
+        // display one seek behind for the rest of the session.
         long positionMs = 0L;
         try {
-            positionMs = (long) (this.jwPlayer != null ? this.jwPlayer.getPosition() * 1000 : 0);
+            positionMs = this.jwPlayer != null
+                    ? resolvePublishPositionMs(this.jwPlayer, playbackState) : 0L;
         } catch (Exception ex) {
             positionMs = 0L;
         }
 
-        float speed = (playbackState == PlaybackStateCompat.STATE_PLAYING) ? currentSpeed : 0.0F;
+        float speed = playbackState == PlaybackStateCompat.STATE_PLAYING && seekState.targetInFlightMs() < 0
+            ? currentSpeed : 0.0F;
         playbackStateBuilder.builder
             .setState(playbackState, positionMs, speed);
 
         PlaybackStateCompatWrapper updatedPlaybackState =  new PlaybackStateCompatWrapper(playbackStateBuilder.builder.build());
+        logPlaybackStateWrite("helper.updatePlayerState(" + playerState + ")",
+                playbackState, positionMs, speed, null);
         this.mediaSessionStateProvider.mediaSessionCompat.setPlaybackState(updatedPlaybackState.playbackStateCompat);
         boolean isActive = playerState != PlayerState.ERROR && playerState != PlayerState.IDLE;
         this.mediaSessionStateProvider.mediaSessionCompat.setActive(isActive);
@@ -2422,8 +2482,75 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         requestAudioFocusForPlayback();
     }
 
+    /**
+     * DIAGNOSTIC: the most recent command that asked for an item to load, and where it came from.
+     *
+     * Added 2026-09-19. In capture logcat_android17_2026-09-19_12-19-29, finishing a series-A item
+     * and immediately picking a series-B item on Android Auto loaded series A's NEXT item instead —
+     * twice. Two independent load commands (RN's completion advance and the AA selection) race, and
+     * the log showed only the resulting item titles, so which command won had to be inferred. These
+     * fields let onPlaylistItem state it outright.
+     */
+    private static volatile String lastLoadIntentOrigin = null;
+    private static volatile String lastLoadIntentMediaId = null;
+    private static volatile long lastLoadIntentAtMs = 0L;
+    private static volatile String previousLoadIntentOrigin = null;
+    private static volatile String previousLoadIntentMediaId = null;
+
+    /**
+     * An app-originated seek (RNJWPlayerModule.seekTo) writes STRAIGHT to the player and never passes
+     * through {@link #performSeekTo}, so the model would not learn about it — measured 2026-09-19
+     * 19:07 during the automated soak: a scrubber tap moved the player back 9 minutes and the session
+     * kept serving the old projection, rejecting reality for five ticks until bounded reacquisition
+     * converged. Reacquisition doing its job is the right backstop, but a seek we can SEE is a
+     * command, not an anomaly, so it should anchor the model immediately.
+     *
+     * Position-only: this does not touch the seek-acceptance target, because a JS seek carries no
+     * MediaSession request to protect.
+     */
+    public static void noteAppOriginatedSeek(long positionMs) {
+        RNJWMediaSessionHelper helper = activeInstance;
+        if (helper == null || positionMs < 0) {
+            return;
+        }
+        helper.positionModel.onCommandedPosition(positionMs, SystemClock.elapsedRealtime());
+        JWLog.d(TAG, "POSMODEL[app-seek] anchored to commanded " + positionMs + "ms");
+    }
+
+    /** DIAGNOSTIC ONLY: records who asked for a load. Changes no behaviour. */
+    public static void noteLoadIntent(String origin, String mediaId) {        previousLoadIntentOrigin = lastLoadIntentOrigin;
+        previousLoadIntentMediaId = lastLoadIntentMediaId;
+        lastLoadIntentOrigin = origin;
+        lastLoadIntentMediaId = mediaId;
+        lastLoadIntentAtMs = SystemClock.elapsedRealtime();
+        JWLog.d(TAG, "LOADTRACE[intent] origin=" + origin + " mediaId=" + mediaId
+                + " supersedes=" + previousLoadIntentOrigin + "/" + previousLoadIntentMediaId);
+    }
+
+    /** DIAGNOSTIC ONLY: says which intent the item that actually loaded corresponds to. */
+    private void logLoadOutcome(PlaylistItem item) {
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        String loadedId = item != null ? item.getMediaId() : null;
+        String loadedTitle = item != null ? item.getTitle() : null;
+        long sinceIntentMs = lastLoadIntentAtMs > 0
+                ? SystemClock.elapsedRealtime() - lastLoadIntentAtMs : -1L;
+        String[] ids = getPlaybackIdentitySnapshot();
+        boolean matchesIntent = lastLoadIntentMediaId != null
+                && (lastLoadIntentMediaId.equals(loadedId)
+                    || lastLoadIntentMediaId.equals(ids[2]) || lastLoadIntentMediaId.equals(ids[1]));
+        JWLog.d(TAG, "LOADTRACE[loaded] title=" + loadedTitle + " itemMediaId=" + loadedId
+                + " externalId=" + ids[2] + " aaId=" + ids[1] + " appId=" + ids[3]
+                + " lastIntent=" + lastLoadIntentOrigin + "/" + lastLoadIntentMediaId
+                + " (" + sinceIntentMs + "ms ago)"
+                + " previousIntent=" + previousLoadIntentOrigin + "/" + previousLoadIntentMediaId
+                + " matchesLastIntent=" + matchesIntent);
+    }
+
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         JWLog.d(TAG, "onPlaylistItem(event.item=" + JWLog.playlistItemInfo(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null) + ")", true);
+        logLoadOutcome(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null);
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
         completionScheduledFromSeek = false;
         PlaylistItem incomingItem = playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null;
@@ -2463,6 +2590,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 JWLog.d(TAG, "onPlaylistItem: track switched " + lastPlaylistItemMediaId
                         + " -> " + itemKey + " (explicit JS starts are suspect for the next "
                         + CROSS_TRACK_START_WINDOW_MS + "ms)");
+                // A seek target belongs to the item it was requested on; never carry it across.
+                clearSeekTargetInFlight("track-switch " + lastPlaylistItemMediaId + " -> " + itemKey);
+                // Nothing about the previous item's position is meaningful for the new one.
+                // Measured 2026-09-19 16:40: a track boundary produced live=229942ms against a
+                // session already reset to 0, a one-tick divergence of 229942ms. Resetting here
+                // means the new item's first sample SEEDS the model rather than being judged
+                // against the old item's projection.
+                positionModel.reset();
             }
             lastPlaylistItemMediaId = itemKey;
         }
@@ -2726,9 +2861,547 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 return;
             }
 
-            lastRequestedSeekPositionMs = offsetMs;
+            // An echo carries no requested position of its own, so it may only CORROBORATE a seek
+            // we actually issued. Measured 2026-09-19 (capture logcat_android17_2026-09-19_11-18-12):
+            // returning to the app after a background track change, the JS restore seek to 226.0s
+            // was echoed as onSeek(position=226.0, offset=0.0). Writing that spurious zero here made
+            // it onSeeked's fallback "requested" position, so the CORRECT event position of 226000ms
+            // was discarded as a stale playhead and 0 was published and cached — restarting the
+            // media at 0:00. With no armed target, leaving this field at -1 lets onSeeked trust the
+            // event itself, which for a JS-initiated seek is the only honest source.
+            long armedTargetMs = seekState.targetInFlightMs();
+            boolean echoCorroboratesArmedSeek = armedTargetMs >= 0
+                    && Math.abs(offsetMs - armedTargetMs) <= SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS;
+            if (echoCorroboratesArmedSeek) {
+                lastRequestedSeekPositionMs = offsetMs;
+            } else if (armedTargetMs < 0) {
+                JWLog.d(TAG, "onSeek: echo offset=" + offsetMs
+                        + "ms corroborates no armed seek; leaving lastRequested="
+                        + lastRequestedSeekPositionMs + "ms untouched");
+            }
             lastSeekRequestedWhilePaused = !isCurrentlyPlaying();
+            // Shield the MediaSession from the stale live position JW 4.26.0 reports for seconds
+            // after a seek. Refused when it would downgrade a fresher performSeekTo target, and
+            // ignored outright when no seek is in flight.
+            noteSeekTargetInFlight(offsetMs, "onSeek-echo", false);
         }
+    }
+
+    /**
+     * Position to publish to the MediaSession when no explicit override was supplied.
+     *
+     * JW 4.26.0 regression, measured on device 2026-09-16 with Android Auto + PiP: after a seek to
+     * 538312ms, {@code getPosition()} still returned the PRE-seek playhead (912ms) for at least
+     * 1.5s — spanning both the {@code onSeeked} callback and the state publication that follows it.
+     * Android Auto anchors its clock on {@code (position, updateTime, speed)} and extrapolates, and
+     * because nothing re-publishes while the phone sits in PiP, that stale anchor is what the head
+     * unit counts up from — showing ~0:01 climbing while the audio really played from 8:58. It only
+     * corrected on PiP exit, when a rebuild finally published the true position (545000ms).
+     *
+     * So while a seek is in flight and the live position has not yet ARRIVED at the target, the
+     * target is published instead. The test is proximity, not direction: measured 2026-09-16 on a
+     * BACKWARD seek (716038ms -> 260403ms), a "has the player reached or passed the target" test
+     * concluded the seek had landed — the stale playhead was ahead of the target — cleared the
+     * override and republished 716038ms, so Android Auto stuck at the previous position and counted
+     * on from it. Only once the live position is actually AT the target has the seek demonstrably
+     * landed. Agreement is accepted only after completion and outside buffering. The trust window
+     * is diagnostic, not permission to persist a still-disagreeing sample.
+     */
+    private long resolvePublishPositionMs(JWPlayer player, int playbackState) {
+        long liveMs;
+        PlayerState liveState = null;
+        try {
+            liveMs = (long) (player.getPosition() * 1000);
+            liveState = player.getState();
+        } catch (Exception e) {
+            liveMs = -1L;
+        }
+
+        boolean playing = playbackState == PlaybackStateCompat.STATE_PLAYING
+                && liveState == PlayerState.PLAYING;
+        boolean settled = (playbackState == PlaybackStateCompat.STATE_PLAYING
+                || playbackState == PlaybackStateCompat.STATE_PAUSED)
+                && (liveState == PlayerState.PLAYING || liveState == PlayerState.PAUSED);
+        SeekAcceptanceState.PublishDecision decision = seekState.resolvePublish(
+                liveMs, playing, settled, SystemClock.elapsedRealtime(), seekClearListener);
+
+        if (decision.outcome == SeekAcceptanceState.PublishOutcome.NO_TARGET) {
+            // No seek command is in flight, so nothing EXPLAINS a disagreement between the SDK and
+            // where playback must be. This is the window every remaining regression lived in:
+            // measured 2026-09-19 14:19, a confirmed seek to 2568766ms was followed 1.3s later by
+            // getPosition() reverting to the pre-seek playhead (12524ms), which was published and —
+            // because publication is event-driven — stayed Android Auto's anchor while the player
+            // ran on 42 minutes ahead. The model decides here instead of the raw sample.
+            long nowMs = SystemClock.elapsedRealtime();
+            syncModelPlaybackState(playbackState, nowMs);
+            PositionModel.Decision modelDecision = positionModel.observe(liveMs, nowMs);
+            logPositionModelDecision("publish", modelDecision);
+            return modelDecision.positionMs >= 0 ? modelDecision.positionMs : liveMs;
+        }
+
+        if (decision.releasedProtection() || decision.outcome == SeekAcceptanceState.PublishOutcome.ABANDONED) {
+            // The seek window just ended. Anchor the model on the position actually settled upon so
+            // the first post-release sample is judged against reality, not against a stale model.
+            positionModel.onCommandedPosition(decision.positionMs, SystemClock.elapsedRealtime());
+        }
+
+        if (decision.outcome == SeekAcceptanceState.PublishOutcome.ABANDONED) {
+            // A target that NEVER received a completion callback (measured 2026-09-18: an AA
+            // seek dispatched while the new track was still loading is silently swallowed by the
+            // SDK, so onSeeked/onTime agreement never arrives). Unlike HELD_PAST_TRUST_WINDOW this
+            // releases the anchor and follows the live player, so Android Auto does not stay
+            // stuck at the lost target forever. storeSeekPosition here so the resume cache also
+            // reflects reality instead of a target that was never reached.
+            JWLog.w(TAG, "SEEKTRACE[ABANDONED] target=" + decision.targetMs + "ms live=" + decision.liveMs
+                    + "ms age=" + decision.ageMs + "ms -> following live position");
+            storeSeekPosition(decision.positionMs);
+        } else if (shouldLogSeekDisagreement(decision.targetMs)) {
+            if (decision.outcome == SeekAcceptanceState.PublishOutcome.HELD_PAST_TRUST_WINDOW) {
+                // Deliberately does NOT fall back to liveMs. Measured 2026-09-16: after a seek to
+                // 861057ms this player kept reporting 606296ms (the PREVIOUS seek plus elapsed) while
+                // the audio and the PiP overlay both played the new position, so liveMs is the wrong
+                // value, not merely a late one. The anchor is released only by a new seek or a track
+                // switch. Rate-limited: logged at most once per second per target (see
+                // SEEK_DISAGREEMENT_LOG_INTERVAL_MS) so a stuck target stays visible without
+                // flooding the capture.
+                JWLog.d(TAG, "SEEKTRACE[UNCONFIRMED] target=" + decision.targetMs + "ms held past trust window"
+                        + " (age=" + decision.ageMs + "ms, live=" + decision.liveMs + "ms) -> publishing projected "
+                        + decision.projectedMs + "ms");
+            } else if (decision.outcome == SeekAcceptanceState.PublishOutcome.PROJECTED) {
+                JWLog.d(TAG, "SEEKTRACE[UNCONFIRMED] live=" + decision.liveMs + "ms disagrees with seek target "
+                        + decision.targetMs + "ms (age=" + decision.ageMs + "ms) -> publishing projected "
+                        + decision.projectedMs + "ms");
+            }
+        }
+
+        return decision.positionMs;
+    }
+
+    /** At most one disagreement log per target per {@link #SEEK_DISAGREEMENT_LOG_INTERVAL_MS}. */
+    private boolean shouldLogSeekDisagreement(long targetMs) {
+        long now = SystemClock.elapsedRealtime();
+        boolean sameTarget = targetMs == lastSeekDisagreementLogTargetMs;
+        if (sameTarget && now - lastSeekDisagreementLogAtMs < SEEK_DISAGREEMENT_LOG_INTERVAL_MS) {
+            return false;
+        }
+        lastSeekDisagreementLogAtMs = now;
+        lastSeekDisagreementLogTargetMs = targetMs;
+        return true;
+    }
+
+    /**
+     * Records a seek target so a stale live position cannot be published while it is in flight.
+     *
+     * @param authoritative true for {@code performSeekTo}, the single choke point every real seek
+     *     passes through. An authoritative target is always accepted — otherwise a user seeking to
+     *     0:00 straight after a large seek would be refused. A non-authoritative JW echo is refused
+     *     when it disagrees with a fresher target in either direction.
+     */
+    private void noteSeekTargetInFlight(long targetMs, String source, boolean authoritative) {
+        SeekAcceptanceState.ArmOutcome outcome =
+            seekState.arm(targetMs, authoritative, SystemClock.elapsedRealtime());
+        if (!outcome.accepted) {
+            if (targetMs >= 0 && outcome.keptTargetMs < 0) {
+                // Measured 2026-09-19: returning to the app after a background track change, JW
+                // echoed the JS restore seek to 226.0s as onSeek(position=226.0, offset=0.0). With
+                // no target in flight that spurious zero used to BECOME the session's position and
+                // was written into the item's resume cache, restarting playback at 0:00. An echo
+                // carries no requested position of its own, so it may only acknowledge a target.
+                JWLog.d(TAG, "noteSeekTargetInFlight: IGNORED " + targetMs + "ms from " + source
+                        + "; no seek in flight — an echo may not create a target");
+            } else if (targetMs >= 0) {
+                // Measured 2026-09-16: performSeekTo(457027) was issued correctly, then JW emitted
+                // its own onSeek(offset=0.0) 43ms later while the player was PAUSED/reloading.
+                // Taking that echo as the target wiped the real one and 0 was published and stored.
+                // Symmetric, because on a backward seek a stale echo sits AHEAD of the target.
+                JWLog.d(TAG, "noteSeekTargetInFlight: REFUSED disagreeing " + targetMs
+                        + "ms from " + source + "; keeping in-flight " + outcome.keptTargetMs
+                        + "ms (age=" + outcome.ageMs + "ms — spurious JW echo)");
+            }
+            return;
+        }
+        JWLog.d(TAG, "noteSeekTargetInFlight(" + targetMs + "ms, source=" + source + ")");
+    }
+
+    /**
+     * Keeps the model's advance/freeze state in step with what is actually being published, so the
+     * projection does not keep advancing through a pause or a rebuffer.
+     */
+    private void syncModelPlaybackState(int playbackState, long nowMs) {
+        if (playbackState == PlaybackStateCompat.STATE_PLAYING) {
+            positionModel.onPlaying(nowMs);
+        } else {
+            positionModel.onNotPlaying(nowMs);
+        }
+    }
+
+    /** One line per non-trivial model decision. ACCEPTED is the quiet common case. */
+    private void logPositionModelDecision(String source, PositionModel.Decision d) {
+        if (!JWLog.isVerbose() || d == null) {
+            return;
+        }
+        switch (d.verdict) {
+            case REJECTED:
+                JWLog.d(TAG, "POSMODEL[" + source + "] REJECTED sample=" + d.sampleMs
+                        + "ms deviation=" + d.deviationMs + "ms -> publishing projected "
+                        + d.projectedMs + "ms (streak=" + d.rejectStreak + "/"
+                        + PositionModel.REACQUIRE_AFTER_REJECTS + ")");
+                break;
+            case REACQUIRED:
+                JWLog.w(TAG, "POSMODEL[" + source + "] REACQUIRED to sample=" + d.sampleMs
+                        + "ms after " + d.rejectStreak + " coherent disagreements"
+                        + " (projection was " + d.projectedMs + "ms, deviation=" + d.deviationMs + "ms)");
+                break;
+            case SEEDED:
+                JWLog.d(TAG, "POSMODEL[" + source + "] SEEDED at " + d.sampleMs + "ms");
+                break;
+            case UNAVAILABLE:
+                JWLog.d(TAG, "POSMODEL[" + source + "] sample unavailable -> projected "
+                        + d.projectedMs + "ms");
+                break;
+            default:
+                break;
+        }
+    }
+
+    /**
+     * Corrects the MediaSession when the anchor it is serving has diverged from the authoritative
+     * model.
+     *
+     * This is NOT a periodic republish. Measured 2026-09-19 12:22 and again at 14:19: a single bogus
+     * sample became the served anchor and, because publication is driven only by state-change
+     * events, nothing ever corrected it — Android Auto extrapolated from 1213ms while the player ran
+     * on from 953931ms, and the two clocks stayed 42 minutes apart, both counting. The write below
+     * happens ONLY when the served position actually contradicts the model, so a healthy session
+     * publishes nothing extra; the forensic report's objection to blind periodic republishing is
+     * respected.
+     *
+     * Runs before {@code onTime}'s own gates on purpose: those gates drop the tick when the event
+     * position and {@code getPosition()} disagree by more than 3s, which is exactly the anomaly
+     * window this has to survive.
+     */
+    private void reconcileServedAnchor() {
+        if (activeInstance != this || jwPlayer == null) {
+            return;
+        }
+        if (seekState.targetInFlightMs() >= 0L) {
+            // A seek is in flight; SeekAcceptanceState owns publication until it settles.
+            return;
+        }
+        long nowMs = SystemClock.elapsedRealtime();
+        long liveMs;
+        PlayerState liveState;
+        try {
+            liveMs = (long) (jwPlayer.getPosition() * 1000d);
+            liveState = jwPlayer.getState();
+        } catch (Exception e) {
+            return;
+        }
+        if (liveState != PlayerState.PLAYING && liveState != PlayerState.PAUSED) {
+            return;
+        }
+        int playbackState = liveState == PlayerState.PLAYING
+                ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
+        syncModelPlaybackState(playbackState, nowMs);
+        PositionModel.Decision decision = positionModel.observe(liveMs, nowMs);
+        logPositionModelDecision("reconcile", decision);
+        if (decision.positionMs < 0) {
+            return;
+        }
+
+        long servedMs = -1L;
+        int servedState = -1;
+        long servedUpdateTimeMs = 0L;
+        float servedSpeed = 0f;
+        try {
+            PlaybackStateCompat served = this.mediaSessionStateProvider != null
+                    && this.mediaSessionStateProvider.mediaSessionCompat != null
+                    ? this.mediaSessionStateProvider.mediaSessionCompat
+                            .getController().getPlaybackState()
+                    : null;
+            if (served != null) {
+                servedMs = served.getPosition();
+                servedState = served.getState();
+                servedUpdateTimeMs = served.getLastPositionUpdateTime();
+                servedSpeed = served.getPlaybackSpeed();
+            }
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (servedMs < 0) {
+            return;
+        }
+        // A controller shows position + (now - updateTime) * speed, so compare against what it is
+        // DISPLAYING now, not against the value as originally written. Without this, a stale anchor
+        // whose extrapolation has drifted hours away would still look "close" on the stored number.
+        long servedProjectedMs = servedMs;
+        if (servedState == PlaybackStateCompat.STATE_PLAYING && servedUpdateTimeMs > 0) {
+            long elapsed = Math.max(0L, nowMs - servedUpdateTimeMs);
+            servedProjectedMs = servedMs + (long) (elapsed * (servedSpeed > 0f ? servedSpeed : 1f));
+        }
+        long divergenceMs = Math.abs(decision.positionMs - servedProjectedMs);
+        if (divergenceMs <= RECONCILE_DIVERGENCE_THRESHOLD_MS) {
+            return;
+        }
+        JWLog.w(TAG, "POSMODEL[reconcile] served=" + servedProjectedMs + "ms diverged "
+                + divergenceMs + "ms from the model's " + decision.positionMs
+                + "ms (verdict=" + decision.verdict + ") -> republishing");
+        updatePlaybackState(jwPlayer, playbackState, decision.positionMs);
+    }
+
+    /**
+     * DIAGNOSTIC: one line per second carrying every position the system holds, side by side, so a
+     * single capture answers "who disagrees with whom" without correlating four log streams.
+     *
+     * Added 2026-09-19 after a capture in which Android Auto and the app displayed two different
+     * clocks (capture logcat_android17_2026-09-19_12-19-29): a transient getPosition() of 1213ms was
+     * published as the anchor at 12:22:03 and, because the helper publishes only on state-change
+     * events, it stayed the anchor for 14s while the player ran on from 953931ms. Nothing in the log
+     * compared the live player against what the MediaSession controller was actually serving, so the
+     * divergence was visible only by hand-correlating PIPTRACE against STATEWRITE.
+     *
+     * Reads nothing over IPC and publishes nothing — purely observational.
+     */
+    private void logPositionTruth(String phase) {
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastPositionTruthLogAtMs < POSITION_TRUTH_LOG_INTERVAL_MS) {
+            return;
+        }
+        lastPositionTruthLogAtMs = now;
+        long liveMs = -1L;
+        String liveState = "n/a";
+        double durationSeconds = -1d;
+        try {
+            if (jwPlayer != null) {
+                liveMs = (long) (jwPlayer.getPosition() * 1000d);
+                PlayerState st = jwPlayer.getState();
+                liveState = st != null ? st.name() : "null";
+                durationSeconds = jwPlayer.getDuration();
+            }
+        } catch (Throwable t) {
+            liveState = "err:" + t.getClass().getSimpleName();
+        }
+        long servedMs = -1L;
+        int servedState = -1;
+        float servedSpeed = 0f;
+        try {
+            PlaybackStateCompat served = this.mediaSessionStateProvider != null
+                    && this.mediaSessionStateProvider.mediaSessionCompat != null
+                    ? this.mediaSessionStateProvider.mediaSessionCompat
+                            .getController().getPlaybackState()
+                    : null;
+            if (served != null) {
+                servedMs = served.getPosition();
+                servedState = served.getState();
+                servedSpeed = served.getPlaybackSpeed();
+            }
+        } catch (Throwable ignored) {}
+        String[] ids = getPlaybackIdentitySnapshot();
+        long targetMs = seekState.targetInFlightMs();
+        long targetAgeMs = seekState.targetArmedAtMs() > 0 ? now - seekState.targetArmedAtMs() : -1L;
+        JWLog.d(TAG, "POSITION_TRUTH[" + phase + "]"
+                + " live=" + liveMs + "ms(" + liveState + ")"
+                + " served=" + servedMs + "ms(state=" + servedState + ",speed=" + servedSpeed + ")"
+                + " delta=" + (liveMs >= 0 && servedMs >= 0 ? (liveMs - servedMs) : Long.MIN_VALUE) + "ms"
+                + " target=" + targetMs + "ms(age=" + targetAgeMs + "ms)"
+                + " pendingSeek=" + pendingSeekMs + " applied=" + pendingSeekApplied
+                + " lastRequested=" + lastRequestedSeekPositionMs + "ms"
+                + " duration=" + durationSeconds + "s"
+                + " resolvedId=" + ids[0] + " aaId=" + ids[1]
+                + " externalId=" + ids[2] + " appId=" + ids[3]
+                + " self=" + JWLog.id(this)
+                + " active=" + (activeInstance == this ? "self" : JWLog.id(activeInstance)));
+    }
+
+    /**
+     * DIAGNOSTIC: flags a publish whose position moves materially BACKWARDS from the anchor already
+     * being served, with no seek in flight to explain it. Measured 2026-09-19: a rebuffer produced a
+     * transient 1213ms reading right after a confirmed seek to 953931ms, and publishing it made
+     * Android Auto extrapolate from 1.2s for the rest of the session. Logs only — the write still
+     * proceeds, so this changes no behaviour.
+     */
+    private void logAnchorRegression(String source, long newPositionMs, long previousPositionMs,
+            int newState, int previousState) {
+        if (!JWLog.isVerbose() || newPositionMs < 0 || previousPositionMs < 0) {
+            return;
+        }
+        long regressionMs = previousPositionMs - newPositionMs;
+        if (regressionMs < ANCHOR_REGRESSION_LOG_THRESHOLD_MS) {
+            return;
+        }
+        JWLog.w(TAG, "ANCHOR_REGRESSION[" + source + "] published " + newPositionMs
+                + "ms, " + regressionMs + "ms BEHIND the served anchor " + previousPositionMs
+                + "ms with target=" + seekState.targetInFlightMs()
+                + "ms pendingSeek=" + pendingSeekMs
+                + " newState=" + newState + " previousState=" + previousState
+                + " — no seek in flight explains this jump");
+    }
+
+    /**
+     * DIAGNOSTIC: records the exact helper path about to write the shared MediaSession, including
+     * the state it will overwrite. This does not alter the state or position.
+     */
+    private void logPlaybackStateWrite(
+            String source, int state, long positionMs, float speed, Long overridePositionMs) {
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        int previousState = -1;
+        long previousPositionMs = -1L;
+        try {
+            PlaybackStateCompat previous = this.mediaSessionStateProvider != null
+                    && this.mediaSessionStateProvider.mediaSessionCompat != null
+                    ? this.mediaSessionStateProvider.mediaSessionCompat.getController().getPlaybackState()
+                    : null;
+            if (previous != null) {
+                previousState = previous.getState();
+                previousPositionMs = previous.getPosition();
+            }
+        } catch (Throwable ignored) {}
+        long ageMs = seekState.targetArmedAtMs() > 0
+            ? SystemClock.elapsedRealtime() - seekState.targetArmedAtMs()
+                : -1L;
+        JWLog.d(TAG, "STATEWRITE[" + source + "] newState=" + state
+                + " newPosition=" + positionMs + "ms speed=" + speed
+                + " override=" + overridePositionMs
+                + " target=" + seekState.targetInFlightMs() + "ms targetAge=" + ageMs
+                + "ms previousState=" + previousState
+                + " previousPosition=" + previousPositionMs + "ms");
+        logAnchorRegression(source, positionMs, previousPositionMs, state, previousState);
+    }
+
+    /**
+     * Drops any in-flight seek target; the live player position becomes authoritative again.
+     * DIAGNOSTIC: reason and both positions are mandatory because the 2026-09-16 capture proved
+     * the final wrong MediaSession write happened only AFTER this target disappeared.
+     */
+    /** Emits the existing SEEKTRACE diagnostic when {@link SeekAcceptanceState} drops the target. */
+    private final SeekAcceptanceState.ClearListener seekClearListener =
+            new SeekAcceptanceState.ClearListener() {
+                @Override
+                public void onCleared(String reason, long clearedTargetMs, long ageMs) {
+                    logSeekTargetCleared(reason, clearedTargetMs, ageMs);
+                }
+            };
+
+    private void logSeekTargetCleared(String reason, long clearedTargetMs, long ageMs) {
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        long liveMs = -1L;
+        String state = "n/a";
+        try {
+            if (jwPlayer != null) {
+                liveMs = (long) (jwPlayer.getPosition() * 1000L);
+                PlayerState playerState = jwPlayer.getState();
+                state = playerState != null ? playerState.name() : "null";
+            }
+        } catch (Throwable t) {
+            state = "err:" + t.getClass().getSimpleName();
+        }
+        JWLog.d(TAG, "SEEKTRACE[CLEAR] reason=" + reason
+                + " target=" + clearedTargetMs + "ms age=" + ageMs
+                + "ms live=" + liveMs + "ms state=" + state
+                + " lastRequested=" + lastRequestedSeekPositionMs + "ms");
+    }
+
+    /**
+     * Drops any in-flight seek target; the live player position becomes authoritative again.
+     * DIAGNOSTIC: reason and both positions are mandatory because the 2026-09-16 capture proved
+     * the final wrong MediaSession write happened only AFTER this target disappeared.
+     */
+    private void clearSeekTargetInFlight(String reason) {
+        long ageMs = seekState.targetArmedAtMs() > 0
+                ? SystemClock.elapsedRealtime() - seekState.targetArmedAtMs()
+                : -1L;
+        seekState.clear(reason, ageMs, seekClearListener);
+    }
+
+    /**
+     * Decides what position an {@code onSeeked} event really represents.
+     *
+     * JW 4.26.0 regression, measured on device 2026-09-16 (Android Auto seek taken while the phone
+     * was in PiP): the head unit requested 763518ms, {@code onSeek} correctly reported
+     * {@code offset=763.518}, and then {@code onSeeked} arrived with {@code position=1.727} — the
+     * playhead the freshly-started track happened to be at when the user dragged the scrubber, NOT
+     * the seek target. The previous expression trusted ANY non-zero event position, so 1726ms was
+     * both published to the MediaSession and written into the resume cache: Android Auto then
+     * extrapolated from ~0:01 and counted upward while the audio really played from 12:43, and the
+     * saved resume position was corrupted to 1726ms. The pre-existing spurious-zero guard only
+     * covers {@code eventPositionMs == 0}, so a small non-zero value slipped straight past it.
+     *
+     * Arbitration: the live player CANNOT settle this — measured 2026-09-16, {@code getPosition()}
+     * returned the same stale 912ms as the event, a full 1.5s after a seek to 538312ms. So an event
+     * that DISAGREES with the seek we just requested is treated as the stale playhead and the
+     * request wins. The test is symmetric: an earlier directional version only corrected events
+     * landing behind the target, which silently let a backward seek through (716038ms reported for a
+     * seek to 260403ms) and left Android Auto stuck at the previous position. With no recent
+     * request, or an event that agrees with it, behaviour is unchanged.
+     */
+    private long resolveSeekedPosition(long eventPositionMs) {
+        // Prefer the in-flight target: lastRequestedSeekPositionMs is written from JW's own onSeek
+        // echo, which was measured carrying a spurious 0 for a seek really issued to 457027ms.
+        SeekAcceptanceState.SeekedDecision decision =
+                seekState.resolveSeeked(eventPositionMs, lastRequestedSeekPositionMs);
+        if (decision.substitutedRequest) {
+            JWLog.d(TAG, "resolveSeekedPosition: event=" + eventPositionMs
+                    + "ms DISAGREES with requested=" + decision.requestedMs
+                    + "ms (stale playhead) -> using requested");
+        }
+        return decision.positionMs;
+    }
+
+    @Override
+    public void onTime(TimeEvent timeEvent) {
+        // DIAGNOSTIC FIRST: emitted before every gate below, because the gates are exactly what a
+        // capture needs to see through. onTime is the only signal that ticks throughout steady
+        // playback, so this is the one place a per-second truth line can come from. Rate-limited
+        // inside, and it publishes nothing.
+        logPositionTruth("onTime");
+        reconcileServedAnchor();
+        if (activeInstance != this || jwPlayer == null || timeEvent == null
+                || seekState.targetInFlightMs() < 0L) {
+            return;
+        }
+        PlayerState playerState = jwPlayer.getState();
+        if (playerState != PlayerState.PLAYING && playerState != PlayerState.PAUSED) {
+            return;
+        }
+        double eventSeconds = timeEvent.getPosition();
+        double liveSeconds = jwPlayer.getPosition();
+        if (Double.isNaN(eventSeconds) || Double.isInfinite(eventSeconds) || eventSeconds < 0d
+                || Double.isNaN(liveSeconds) || Double.isInfinite(liveSeconds) || liveSeconds < 0d
+                || Math.abs(eventSeconds - liveSeconds) * 1000d > SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS) {
+            return;
+        }
+        int playbackState = playerState == PlayerState.PLAYING
+                ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
+        long targetMs = seekState.targetInFlightMs();
+        long liveMs = (long) (liveSeconds * 1000d);
+        long acceptedPositionMs = resolvePublishPositionMs(jwPlayer, playbackState);
+        if (seekState.targetInFlightMs() >= 0L) {
+            // Still unconfirmed. A seek dispatched while the player was loading (measured
+            // 2026-09-18: AA track change + seek while locked) never gets an onSeeked/onTime
+            // agreement at all, so bound it with one guarded re-issue instead of holding forever.
+            if (playerState == PlayerState.PLAYING
+                    && seekState.canClaimPlayingCorrection(liveMs, SystemClock.elapsedRealtime())) {
+                correctUnconfirmedPlayingSeek();
+            }
+            return;
+        }
+        if (pendingSeekMs != null
+                && Math.abs(pendingSeekMs - targetMs) <= SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS) {
+            pendingSeekMs = null;
+            pendingSeekApplied = true;
+            resetAndroidAutoFlag();
+        }
+        storeSeekPosition(acceptedPositionMs);
+        updatePlaybackState(jwPlayer, playbackState, acceptedPositionMs);
+        JWLog.d(TAG, "SEEKTRACE[CONFIRMED_TIME] target=" + targetMs
+                + "ms actual=" + acceptedPositionMs + "ms state=" + playerState);
     }
 
     @Override
@@ -2784,10 +3457,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             return; // Don't process the spurious 0 event at all
         }
 
-        long effectivePositionMs = eventPositionMs > 0 ? eventPositionMs : lastRequestedSeekPositionMs;
+        long effectivePositionMs = resolveSeekedPosition(eventPositionMs);
         effectivePositionMs = sanitizeSeekPosition(effectivePositionMs);
 
         JWLog.d(TAG, "onSeeked(position=" + positionSeconds + ", effectiveMs=" + effectivePositionMs + ", Android=" + androidVersion + ")");
+
+        correctSettledPausedSeek();
 
         // Android Auto handoff correction: Two-phase defense strategy
         // Phase 1 (above): Block spurious seek-to-0 entirely (Android 12/14 quirk)
@@ -2797,7 +3472,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // - Immediately accept correct positions
         if (isPlayingFromAndroidAuto && pendingSeekMs != null && !pendingSeekApplied) {
             autoHandoffSeekAttempts++;
-            long deltaFromTarget = Math.abs(effectivePositionMs - pendingSeekMs);
+            long deltaFromTarget = Math.abs(eventPositionMs - pendingSeekMs);
             
             JWLog.d(TAG, "onSeeked: Android " + androidVersion + " handoff attempt #" + autoHandoffSeekAttempts 
                 + " (effective=" + effectivePositionMs + "ms, expected=" + pendingSeekMs + "ms, delta=" + deltaFromTarget + "ms)");
@@ -2838,7 +3513,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Without this, pendingSeekApplied stays false and applyPendingSeekWhenReady can
         // repeatedly re-issue the same seek on play/buffer callbacks.
         if (!isPlayingFromAndroidAuto && pendingSeekMs != null && !pendingSeekApplied) {
-            long deltaFromTarget = Math.abs(effectivePositionMs - pendingSeekMs);
+            long deltaFromTarget = Math.abs(eventPositionMs - pendingSeekMs);
             if (deltaFromTarget < 2000) {
                 pendingSeekApplied = true;
                 pendingSeekMs = null;
@@ -2875,7 +3550,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         // Clear pendingSeekMs if we've reached the target position (within 2 seconds tolerance)
         if (pendingSeekApplied && pendingSeekMs != null) {
-            long delta = Math.abs(effectivePositionMs - pendingSeekMs);
+            long delta = Math.abs(eventPositionMs - pendingSeekMs);
             if (delta < 2000) {
                 JWLog.d(TAG, "onSeeked: target position reached (" + effectivePositionMs + " ~= " + pendingSeekMs + "), clearing pendingSeekMs");
                 pendingSeekMs = null;
@@ -2887,7 +3562,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Avoid accidentally wiping a valid resume position with 0 during
         // handoff/guarded seeks. Only persist 0 when we are truly at start
         // without any pending resume semantics.
-        if (effectivePositionMs <= 0
+        if (effectivePositionMs <= 0 && seekState.targetInFlightMs() != 0L
             && (pendingSeekMs != null && pendingSeekMs > 0
                 || resetToStartAfterSeekCompletion
                 || completionScheduledFromSeek
@@ -2906,6 +3581,58 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         lastSeekRequestedWhilePaused = false;
         lastRequestedSeekPositionMs = -1L;
         suppressNextSeekCallback = false;
+    }
+
+    private void correctSettledPausedSeek() {
+        if (activeInstance != this || jwPlayer == null || seekState.targetInFlightMs() < 0L) {
+            return;
+        }
+        final JWPlayer seekOwner = jwPlayer;
+        final long correctionMs = seekState.targetInFlightMs();
+        final long requestAtMs = seekState.targetArmedAtMs();
+        mainHandler.post(() -> {
+            if (activeInstance != this || jwPlayer != seekOwner
+                    || seekState.targetInFlightMs() != correctionMs
+                    || seekState.targetArmedAtMs() != requestAtMs
+                    || seekOwner.getState() != PlayerState.PAUSED
+                    || !seekState.claimPausedCorrection((long) (seekOwner.getPosition() * 1000d), true)) {
+                return;
+            }
+            suppressNextSeekCallback = true;
+            lastRequestedSeekPositionMs = correctionMs;
+            lastSeekRequestedWhilePaused = true;
+            JWLog.d(TAG, "SEEKTRACE[PAUSED_CORRECTION] target=" + correctionMs + "ms");
+            seekOwner.seek(correctionMs / 1000d);
+        });
+    }
+
+    /**
+     * Bounded, one-shot re-issue for a target that is still unconfirmed while the player has been
+     * settled PLAYING for a while (see {@link SeekAcceptanceState#canClaimPlayingCorrection}).
+     * Mirrors {@link #correctSettledPausedSeek()}: the actual claim happens inside the posted
+     * runnable, not before posting, so concurrent onTime ticks cannot double-dispatch.
+     */
+    private void correctUnconfirmedPlayingSeek() {
+        if (activeInstance != this || jwPlayer == null || seekState.targetInFlightMs() < 0L) {
+            return;
+        }
+        final JWPlayer seekOwner = jwPlayer;
+        final long correctionMs = seekState.targetInFlightMs();
+        final long requestAtMs = seekState.targetArmedAtMs();
+        mainHandler.post(() -> {
+            if (activeInstance != this || jwPlayer != seekOwner
+                    || seekState.targetInFlightMs() != correctionMs
+                    || seekState.targetArmedAtMs() != requestAtMs
+                    || seekOwner.getState() != PlayerState.PLAYING
+                    || !seekState.claimPlayingCorrection((long) (seekOwner.getPosition() * 1000d),
+                            SystemClock.elapsedRealtime())) {
+                return;
+            }
+            suppressNextSeekCallback = true;
+            lastRequestedSeekPositionMs = correctionMs;
+            JWLog.d(TAG, "SEEKTRACE[PLAYING_CORRECTION] target=" + correctionMs + "ms");
+            seekOwner.seek(correctionMs / 1000d);
+        });
     }
 
     public void onPause(PauseEvent pauseEvent) {
@@ -2964,6 +3691,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         this.updatePlayerState(PlayerState.PAUSED);
         updatePlaybackState(jwPlayer, PlaybackStateCompat.STATE_PAUSED);
+        correctSettledPausedSeek();
     }
 
     public void onPlay(PlayEvent playEvent) {
@@ -3201,6 +3929,50 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return null;
     }
 
+    /**
+     * Mirrors {@code applyPendingSeekWhenReady}'s own readiness check for the UI-attached player
+     * (duration known, or state already BUFFERING/PLAYING/PAUSED) so {@code performSeekTo} can
+     * decide, before dispatching, whether {@code seek()} would actually land or be silently
+     * swallowed by a still-IDLE/loading player. Falls back to the headless/background player's own
+     * readiness signal when no UI player is attached.
+     */
+    private boolean isAttachedPlayerReadyForSeek(PlayerState uiPlayerState) {
+        if (jwPlayer != null) {
+            double duration = 0;
+            try {
+                duration = jwPlayer.getDuration();
+            } catch (Exception ignored) {
+                // fall through with duration == 0
+            }
+            return isStateReadyForSeek(uiPlayerState, duration);
+        }
+        return jwPlayerNativePlaybackHandler != null
+                && jwPlayerNativePlaybackHandler.isBackgroundPlayerReadyForSeek();
+    }
+
+    /**
+     * Single definition of "a {@code seek()} issued right now will actually land".
+     *
+     * Measured 2026-09-18 (capture logcat_android17_2026-09-18_17-29-06): an AA seek to
+     * 1806529ms was dispatched 0.7s after an AA track change with {@code playerState=BUFFERING},
+     * logged as {@code SEEKTRACE[DISPATCH] route=immediate}, and was silently swallowed — the
+     * player went on to play the new item from 0 while the session published the lost target for
+     * 16s. The previous predicate accepted BUFFERING unconditionally, so it admitted exactly the
+     * case it was written to reject.
+     *
+     * PLAYING/PAUSED prove the item is loaded, so a seek lands. BUFFERING is ambiguous: it covers
+     * both "rebuffering an item already loaded" (seek lands) and "loading a just-selected item"
+     * (seek is swallowed). A known duration is what separates them — a freshly selected item
+     * reports 0 until its manifest is parsed, which is why {@code duration > 0} must be required
+     * there instead of being an independent alternative.
+     */
+    private static boolean isStateReadyForSeek(PlayerState state, double durationSeconds) {
+        if (state == PlayerState.PLAYING || state == PlayerState.PAUSED) {
+            return true;
+        }
+        return state == PlayerState.BUFFERING && durationSeconds > 0;
+    }
+
     private void applyPendingSeekWhenReady(PlaylistItem item) {
         JWLog.d(TAG, "applyPendingSeekWhenReady(pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ", item=" + JWLog.playlistItemInfo(item) + ")");
         if (pendingSeekMs == null || pendingSeekMs < 0 || jwPlayer == null || pendingSeekApplied) return;
@@ -3210,7 +3982,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         try { duration = jwPlayer.getDuration(); } catch (Exception ignored) {}
         PlayerState st = jwPlayer.getState();
 
-        if (duration > 0 || st == PlayerState.BUFFERING || st == PlayerState.PLAYING || st == PlayerState.PAUSED) {
+        if (isStateReadyForSeek(st, duration)) {
             // Seed lastRequestedSeekPositionMs BEFORE calling performSeekTo so onSeeked has a valid fallback
             lastRequestedSeekPositionMs = pendingSeekMs;
             suppressNextSeekCallback = true;
@@ -3500,9 +4272,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         maybeClearResetFlagForSeek(safePositionMs);
 
-        boolean shouldRequestFocus = false;
-        PlayerState previousState = null;
+        // Authoritative source of truth for the session clock. Every seek — Android Auto, in-app,
+        // and the AA handoff — passes through here with the real requested position, whereas JW's
+        // own onSeek/onSeeked echoes and getPosition() were all measured reporting stale or
+        // spurious values under 4.26.0.
+        noteSeekTargetInFlight(safePositionMs, "performSeekTo", true);
+        // A seek we issued is the one input that is authoritative by construction, so it re-anchors
+        // the model outright: the disagreement it creates with the old projection is explained.
+        positionModel.onCommandedPosition(safePositionMs, SystemClock.elapsedRealtime());
 
+        PlayerState previousState = null;
         if (jwPlayer != null) {
             try {
                 previousState = jwPlayer.getState();
@@ -3511,28 +4290,64 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
 
-        try {
-            jwPlayerNativePlaybackHandler.seekToPosition(safePositionMs);
-            JWLog.d(TAG, "Performed seek in background player to " + safePositionMs + " ms");
-        } catch (Exception handlerSeekError) {
-            JWLog.w(TAG, "Background player seek failed: " + handlerSeekError.getMessage());
-        }
+        // Measured 2026-09-18: a seek dispatched while the just-selected item is still IDLE/loading
+        // (locked-screen AA track change immediately followed by an AA seek) is silently swallowed
+        // by the JW SDK — no exception, no onSeeked callback, ever. Gate the actual dispatch on the
+        // same readiness signal applyPendingSeekWhenReady already uses, and route a not-ready seek
+        // through the pending-seek mechanism instead of losing it.
+        boolean playerReady = isAttachedPlayerReadyForSeek(previousState);
 
+        Long previousPendingSeekMs = pendingSeekMs;
+        boolean supersedesPendingSeek =
+                previousPendingSeekMs != null && previousPendingSeekMs.longValue() != safePositionMs;
+        if (!playerReady) {
+            // REPLACE, never cancel: a bare "pendingSeekMs = null" here (the pre-fix behavior)
+            // destroyed the only fallback that could re-issue this seek once the player becomes
+            // ready, since noteSeekTargetInFlight above already armed the trust-window hold — the
+            // dropped seek would then also never confirm, freezing Android Auto's displayed
+            // position at the lost target permanently (see the F2/F3 correction below).
+            pendingSeekMs = safePositionMs;
+            pendingSeekApplied = false;
+        } else if (supersedesPendingSeek) {
+            pendingSeekMs = null;
+            pendingSeekApplied = true;
+        }
+        // An equal pending value means applyPendingSeekWhenReady is the caller; leaving it in place
+        // keeps onSeeked's spurious-zero guard and the AA handoff counter armed until confirmation.
+        if (supersedesPendingSeek) {
+            resetAndroidAutoFlag();
+        }
+        JWLog.d(TAG, "SEEKTRACE[DISPATCH] target=" + safePositionMs + "ms route="
+                + (playerReady ? "immediate" : "pending") + " playerState=" + previousState);
+
+        boolean shouldRequestFocus = false;
         double safePositionSeconds = safePositionMs / 1000.0;
 
-        // Always seek UI player too (or as fallback) so its reported position updates promptly
-        if (this.jwPlayer != null) {
-            try {
-                this.jwPlayer.seek(safePositionSeconds);
-                JWLog.d(TAG, "Performed seek in UI player to " + safePositionSeconds + " s");
-            } catch (Exception uiSeekError) {
-                JWLog.e(TAG, "UI player seek failed: " + uiSeekError.getMessage());
+        if (playerReady) {
+            if (this.jwPlayer != null) {
+                try {
+                    this.jwPlayer.seek(safePositionSeconds);
+                    JWLog.d(TAG, "Performed seek in attached player to " + safePositionSeconds + " s");
+                } catch (Exception uiSeekError) {
+                    JWLog.e(TAG, "UI player seek failed: " + uiSeekError.getMessage());
+                }
+            } else {
+                try {
+                    jwPlayerNativePlaybackHandler.seekToPosition(safePositionMs);
+                    JWLog.d(TAG, "Performed seek in background player to " + safePositionMs + " ms");
+                } catch (Exception handlerSeekError) {
+                    JWLog.w(TAG, "Background player seek failed: " + handlerSeekError.getMessage());
+                }
             }
+        } else {
+            JWLog.d(TAG, "performSeekTo: player not ready (state=" + previousState
+                    + "); deferring dispatch to applyPendingSeekWhenReady");
         }
 
         if (jwPlayer != null) {
             // Keep state (playing vs paused) consistent after seek using the prior state snapshot
-            boolean wasPlaying = previousState == PlayerState.PLAYING || previousState == PlayerState.BUFFERING;
+                boolean wasPlaying = !pausedByUser
+                    && (previousState == PlayerState.PLAYING || previousState == PlayerState.BUFFERING);
             int targetPlaybackState = wasPlaying ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED;
 
             shouldRequestFocus = wasPlaying;
@@ -3681,6 +4496,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      */
     private void performMediaItemSelection(String mediaId, Bundle extras) {
         JWLog.d(TAG, "performMediaItemSelection(mediaId=" + mediaId + ", extras=" + JWLog.bundleInfo(extras) + ")");
+        noteLoadIntent("aa-selection", mediaId);
 
         requestAudioFocusForPlayback();
 

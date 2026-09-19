@@ -1,0 +1,211 @@
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public final class ForegroundReconfigureHarness {
+    private static final String TAG = "test";
+    private static final long FOREGROUND_REBUILD_SNAPSHOT_TTL_MS = 15_000L;
+    private static final long FOREGROUND_REBUILD_MIN_REWIND_MS = 2_000L;
+    private String mForegroundRebuildFile = "current.mp4";
+    private long mForegroundRebuildPositionMs = 115000L;
+    private long mForegroundRebuildCapturedAtMs = 1000L;
+    private final Player mPlayer = new Player();
+    private boolean userPaused;
+    private ReadableMap mConfig;
+    private ReadableMap mPlaylistProp;
+
+    /* PRODUCTION_METHODS */
+
+    private PlayerConfig buildPlayerConfig(ReadableMap prop, PlayerConfig oldConfig) {
+        return new PlayerConfig.Builder().playlist(Util.createPlaylist(prop, null)).build();
+    }
+
+    private PlayerConfig applyHiddenUiGroups(PlayerConfig config, ReadableMap prop) { return config; }
+    private void setControlsRequested(boolean controls) { }
+    private void reapplyControlsAfterSetup(boolean controls) { }
+    private String firstPlaylistFileFromConfig(ReadableMap prop) { return prop.file; }
+    private Double firstPlaylistStartTimeFromConfig(ReadableMap prop) { return prop.start; }
+    private String currentPlayerItemFile() { return mPlayer.config.playlist.get(0).file; }
+
+    public static void main(String[] args) {
+        ForegroundReconfigureHarness playing = new ForegroundReconfigureHarness();
+        assertStart("same-item stale zero", playing, "current.mp4", 0d, 115d);
+        if (!playing.mPlayer.config.getAutostart()) {
+            throw new AssertionError("stop callback must not turn a playing return into a pause");
+        }
+        assertStart("same-item stale positive", new ForegroundReconfigureHarness(), "current.mp4", 40d, 115d);
+        assertStart("forward request", new ForegroundReconfigureHarness(), "current.mp4", 180d, 180d);
+        assertStart("different item", new ForegroundReconfigureHarness(), "next.mp4", 0d, 0d);
+        ForegroundReconfigureHarness expired = new ForegroundReconfigureHarness();
+        expired.mForegroundRebuildCapturedAtMs = 1L;
+        SystemClock.nowMs = 16002L;
+        assertStart("expired snapshot", expired, "current.mp4", 0d, 0d);
+        SystemClock.nowMs = 1500L;
+        ForegroundReconfigureHarness paused = new ForegroundReconfigureHarness();
+        paused.userPaused = true;
+        assertStart("paused return", paused, "current.mp4", 0d, 115d);
+        if (paused.mPlayer.config.getAutostart()) {
+            throw new AssertionError("paused return must not autostart");
+        }
+        assertStart("missing incoming start", new ForegroundReconfigureHarness(), "current.mp4", null, 115d);
+        ForegroundReconfigureHarness noSnapshot = new ForegroundReconfigureHarness();
+        noSnapshot.mForegroundRebuildFile = null;
+        assertStart("no foreground snapshot", noSnapshot, "current.mp4", 0d, 0d);
+        ForegroundReconfigureHarness correction = new ForegroundReconfigureHarness();
+        correction.mForegroundRebuildPositionMs = 1369801L;
+        correction.mPlayer.position = 1372.294d;
+        correction.mConfig = new ReadableMap("previous.mp4", 1368d);
+        correction.mConfig.settings.put("androidHandoffGeneration", 7d);
+        assertReuse("foreground track correction", correction, new ReadableMap("current.mp4", 1370d));
+        assertReuse("repeated foreground correction", correction, new ReadableMap("current.mp4", 1371d));
+        ForegroundReconfigureHarness sameItem = foregroundReturn();
+        assertReuse("same-item stale zero without handoff", sameItem, new ReadableMap("current.mp4", 0d));
+        ForegroundReconfigureHarness pausedReuse = foregroundReturn();
+        pausedReuse.userPaused = true;
+        pausedReuse.mPlayer.state = PlayerState.PAUSED;
+        assertReuse("paused foreground reuse", pausedReuse, new ReadableMap("current.mp4", 0d));
+        assertReload("genuine forward start", foregroundReturn(), new ReadableMap("current.mp4", 180d));
+        assertReload("genuine track change", foregroundReturn(), new ReadableMap("next.mp4", 0d));
+        ReadableMap changedSettings = new ReadableMap("current.mp4", 0d);
+        changedSettings.settings.put("autostart", false);
+        assertReload("changed SDK settings", foregroundReturn(), changedSettings);
+        ReadableMap multipleItems = new ReadableMap("current.mp4", 0d);
+        multipleItems.playlistSize = 2;
+        assertReload("changed playlist queue", foregroundReturn(), multipleItems);
+        ForegroundReconfigureHarness expiredReuse = foregroundReturn();
+        SystemClock.nowMs = 16002L;
+        assertReload("expired reuse window", expiredReuse, new ReadableMap("current.mp4", 0d));
+        SystemClock.nowMs = 1500L;
+        ForegroundReconfigureHarness resetPlayer = foregroundReturn();
+        resetPlayer.mPlayer.position = 0d;
+        assertReload("actual player already reset", resetPlayer, new ReadableMap("current.mp4", 0d));
+        ForegroundReconfigureHarness loadingPlayer = foregroundReturn();
+        loadingPlayer.mPlayer.state = PlayerState.BUFFERING;
+        assertReload("unsettled player", loadingPlayer, new ReadableMap("current.mp4", 0d));
+        System.out.println("PASS: 19 production reconfigure cases, including foreground reuse and reload boundaries");
+    }
+
+    private static ForegroundReconfigureHarness foregroundReturn() {
+        ForegroundReconfigureHarness harness = new ForegroundReconfigureHarness();
+        harness.mConfig = new ReadableMap("current.mp4", 0d);
+        return harness;
+    }
+
+    private static void assertReuse(String name, ForegroundReconfigureHarness harness, ReadableMap incoming) {
+        double previousPosition = harness.mPlayer.position;
+        PlayerState previousState = harness.mPlayer.state;
+        boolean previouslyPaused = harness.userPaused;
+        harness.reconfigurePlayer(incoming);
+        if (harness.mPlayer.stopCount != 0 || harness.mPlayer.setupCount != 0
+                || harness.mPlayer.position != previousPosition || harness.mPlayer.state != previousState
+                || harness.userPaused != previouslyPaused || harness.mPlaylistProp != incoming) {
+            throw new AssertionError(name + ": live playback was not preserved");
+        }
+    }
+
+    private static void assertReload(String name, ForegroundReconfigureHarness harness, ReadableMap incoming) {
+        harness.reconfigurePlayer(incoming);
+        if (harness.mPlayer.stopCount != 1 || harness.mPlayer.setupCount != 1) {
+            throw new AssertionError(name + ": genuine reload was suppressed");
+        }
+    }
+
+    private static void assertStart(String name, ForegroundReconfigureHarness harness,
+            String file, Double requested, double expected) {
+        harness.reconfigurePlayer(new ReadableMap(file, requested));
+        double actual = harness.mPlayer.config.playlist.get(0).start;
+        if (Math.abs(actual - expected) > 0.001d) {
+            throw new AssertionError(name + ": expected " + expected + "s, got " + actual + "s");
+        }
+    }
+
+    private static final class SystemClock {
+        static long nowMs = 1500L;
+        static long elapsedRealtime() { return nowMs; }
+    }
+
+    private static final class JWLog {
+        static void d(String tag, String message) { }
+        static void e(String tag, String message) { }
+        static Object safe(Object value) { return value; }
+    }
+
+    private static final class ReadableMap {
+        final String file;
+        final Double start;
+        final Map<String, Object> settings = new HashMap<>();
+        int playlistSize = 1;
+        ReadableMap(String file, Double start) { this.file = file; this.start = start; }
+        boolean hasKey(String key) { return "playlist".equals(key); }
+        boolean isNull(String key) { return false; }
+        boolean getBoolean(String key) { return false; }
+        ReadableMap getArray(String key) { return this; }
+        int size() { return playlistSize; }
+        Map<String, Object> toHashMap() {
+            Map<String, Object> config = new HashMap<>(settings);
+            config.put("playlist", Collections.singletonList(file));
+            return config;
+        }
+    }
+
+    private static final class PlaylistItem {
+        final String file;
+        final double start;
+        PlaylistItem(String file, double start) { this.file = file; this.start = start; }
+    }
+
+    private static final class Util {
+        static List<PlaylistItem> createPlaylist(ReadableMap playlist, Double override) {
+            double start = override != null ? override : playlist.start != null ? playlist.start : 0d;
+            return Collections.singletonList(new PlaylistItem(playlist.file, start));
+        }
+    }
+
+    private enum UiGroup { PLAYER_CONTROLS_CONTAINER }
+    private enum PlayerState { IDLE, BUFFERING, PLAYING, PAUSED, COMPLETE, ERROR }
+
+    private static final class UiConfig {
+        static final class Builder {
+            Builder(UiConfig original) { }
+            Builder show(UiGroup group) { return this; }
+            UiConfig build() { return new UiConfig(); }
+        }
+    }
+
+    private static final class PlayerConfig {
+        List<PlaylistItem> playlist = Collections.singletonList(new PlaylistItem("current.mp4", 0));
+        boolean autostart = true;
+        UiConfig getUiConfig() { return new UiConfig(); }
+        boolean getAutostart() { return autostart; }
+        static final class Builder {
+            final PlayerConfig config = new PlayerConfig();
+            Builder() { }
+            Builder(PlayerConfig original) {
+                config.playlist = original.playlist;
+                config.autostart = original.autostart;
+            }
+            Builder playlist(List<PlaylistItem> playlist) { config.playlist = playlist; return this; }
+            Builder autostart(boolean autostart) { config.autostart = autostart; return this; }
+            Builder uiConfig(UiConfig ui) { return this; }
+            PlayerConfig build() { return config; }
+        }
+    }
+
+    private final class Player {
+        PlayerConfig config = new PlayerConfig();
+        double position = 115d;
+        int stopCount;
+        int setupCount;
+        PlayerState state = PlayerState.PLAYING;
+        PlayerConfig getConfig() { return config; }
+        List<PlaylistItem> getPlaylist() { return config.playlist; }
+        PlayerState getState() { return state; }
+        double getPosition() { return position; }
+        boolean getFullscreen() { return false; }
+        boolean getControls() { return true; }
+        void stop() { userPaused = true; stopCount++; position = 0d; }
+        void setup(PlayerConfig config) { this.config = config; setupCount++; }
+        void setFullscreen(boolean fullscreen, boolean animated) { }
+    }
+}

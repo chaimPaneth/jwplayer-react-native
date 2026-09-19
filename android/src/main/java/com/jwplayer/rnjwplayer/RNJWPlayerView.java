@@ -254,6 +254,8 @@ public class RNJWPlayerView extends RelativeLayout implements
     private long mMediaGeneration = 0L;
     private Consumer<PictureInPictureModeChangedInfo> mPipListener = null;
     private Boolean mLastHandledPipState = null;
+    /** Wall-clock of the last {@link #disableSystemAutoEnterPip()}; -1 when never cleared. Diagnostic only. */
+    private long mSystemAutoEnterClearedAtMs = -1L;
     private OnBackPressedCallback mPipBackCallback = null;
     // Remembers the player's controls-enabled state from just before PiP entry so it
     // can be restored on exit. Null when not in PiP / when this view did not own the
@@ -546,6 +548,17 @@ public class RNJWPlayerView extends RelativeLayout implements
             // Stop listening to activities lifecycle
             mActivity.getLifecycle().removeObserver(lifecycleObserver);
             mPlayer.deregisterActivityForPip();
+            // QA 2026-09-16: deregistering with the SDK does NOT clear the activity-level
+            // PictureInPictureParams.autoEnterEnabled that the SDK set when it registered. JW
+            // 4.26.0 ("Fixed an issue preventing content from automatically entering PiP mode when
+            // backgrounded on Android 12+") made that system route actually fire, so a player torn
+            // down while the flag is still set lets the system auto-enter PiP with no video
+            // surface -- the window then renders the remaining activity content (the RN tab bar)
+            // cropped to the PiP aspect. Close both routes on teardown, and forget the
+            // registration memo so a freshly mounted player re-registers instead of being deduped.
+            disableSystemAutoEnterPip();
+            mPipRegisteredForVideo = null;
+            logPipTrace("destroyPlayer.afterDeregister");
 
             // Remove playlist item callback listener
             mPlayer.removePlaylistItemCallbackListener();
@@ -1032,6 +1045,7 @@ public class RNJWPlayerView extends RelativeLayout implements
      */
     private void handlePipChange(boolean isInPip, Configuration newConfig) {
         JWLog.d(TAG, "handlePipChange(isInPip=" + isInPip + ")");
+        logPipTrace("handlePipChange.isInPip=" + isInPip);
 
         // Tripwire, not a guard: if pipVideoOnly is on and PiP was entered anyway, then neither
         // withdrawing the SDK registration nor clearing autoEnterEnabled stopped it, and the entry
@@ -1163,6 +1177,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 // Add player view back (the JWP SDK has already calculated the PiP size/aspect off the View)
                 rootView.addView(mPlayerView, layoutParams);
                 mLastHandledPipState = true;
+                logPipTrace("applyPipChange.enter.reparented");
                 // Actual visual enforcement: take JW's overlay views out by visibility, and keep
                 // re-asserting for the rest of the PiP session (the SDK puts them back on its own
                 // after setup() and on item completion). Must run AFTER mLastHandledPipState=true
@@ -1174,6 +1189,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 showPipProgress(rootView);
             } else {
                 // Exiting Picture in Picture
+                logPipTrace("applyPipChange.exit.begin");
                 hidePipProgress();
                 stopPipUiEnforcer();
                 restoreJwUiAfterPip();
@@ -1846,7 +1862,17 @@ public class RNJWPlayerView extends RelativeLayout implements
             return;
         }
         if (isPipSuppressingControls()) {
-            JWLog.d(TAG, "updatePipRegistration: skipped, PiP session already active");
+            // The SDK registration must not be torn down mid-session -- that would strand the
+            // window, which is why this early return exists. The SYSTEM auto-enter flag is an
+            // independent lever, though, and clearing it is idempotent, so it must NOT be
+            // suppressed here: otherwise media that becomes PiP-ineligible mid-session leaves the
+            // activity able to auto-enter with no video surface.
+            boolean pipEligible = isPipAllowedForCurrentMedia();
+            if (!pipEligible) {
+                disableSystemAutoEnterPip();
+            }
+            JWLog.d(TAG, "updatePipRegistration: skipped registration, PiP session already active"
+                    + " (pipEligible=" + pipEligible + ")");
             return;
         }
         boolean allow = isPipAllowedForCurrentMedia();
@@ -1892,10 +1918,55 @@ public class RNJWPlayerView extends RelativeLayout implements
         try {
             mActivity.setPictureInPictureParams(
                     new PictureInPictureParams.Builder().setAutoEnterEnabled(false).build());
-            JWLog.d(TAG, "disableSystemAutoEnterPip: autoEnterEnabled=false");
+            mSystemAutoEnterClearedAtMs = System.currentTimeMillis();
+            // showCaller=true: which path cleared it is the whole question in the QA repro.
+            JWLog.d(TAG, "disableSystemAutoEnterPip: autoEnterEnabled=false", true);
         } catch (Throwable t) {
             JWLog.w(TAG, "disableSystemAutoEnterPip failed: " + t.getMessage());
         }
+    }
+
+    /**
+     * DIAGNOSTIC (2026-09-16) -- QA PiP regressions after the JW 4.25.2 -> 4.26.0 bump.
+     *
+     * Emits every input that decides PiP behaviour AND position restore as one correlatable line,
+     * so a single logcat capture explains the whole open -> PiP -> close -> collapse sequence
+     * without guessing which layer moved. Guarded by {@link JWLog#isVerbose()} because it reads the
+     * player and builds a long string.
+     *
+     * Enable at runtime, no rebuild required:
+     *     adb shell setprop log.tag.JWLog DEBUG
+     *
+     * Grep the capture with: logcat | grep PIPTRACE
+     */
+    private void logPipTrace(String where) {
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        long positionMs = -1L;
+        String state = "n/a";
+        try {
+            if (mPlayer != null) {
+                positionMs = (long) (mPlayer.getPosition() * 1000d);
+                PlayerState playerState = mPlayer.getState();
+                state = playerState != null ? playerState.name() : "null";
+            }
+        } catch (Throwable t) {
+            state = "err:" + t.getClass().getSimpleName();
+        }
+        JWLog.d(TAG, "PIPTRACE[" + where + "]"
+                + " pos=" + positionMs + "ms"
+                + " state=" + state
+                + " pipActive=" + mLastHandledPipState
+                + " pipRegistered=" + mPipRegisteredForVideo
+                + " hasVideoTrack=" + mHasVideoTrack
+                + " pipVideoOnly=" + pipVideoOnly
+                + " autoEnterClearedAt=" + mSystemAutoEnterClearedAtMs
+                + " fgRebuildPos=" + mForegroundRebuildPositionMs + "ms"
+                + " rootSnapshot=" + rootViewVisibilitySnapshot.size()
+                + " jwUiSnapshot=" + mJwUiVisibilitySnapshot.size()
+                + " controls=" + safeGetControls()
+                + " isDestroying=" + isDestroying);
     }
 
     /**
@@ -2487,6 +2558,10 @@ public class RNJWPlayerView extends RelativeLayout implements
 
             // Only playlist changed -> update config without stop/recreate
             if (mConfig != null && isOnlyDiff(prop, "playlist") && mPlayer != null) {
+                if (reuseForegroundPlayerForConfig(prop)) {
+                    mConfig = prop;
+                    return;
+                }
                 JWLog.d(TAG, "Playlist-only change detected -> applying fast update");
 
                 // Distinguish a same-track foreground rebuild (PiP/lock/background resume-sync
@@ -2637,6 +2712,53 @@ public class RNJWPlayerView extends RelativeLayout implements
         return false;
     }
 
+    private boolean reuseForegroundPlayerForConfig(ReadableMap prop) {
+        if (mPlayer == null || mConfig == null || prop == null
+                || !isForegroundRebuildSnapshotFresh()) {
+            return false;
+        }
+        String incomingFile = firstPlaylistFileFromConfig(prop);
+        if (incomingFile == null || !incomingFile.equals(mForegroundRebuildFile)
+                || !incomingFile.equals(currentPlayerItemFile())) {
+            return false;
+        }
+        if (prop.getArray("playlist").size() != 1 || mPlayer.getPlaylist() == null
+                || mPlayer.getPlaylist().size() != 1) {
+            return false;
+        }
+        PlayerState state = mPlayer.getState();
+        if (state != PlayerState.PLAYING && state != PlayerState.PAUSED) {
+            return false;
+        }
+        double positionSec = mPlayer.getPosition();
+        if (Double.isNaN(positionSec) || Double.isInfinite(positionSec) || positionSec < 0d) {
+            return false;
+        }
+        long positionMs = (long) (positionSec * 1000d);
+        if (positionMs + FOREGROUND_REBUILD_MIN_REWIND_MS < mForegroundRebuildPositionMs) {
+            return false;
+        }
+        Double requestedStartSec = firstPlaylistStartTimeFromConfig(prop);
+        if (requestedStartSec != null && (Double.isNaN(requestedStartSec)
+                || Double.isInfinite(requestedStartSec) || requestedStartSec < 0d
+                || requestedStartSec * 1000d > positionMs + FOREGROUND_REBUILD_MIN_REWIND_MS)) {
+            return false;
+        }
+        Map<String, Object> currentSettings = mConfig.toHashMap();
+        Map<String, Object> incomingSettings = prop.toHashMap();
+        for (String key : new String[]{"playlist", "androidHandoffGeneration"}) {
+            currentSettings.remove(key);
+            incomingSettings.remove(key);
+        }
+        if (!currentSettings.equals(incomingSettings)) {
+            return false;
+        }
+        mPlaylistProp = prop.getArray("playlist");
+        JWLog.d(TAG, "FOREGROUND_REUSE: keeping same-item player without stop/setup"
+                + " positionMs=" + positionMs + " state=" + state);
+        return true;
+    }
+
     /**
      * Reconfigures the existing player instance with new settings.
      * This is the preferred path for config updates as it preserves the player instance
@@ -2650,16 +2772,28 @@ public class RNJWPlayerView extends RelativeLayout implements
             JWLog.e(TAG, "Cannot reconfigure - player is null");
             return;
         }
+        if (reuseForegroundPlayerForConfig(prop)) {
+            return;
+        }
 
         PlayerConfig oldConfig = mPlayer.getConfig();
         boolean wasFullscreen = mPlayer.getFullscreen();
         boolean currentControlsState = mPlayer.getControls();
+        boolean wasPausedByUser = userPaused;
+        Double startOverrideSec = resolveForegroundRebuildStartOverrideSec(
+            firstPlaylistFileFromConfig(prop), firstPlaylistStartTimeFromConfig(prop));
         
         // Stop playback before reconfiguration to avoid issues (Issue #188 fix)
         mPlayer.stop();
         
         // Build new configuration
         PlayerConfig newConfig = buildPlayerConfig(prop, oldConfig);
+        if (startOverrideSec != null) {
+            newConfig = new PlayerConfig.Builder(newConfig)
+                .playlist(Util.createPlaylist(prop.getArray("playlist"), startOverrideSec))
+                    .autostart(newConfig.getAutostart() && !wasPausedByUser)
+                .build();
+        }
         newConfig = applyHiddenUiGroups(newConfig, prop);
         
         // ALWAYS ensure PLAYER_CONTROLS_CONTAINER is shown in UiConfig after setup.
@@ -3726,6 +3860,13 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onComplete(CompleteEvent completeEvent) {
         JWLog.d(TAG, "onComplete()");
+        // DIAGNOSTIC ONLY: completion is where RN decides to advance, and that decision races an
+        // Android Auto selection made in the same second. Measured 2026-09-19 (capture
+        // logcat_android17_2026-09-19_12-19-29): finishing a series-A item and immediately picking a
+        // series-B item on AA loaded series A's next item twice. Recording the intent here lets
+        // onPlaylistItem state which command won instead of leaving it to be inferred from titles.
+        com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
+                "rn-completion-advance", null);
         WritableMap event = Arguments.createMap();
         event.putString("message", "onComplete");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topComplete", event);
@@ -3782,6 +3923,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onFirstFrame(FirstFrameEvent firstFrameEvent) {
         JWLog.d(TAG, "onFirstFrame(loadTime=" + firstFrameEvent.getLoadTime() + ")");
+        logPipTrace("onFirstFrame");
         if (backgroundAudioEnabled) {
             doBindService();
             requestAudioFocus();
