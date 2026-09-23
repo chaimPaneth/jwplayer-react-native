@@ -229,7 +229,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // stale live-position tracker, which had been reading a rebuilding player.
     private static String lastPlaylistItemMediaId = null;
     private static long trackSwitchedAtMs = 0L;
+    /**
+     * NO LONGER AN AUTHORITY (2026-09-22). This window used to decide whether an explicit JS start
+     * could be trusted across a track change. It was replaced by the identity/provenance latch below
+     * because a timing window is not ownership: in the operator's own reproduction the window had
+     * closed, so the outgoing item's playhead was applied to the incoming item. `trackSwitchedAtMs`
+     * and this constant are retained for diagnostics only — nothing gates on them.
+     */
     private static final long CROSS_TRACK_START_WINDOW_MS = 10_000L;
+    /**
+     * INVARIANT 2: the item we most recently switched to and for which no explicit start has yet been
+     * vetted, plus whether React itself caused that switch. Together these decide whether an explicit
+     * start is React's own intent for the incoming item or an adoption carrying the OUTGOING item's
+     * playhead. Cleared once a start has been evaluated for that item.
+     */
+    private static volatile String crossTrackUnverifiedMediaId = null;
+    private static volatile boolean crossTrackSwitchWasReactInitiated = false;
     /** Agreement tolerance: below this the two sources are saying the same thing. */
     private static final long CROSS_TRACK_AGREEMENT_MS = 3_000L;
     private final SeekAcceptanceState seekState = new SeekAcceptanceState();
@@ -2498,6 +2513,114 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static volatile String previousLoadIntentMediaId = null;
 
     /**
+     * DIAGNOSTIC ONLY (2026-09-21): monotonic ordering for load intents, so which command owns the
+     * item that actually loaded is read off an identity rather than inferred from timestamps.
+     */
+    private static volatile long loadIntentSeqCounter = 0L;
+    private static volatile long lastLoadIntentSeq = 0L;
+    private static volatile long previousLoadIntentSeq = 0L;
+
+    /** DIAGNOSTIC ONLY (2026-09-21): last completion, kept separate from any load intent. */
+    private static volatile String lastCompletionMediaId = null;
+    private static volatile long lastCompletionAtMs = 0L;
+    private static volatile long completionSeq = 0L;
+
+    // ---------------------------------------------------------------------------------------------
+    // INVARIANT 1 — a deferred transport command may not cross a playback-intent boundary.
+    //
+    // Measured 2026-09-22 (capture pip_swap_20-39-12): a MediaSession `next` issued for item 10644
+    // while PiP was active is dispatched to RN, which defers it for the whole PiP session. On PiP
+    // exit React re-asserted 10644 (load intent seq 14), and only THEN did the deferred skip execute
+    // — MediaBrowser.playFromMediaId(10643) -> aa-selection/10643 seq 15 superseding the newer
+    // assertion, loading the WRONG item.
+    //
+    // Ownership is captured at dispatch: the token, the base item the skip was issued for, and the
+    // load-intent sequence current at that moment. When a NEWER authoritative playback intent is
+    // established, the claim is killed at its registry (MediaBrowserService.pendingSkipAcks), so the
+    // JS owner's atomic consume fails and it never calls playFromMediaId.
+    //
+    // No wall-clock term: validity is ownership, not age. Entering or leaving PiP is not authority —
+    // only a newer playback intent is.
+    // ---------------------------------------------------------------------------------------------
+    private static volatile String pendingSkipToken = null;
+    private static volatile String pendingSkipBaseMediaId = null;
+    private static volatile long pendingSkipIntentSeq = -1L;
+    private static volatile String pendingSkipDirection = null;
+
+    /** Records the ownership of a skip we just handed to RN. */
+    private static void notePendingSkip(
+            String skipToken, String baseMediaId, String direction, long ownerIntentSeq) {
+        if (skipToken == null) {
+            return;
+        }
+        // The service emits the JS event before returning the token. If another authoritative
+        // intent arrived during that hand-off, the command is already stale: invalidate it now
+        // rather than arming it under the newer sequence.
+        if (lastLoadIntentSeq != ownerIntentSeq) {
+            try {
+                Class<?> svc = Class.forName("com.mediabrowser.MediaBrowserService");
+                java.lang.reflect.Method invalidate =
+                        svc.getMethod("invalidateSkip", String.class, String.class);
+                invalidate.invoke(null, skipToken,
+                        "intent-changed-during-dispatch:" + ownerIntentSeq + "->" + lastLoadIntentSeq);
+            } catch (Exception e) {
+                JWLog.w(TAG, "SKIPGUARD: could not invalidate dispatch-raced token=" + skipToken
+                        + ": " + e.getMessage());
+            }
+            JWLog.d(TAG, "SKIPGUARD[dispatch-raced] skipToken=" + skipToken
+                    + " direction=" + direction + " baseMediaId=" + baseMediaId
+                    + " ownerIntentSeq=" + ownerIntentSeq
+                    + " currentIntentSeq=" + lastLoadIntentSeq);
+            return;
+        }
+        pendingSkipToken = skipToken;
+        pendingSkipBaseMediaId = baseMediaId;
+        pendingSkipIntentSeq = ownerIntentSeq;
+        pendingSkipDirection = direction;
+        JWLog.d(TAG, "SKIPGUARD[armed] skipToken=" + skipToken
+                + " direction=" + direction
+                + " baseMediaId=" + baseMediaId
+                + " ownerIntentSeq=" + pendingSkipIntentSeq);
+    }
+
+    /**
+     * Kills a pending skip whose owning playback intent has been superseded.
+     *
+     * Called whenever a new authoritative load intent is recorded. The comparison is purely on the
+     * monotonic intent sequence, so it is deterministic and independent of elapsed time. The skip's
+     * OWN resulting load does not trip this, because a valid skip claims (removes) its token before
+     * loading, so there is no live claim left to kill.
+     */
+    private static void supersedePendingSkipIfAny(long newIntentSeq, String newOrigin, String newMediaId) {
+        String token = pendingSkipToken;
+        if (token == null || pendingSkipIntentSeq < 0 || newIntentSeq <= pendingSkipIntentSeq) {
+            return;
+        }
+        boolean killed = false;
+        try {
+            Class<?> svc = Class.forName("com.mediabrowser.MediaBrowserService");
+            java.lang.reflect.Method invalidate =
+                    svc.getMethod("invalidateSkip", String.class, String.class);
+            Object result = invalidate.invoke(null, token,
+                    "superseded-by:" + newOrigin + "/" + newMediaId + "#" + newIntentSeq);
+            killed = (result instanceof Boolean) && (Boolean) result;
+        } catch (Exception e) {
+            JWLog.w(TAG, "SKIPGUARD: could not invalidate skipToken=" + token + ": " + e.getMessage());
+        }
+        if (killed) {
+            JWLog.d(TAG, "SKIPGUARD[superseded] skipToken=" + token
+                    + " direction=" + pendingSkipDirection
+                    + " baseMediaId=" + pendingSkipBaseMediaId
+                    + " ownerIntentSeq=" + pendingSkipIntentSeq
+                    + " supersededBy=" + newOrigin + "/" + newMediaId + "#" + newIntentSeq);
+        }
+        pendingSkipToken = null;
+        pendingSkipBaseMediaId = null;
+        pendingSkipIntentSeq = -1L;
+        pendingSkipDirection = null;
+    }
+
+    /**
      * An app-originated seek (RNJWPlayerModule.seekTo) writes STRAIGHT to the player and never passes
      * through {@link #performSeekTo}, so the model would not learn about it — measured 2026-09-19
      * 19:07 during the automated soak: a scrubber tap moved the player back 9 minutes and the session
@@ -2517,14 +2640,68 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "POSMODEL[app-seek] anchored to commanded " + positionMs + "ms");
     }
 
-    /** DIAGNOSTIC ONLY: records who asked for a load. Changes no behaviour. */
-    public static void noteLoadIntent(String origin, String mediaId) {        previousLoadIntentOrigin = lastLoadIntentOrigin;
+    /**
+     * DIAGNOSTIC ONLY: records that an item COMPLETED and JS was told.
+     *
+     * This is deliberately NOT a load intent. Until 2026-09-21 completion was recorded through
+     * {@link #noteLoadIntent} as origin "rn-completion-advance", which made it masquerade as a load
+     * command: at completion RN has chosen nothing, so the marker always carried mediaId=null, always
+     * preceded the user's Android Auto tap, and was always superseded by it. Every traced race
+     * therefore read as "the AA selection won" whether or not a later RN load overwrote it, because
+     * the RN load itself recorded no intent at all. Completion now has its own marker and leaves the
+     * load-intent fields untouched, so an RN load can be attributed to its real entry point.
+     *
+     * Changes no behaviour.
+     */
+    public static void noteCompletionEvent(String completedMediaId) {
+        lastCompletionMediaId = completedMediaId;
+        lastCompletionAtMs = SystemClock.elapsedRealtime();
+        completionSeq++;
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        String[] ids = getPlaybackIdentitySnapshot();
+        JWLog.d(TAG, "LOADTRACE[completion] origin=rn-completion-event seq=" + completionSeq
+                + " completedMediaId=" + completedMediaId
+                + " aaId=" + ids[1] + " externalId=" + ids[2] + " appId=" + ids[3]
+                + " standingIntent=" + lastLoadIntentOrigin + "/" + lastLoadIntentMediaId
+                + "#" + lastLoadIntentSeq
+                + " (not a load command; JS decides the advance)");
+    }
+
+    /**
+     * DIAGNOSTIC ONLY: records who asked for a load, and with what identity. Changes no behaviour.
+     *
+     * `seq` is a monotonic counter, so two intents can be ordered without reading timestamps — the
+     * final {@code LOADTRACE[loaded]} names the seq that owns it. `sinceCompletion` states, as a
+     * fact rather than an inference, how long before this load the last completion fired; it is
+     * reported, never used to classify the load, because native cannot know whether an RN load is an
+     * automatic advance or a user action.
+     */
+    public static void noteLoadIntent(String origin, String mediaId) {
+        previousLoadIntentOrigin = lastLoadIntentOrigin;
         previousLoadIntentMediaId = lastLoadIntentMediaId;
+        previousLoadIntentSeq = lastLoadIntentSeq;
         lastLoadIntentOrigin = origin;
         lastLoadIntentMediaId = mediaId;
         lastLoadIntentAtMs = SystemClock.elapsedRealtime();
+        lastLoadIntentSeq = ++loadIntentSeqCounter;
+        // INVARIANT 1: a newer authoritative playback intent kills any skip claim created under an
+        // older one. Runs before the log below so the rejection and its cause appear in order.
+        supersedePendingSkipIfAny(lastLoadIntentSeq, origin, mediaId);
+        if (!JWLog.isVerbose()) {
+            return;
+        }
+        String[] ids = getPlaybackIdentitySnapshot();
+        long sinceCompletionMs = lastCompletionAtMs > 0
+                ? SystemClock.elapsedRealtime() - lastCompletionAtMs : -1L;
         JWLog.d(TAG, "LOADTRACE[intent] origin=" + origin + " mediaId=" + mediaId
-                + " supersedes=" + previousLoadIntentOrigin + "/" + previousLoadIntentMediaId);
+                + " seq=" + lastLoadIntentSeq
+                + " supersedes=" + previousLoadIntentOrigin + "/" + previousLoadIntentMediaId
+                + "#" + previousLoadIntentSeq
+                + " aaId=" + ids[1] + " externalId=" + ids[2] + " appId=" + ids[3]
+                + " sinceCompletion=" + sinceCompletionMs + "ms"
+                + " lastCompletedMediaId=" + lastCompletionMediaId);
     }
 
     /** DIAGNOSTIC ONLY: says which intent the item that actually loaded corresponds to. */
@@ -2540,12 +2717,23 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         boolean matchesIntent = lastLoadIntentMediaId != null
                 && (lastLoadIntentMediaId.equals(loadedId)
                     || lastLoadIntentMediaId.equals(ids[2]) || lastLoadIntentMediaId.equals(ids[1]));
+        // A load that matches the SUPERSEDED intent rather than the current one is the signature of
+        // a stale command winning — the exact shape O1 claims. Stated, not inferred.
+        boolean matchesPrevious = previousLoadIntentMediaId != null
+                && (previousLoadIntentMediaId.equals(loadedId)
+                    || previousLoadIntentMediaId.equals(ids[2]) || previousLoadIntentMediaId.equals(ids[1]));
         JWLog.d(TAG, "LOADTRACE[loaded] title=" + loadedTitle + " itemMediaId=" + loadedId
                 + " externalId=" + ids[2] + " aaId=" + ids[1] + " appId=" + ids[3]
                 + " lastIntent=" + lastLoadIntentOrigin + "/" + lastLoadIntentMediaId
+                + "#" + lastLoadIntentSeq
                 + " (" + sinceIntentMs + "ms ago)"
                 + " previousIntent=" + previousLoadIntentOrigin + "/" + previousLoadIntentMediaId
-                + " matchesLastIntent=" + matchesIntent);
+                + "#" + previousLoadIntentSeq
+                + " matchesLastIntent=" + matchesIntent
+                + " matchesPreviousIntent=" + matchesPrevious
+                + " lastCompletion=" + lastCompletionMediaId + "#" + completionSeq
+                + " sinceCompletion=" + (lastCompletionAtMs > 0
+                        ? (SystemClock.elapsedRealtime() - lastCompletionAtMs) : -1L) + "ms");
     }
 
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
@@ -2587,9 +2775,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (itemKey != null && !itemKey.equals(lastPlaylistItemMediaId)) {
             if (lastPlaylistItemMediaId != null) {
                 trackSwitchedAtMs = System.currentTimeMillis();
+                // INVARIANT 2: arm the identity-bound latch and record WHO caused this switch.
+                // React-initiated means the load intent that produced this item came from React
+                // itself (rn-setConfig / rn-loadPlaylist for THIS item), in which case an explicit
+                // start arriving with it is React's own intent. Anything else (aa-selection, a
+                // deferred skip, an advance) means a later React start is an ADOPTION and must prove
+                // the position belongs to the incoming item. No elapsed-time term.
+                crossTrackUnverifiedMediaId = itemKey;
+                crossTrackSwitchWasReactInitiated =
+                        lastLoadIntentOrigin != null
+                        && lastLoadIntentOrigin.startsWith("rn-")
+                        && lastLoadIntentMediaId != null
+                        && lastLoadIntentMediaId.equals(itemKey);
                 JWLog.d(TAG, "onPlaylistItem: track switched " + lastPlaylistItemMediaId
-                        + " -> " + itemKey + " (explicit JS starts are suspect for the next "
-                        + CROSS_TRACK_START_WINDOW_MS + "ms)");
+                        + " -> " + itemKey
+                        + " (POSGUARD armed; switchInitiatedByReact="
+                        + crossTrackSwitchWasReactInitiated
+                        + ", causingIntent=" + lastLoadIntentOrigin + "/" + lastLoadIntentMediaId
+                        + "#" + lastLoadIntentSeq + ")");
                 // A seek target belongs to the item it was requested on; never carry it across.
                 clearSeekTargetInFlight("track-switch " + lastPlaylistItemMediaId + " -> " + itemKey);
                 // Nothing about the previous item's position is meaningful for the new one.
@@ -2678,13 +2881,42 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // persisted). Inside the switch window the app's own per-item record wins instead,
             // because that is the only source that is scoped to THIS item. Same-track rebuilds
             // are untouched, which is what the foreground rewind guard depends on.
-            boolean freshSwitch = trackSwitchedAtMs > 0L
-                    && (System.currentTimeMillis() - trackSwitchedAtMs)
-                        <= CROSS_TRACK_START_WINDOW_MS;
-            boolean crossTrackStartSuspect = freshSwitch
+            // INVARIANT 2 (2026-09-22): position ownership is bound to ITEM IDENTITY and PROVENANCE,
+            // never to elapsed time.
+            //
+            // Measured (capture pip_swap_20-39-12): a native-originated switch 10644 -> 10643 was
+            // followed by React ADOPTING 10643 and pushing starttime=648.0 — the outgoing item's
+            // playhead — while 10643's own resume provider reported 0ms. The old trigger was
+            // "within CROSS_TRACK_START_WINDOW_MS (10s) of the switch", which happened to be open in
+            // that capture and CLOSED in the operator's own reproduction, where the stale position
+            // was therefore applied. A timing window is not ownership.
+            //
+            // The trigger is now: this is the first start resolved for an item we switched to, AND
+            // that switch was NOT initiated by React. Provenance is read from the load-intent
+            // recorder — if React's own rn-setConfig/rn-loadPlaylist for THIS item caused the switch,
+            // its explicit start is React's own intent and is honoured; if the switch came from
+            // native (aa-selection / a deferred skip / an advance), a start arriving afterwards is an
+            // adoption and must prove it belongs to the incoming item.
+            //
+            // The remedy is unchanged and was already identity-correct: fall back to the INCOMING
+            // item's own saved position, never to the outgoing item's.
+            boolean startUnverifiedForThisItem = crossTrackUnverifiedMediaId != null
+                    && crossTrackUnverifiedMediaId.equals(lastPlaylistItemMediaId)
+                    && !crossTrackSwitchWasReactInitiated;
+            boolean crossTrackStartSuspect = startUnverifiedForThisItem
                     && hasExplicitStart
                     && savedPositionMs >= 0
                     && Math.abs(playlistStartMs - savedPositionMs) > CROSS_TRACK_AGREEMENT_MS;
+            if (hasExplicitStart && crossTrackUnverifiedMediaId != null
+                    && crossTrackUnverifiedMediaId.equals(lastPlaylistItemMediaId)) {
+                JWLog.d(TAG, "POSGUARD[evaluate] item=" + lastPlaylistItemMediaId
+                        + " explicitStart=" + playlistStartMs + "ms"
+                        + " itemOwnSaved=" + savedPositionMs + "ms"
+                        + " switchInitiatedByReact=" + crossTrackSwitchWasReactInitiated
+                        + " verdict=" + (crossTrackStartSuspect ? "REJECT-cross-item" : "accept"));
+                // Vetted once for this item: a later same-item reconfigure is not a cross-item case.
+                crossTrackUnverifiedMediaId = null;
+            }
 
             if (crossTrackStartSuspect) {
                 resumeMs = savedPositionMs;
@@ -4186,6 +4418,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Prefer the current React playlist's app post ID; fall back to the last
         // Android Auto selection when JW only exposes its internal media ID.
         String mediaIdForSkip = resolveMediaIdForSkip("next");
+        long skipOwnerIntentSeq = lastLoadIntentSeq;
         boolean notifiedReactNative = false;
         String skipToken = null;
 
@@ -4193,11 +4426,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // This allows RN to fetch the next post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
-            java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod("sendSkipToNextEventToReactNative", String.class);
-            Object result = sendSkipNextMethod.invoke(null, mediaIdForSkip);
+            java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod(
+                    "sendSkipToNextEventToReactNative", String.class, long.class);
+            Object result = sendSkipNextMethod.invoke(null, mediaIdForSkip, skipOwnerIntentSeq);
             skipToken = (result instanceof String) ? (String) result : null;
             notifiedReactNative = (skipToken != null);
-            JWLog.d(TAG, "external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
+            JWLog.d(TAG, "external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip
+                    + ", skipToken=" + skipToken + ", ownerIntentSeq=" + skipOwnerIntentSeq);
+            notePendingSkip(skipToken, mediaIdForSkip, "next", skipOwnerIntentSeq);
         } catch (Exception e) {
             JWLog.w(TAG, "performSkipToNext: Could not notify MediaBrowserService: " + e.getMessage());
         }
@@ -4226,6 +4462,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         // Prefer the current React playlist's app post ID. See performSkipToNext().
         String mediaIdForSkip = resolveMediaIdForSkip("previous");
+        long skipOwnerIntentSeq = lastLoadIntentSeq;
         boolean notifiedReactNative = false;
         String skipToken = null;
 
@@ -4233,11 +4470,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // This allows RN to fetch the previous post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
-            java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod("sendSkipToPreviousEventToReactNative", String.class);
-            Object result = sendSkipPrevMethod.invoke(null, mediaIdForSkip);
+            java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod(
+                    "sendSkipToPreviousEventToReactNative", String.class, long.class);
+            Object result = sendSkipPrevMethod.invoke(null, mediaIdForSkip, skipOwnerIntentSeq);
             skipToken = (result instanceof String) ? (String) result : null;
             notifiedReactNative = (skipToken != null);
-            JWLog.d(TAG, "external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip + ", skipToken=" + skipToken);
+            JWLog.d(TAG, "external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip
+                    + ", skipToken=" + skipToken + ", ownerIntentSeq=" + skipOwnerIntentSeq);
+            notePendingSkip(skipToken, mediaIdForSkip, "previous", skipOwnerIntentSeq);
         } catch (Exception e) {
             JWLog.w(TAG, "performSkipToPrevious: Could not notify MediaBrowserService: " + e.getMessage());
         }

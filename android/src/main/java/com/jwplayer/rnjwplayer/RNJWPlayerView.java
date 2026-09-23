@@ -2486,6 +2486,45 @@ public class RNJWPlayerView extends RelativeLayout implements
                 JWLog.d(TAG, "PUSH_TRACE setConfig: unavailable (" + t.getMessage() + ")");
             }
         }
+        // DIAGNOSTIC ONLY (2026-09-21): a config push that carries a playlist IS a load command, and
+        // until now it recorded no intent at all — so an RN load that overwrote an Android Auto
+        // selection left no trace and the race could not be attributed. Recorded here, BEFORE the
+        // config-equality gate, so what RN asked for is visible whether or not the gate skips it.
+        // Origin names only the entry point: native cannot know whether this push is an automatic
+        // completion advance or a user action, so it must not claim to.
+        if (prop != null && prop.hasKey("playlist") && !prop.isNull("playlist") && JWLog.isVerbose()) {
+            try {
+                ReadableArray intentArr = prop.getArray("playlist");
+                if (intentArr != null && intentArr.size() > 0) {
+                    ReadableMap intentFirst = intentArr.getMap(0);
+                    String intentMediaId = null;
+                    String intentFile = null;
+                    if (intentFirst != null) {
+                        if (intentFirst.hasKey("mediaId") && !intentFirst.isNull("mediaId")) {
+                            intentMediaId = intentFirst.getString("mediaId");
+                        }
+                        if (intentFirst.hasKey("file") && !intentFirst.isNull("file")) {
+                            intentFile = intentFirst.getString("file");
+                        }
+                    }
+                    Long intentGeneration = null;
+                    if (prop.hasKey("androidHandoffGeneration") && !prop.isNull("androidHandoffGeneration")) {
+                        intentGeneration = (long) prop.getDouble("androidHandoffGeneration");
+                    }
+                    com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
+                            "rn-setConfig",
+                            intentMediaId != null ? intentMediaId : intentFile);
+                    JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-setConfig"
+                            + " mediaId=" + intentMediaId
+                            + " file=" + intentFile
+                            + " handoffGeneration=" + intentGeneration
+                            + " playlistSize=" + intentArr.size()
+                            + " liveFile=" + currentPlayerItemFile());
+                }
+            } catch (Throwable t) {
+                JWLog.d(TAG, "LOADTRACE[intent] rn-setConfig: unavailable (" + t.getMessage() + ")");
+            }
+        }
         if (prop != null && prop.hasKey("androidHandoffGeneration")
                 && !prop.isNull("androidHandoffGeneration")) {
             mMediaGeneration = (long) prop.getDouble("androidHandoffGeneration");
@@ -3860,13 +3899,14 @@ public class RNJWPlayerView extends RelativeLayout implements
     @Override
     public void onComplete(CompleteEvent completeEvent) {
         JWLog.d(TAG, "onComplete()");
-        // DIAGNOSTIC ONLY: completion is where RN decides to advance, and that decision races an
-        // Android Auto selection made in the same second. Measured 2026-09-19 (capture
-        // logcat_android17_2026-09-19_12-19-29): finishing a series-A item and immediately picking a
-        // series-B item on AA loaded series A's next item twice. Recording the intent here lets
-        // onPlaylistItem state which command won instead of leaving it to be inferred from titles.
-        com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
-                "rn-completion-advance", null);
+        // DIAGNOSTIC ONLY: completion is NOT a load command — RN has chosen nothing at this point,
+        // and the advance decision is made in JS. Recording it through noteLoadIntent (as
+        // "rn-completion-advance", until 2026-09-21) made it masquerade as one: it always carried a
+        // null mediaId, always preceded the user's Android Auto tap, and was always superseded by it,
+        // so every traced race read as "the AA selection won" whether or not a later RN load
+        // overwrote it. It now has its own marker and leaves the load-intent fields alone.
+        com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteCompletionEvent(
+                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.getPlaybackIdentitySnapshot()[0]);
         WritableMap event = Arguments.createMap();
         event.putString("message", "onComplete");
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topComplete", event);
