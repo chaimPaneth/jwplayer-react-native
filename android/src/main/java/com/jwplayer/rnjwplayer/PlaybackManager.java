@@ -141,14 +141,42 @@ public class PlaybackManager {
     }
 
     /**
+     * Returns true when the registered RN player view's host Activity is actually in PiP.
+     *
+     * The React/JW PiP callback is deferred on some Android lifecycle paths. The Activity is
+     * the OS owner of the PiP task, so this check is authoritative at the media-selection
+     * boundary even when uiInBackground=true and pipActive has not caught up yet.
+     */
+    private boolean isActualUiPipLocked() {
+        return mActivePlayerHandler instanceof RNJWPlayerView
+                && ((RNJWPlayerView) mActivePlayerHandler).isActivityInPictureInPictureMode();
+    }
+
+    private boolean isPipOwnedUiLocked() {
+        return mActivePlayerHandler instanceof RNJWPlayerView
+                && (pipActive || isActualUiPipLocked());
+    }
+
+    /**
      * Returns true if the currently active handler is the UI player view.
      * Useful for deciding whether to create a headless/background player.
      */
     public boolean isUIActive() {
         synchronized (mutex) {
-            boolean active = mActivePlayerHandler instanceof RNJWPlayerView && (!uiInBackground || pipActive);
-            // JWLog.d(TAG, "isUIActive() -> " + active + " (uiInBackground=" + uiInBackground + ")");
+            boolean actualPip = isActualUiPipLocked();
+            boolean active = mActivePlayerHandler instanceof RNJWPlayerView
+                    && (!uiInBackground || pipActive || actualPip);
             return active;
+        }
+    }
+
+    /**
+     * Returns whether the RN UI owner is in PiP according to either the OS Activity or the
+     * already-delivered callback. The OS Activity result wins when the callback is late.
+     */
+    public boolean isUIInPictureInPictureMode() {
+        synchronized (mutex) {
+            return isPipOwnedUiLocked();
         }
     }
 
@@ -189,8 +217,10 @@ public class PlaybackManager {
     public JWPlayer getActivePlayerIfUI() {
         // JWLog.d(TAG, "getActivePlayerIfUI()");
         synchronized (mutex) {
-            // Allow access to the active player when UI is foreground or in PiP.
-            if ((!uiInBackground || pipActive) && mActivePlayer != null) {
+            boolean actualPip = isActualUiPipLocked();
+            // Allow access to the active player when UI is foreground or in PiP. The Activity
+            // check covers the interval before the deferred RN/JW callback updates pipActive.
+            if ((!uiInBackground || pipActive || actualPip) && mActivePlayer != null) {
                 return mActivePlayer;
             }
             return null;

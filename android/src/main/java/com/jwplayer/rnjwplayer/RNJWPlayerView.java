@@ -482,6 +482,22 @@ public class RNJWPlayerView extends RelativeLayout implements
         return mThemedReactContext.getReactApplicationContext().getCurrentActivity();
     }
 
+    /**
+     * Reads PiP ownership from Android's host Activity rather than from the deferred RN/JW
+     * callback. This is intentionally a view-owner query, not a global PiP flag.
+     */
+    public boolean isActivityInPictureInPictureMode() {
+        if (mActivity == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return false;
+        }
+        try {
+            return mActivity.isInPictureInPictureMode();
+        } catch (Throwable t) {
+            JWLog.w(TAG, "isActivityInPictureInPictureMode failed: " + t.getMessage());
+            return false;
+        }
+    }
+
     // The registry for lifecycle events. Required by player object. Main use case if for garbage collection / teardown
     private final LifecycleRegistry registry = new LifecycleRegistry(this);
 

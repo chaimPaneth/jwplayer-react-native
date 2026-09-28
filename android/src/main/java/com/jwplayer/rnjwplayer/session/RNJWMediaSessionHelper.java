@@ -4756,18 +4756,13 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         JWLog.d(TAG, "performMediaItemSelection: Set Android Auto handoff flag at " + androidAutoHandoffStartTime);
 
         try {
-            // Determine if UI is currently in Android PiP (Picture-in-Picture) mode
+            // Determine if the RN UI owner is actually in Android PiP. The host Activity is
+            // authoritative here because the RN/JW PiP callback can be deferred until after this
+            // 500ms selection continuation runs.
             boolean isPip = false;
             try {
                 PlaybackManager pm = PlaybackManager.getInstance();
-                JWPlayer uiPlayer = pm.getActivePlayerIfUI();
-                if (uiPlayer != null) {
-                    try { 
-                        isPip = uiPlayer.isInPictureInPictureMode(); 
-                    } catch (Exception ignore) { 
-                        isPip = false; 
-                    }
-                }
+                isPip = pm.isUIInPictureInPictureMode();
             } catch (Exception t) {
                 JWLog.w(TAG, "AA_SELECT CHECK_PIP failed: " + t.getMessage());
             }
