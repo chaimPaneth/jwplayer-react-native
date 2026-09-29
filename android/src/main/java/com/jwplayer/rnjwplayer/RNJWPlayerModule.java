@@ -175,30 +175,32 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         // the ReadableArray is only guaranteed valid for the duration of this bridge call,
         // not inside the posted runnable below.
         if (playlistItems != null && playlistItems.size() > 0) {
-            // DIAGNOSTIC ONLY (2026-09-21): this imperative path is a load command and recorded no
-            // intent, so an RN load arriving through it could not be attributed. Origin names the
-            // entry point only — native cannot know whether it is an automatic advance or a user
-            // action, so it does not claim to. Read synchronously for the same reason as below.
-            if (JWLog.isVerbose()) {
-                try {
-                    ReadableMap intentFirst = playlistItems.getMap(0);
-                    String intentMediaId = null;
-                    String intentFile = null;
-                    if (intentFirst != null) {
-                        if (intentFirst.hasKey("mediaId") && !intentFirst.isNull("mediaId")) {
-                            intentMediaId = intentFirst.getString("mediaId");
-                        }
-                        if (intentFirst.hasKey("file") && !intentFirst.isNull("file")) {
-                            intentFile = intentFirst.getString("file");
-                        }
+            // This imperative path is a load command and must record an intent in every build.
+            // Origin names the entry point only — native cannot know whether it is an automatic
+            // advance or a user action, so it does not claim to. Read synchronously for the same
+            // reason as below; diagnostic detail remains verbose-gated.
+            try {
+                ReadableMap intentFirst = playlistItems.getMap(0);
+                String intentMediaId = null;
+                String intentFile = null;
+                if (intentFirst != null) {
+                    if (intentFirst.hasKey("mediaId") && !intentFirst.isNull("mediaId")) {
+                        intentMediaId = intentFirst.getString("mediaId");
                     }
-                    com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
-                            "rn-loadPlaylist",
-                            intentMediaId != null ? intentMediaId : intentFile);
+                    if (intentFirst.hasKey("file") && !intentFirst.isNull("file")) {
+                        intentFile = intentFirst.getString("file");
+                    }
+                }
+                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
+                        "rn-loadPlaylist",
+                        intentMediaId != null ? intentMediaId : intentFile);
+                if (JWLog.isVerbose()) {
                     JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-loadPlaylist"
                             + " mediaId=" + intentMediaId + " file=" + intentFile
                             + " itemsLength=" + playlistItems.size());
-                } catch (Throwable t) {
+                }
+            } catch (Throwable t) {
+                if (JWLog.isVerbose()) {
                     JWLog.d(TAG, "LOADTRACE[intent] rn-loadPlaylist: unavailable (" + t.getMessage() + ")");
                 }
             }
@@ -671,27 +673,29 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void resolveNextPlaylistItem(final int reactTag, final ReadableMap playlistItem) {
         JWLog.d(TAG, "resolveNextPlaylistItem(reactTag=" + reactTag + ", playlistItem=" + JWLog.safe(playlistItem) + ")");
-        // DIAGNOSTIC ONLY (2026-09-21): JS answering onBeforeNextPlaylistItem IS a load command for
-        // the next item, and it recorded no intent. Read synchronously — the ReadableMap is only
-        // guaranteed valid for this bridge call, not inside the posted runnable.
-        if (JWLog.isVerbose()) {
-            try {
-                String intentMediaId = null;
-                String intentFile = null;
-                if (playlistItem != null) {
-                    if (playlistItem.hasKey("mediaId") && !playlistItem.isNull("mediaId")) {
-                        intentMediaId = playlistItem.getString("mediaId");
-                    }
-                    if (playlistItem.hasKey("file") && !playlistItem.isNull("file")) {
-                        intentFile = playlistItem.getString("file");
-                    }
+        // JS answering onBeforeNextPlaylistItem is a load command and must record an intent in
+        // every build. Read synchronously — the ReadableMap is only guaranteed valid for this
+        // bridge call, not inside the posted runnable; diagnostic detail remains verbose-gated.
+        try {
+            String intentMediaId = null;
+            String intentFile = null;
+            if (playlistItem != null) {
+                if (playlistItem.hasKey("mediaId") && !playlistItem.isNull("mediaId")) {
+                    intentMediaId = playlistItem.getString("mediaId");
                 }
-                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
-                        "rn-resolveNextPlaylistItem",
-                        intentMediaId != null ? intentMediaId : intentFile);
+                if (playlistItem.hasKey("file") && !playlistItem.isNull("file")) {
+                    intentFile = playlistItem.getString("file");
+                }
+            }
+            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
+                    "rn-resolveNextPlaylistItem",
+                    intentMediaId != null ? intentMediaId : intentFile);
+            if (JWLog.isVerbose()) {
                 JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-resolveNextPlaylistItem"
                         + " mediaId=" + intentMediaId + " file=" + intentFile);
-            } catch (Throwable t) {
+            }
+        } catch (Throwable t) {
+            if (JWLog.isVerbose()) {
                 JWLog.d(TAG, "LOADTRACE[intent] rn-resolveNextPlaylistItem: unavailable ("
                         + t.getMessage() + ")");
             }

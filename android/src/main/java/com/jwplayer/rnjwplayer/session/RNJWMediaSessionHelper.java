@@ -2498,7 +2498,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     /**
-     * DIAGNOSTIC: the most recent command that asked for an item to load, and where it came from.
+     * Tracks the most recent command that asked for an item to load, and where it came from.
+     * These fields support playback-intent ownership/provenance as well as verbose diagnostics.
      *
      * Added 2026-09-19. In capture logcat_android17_2026-09-19_12-19-29, finishing a series-A item
      * and immediately picking a series-B item on Android Auto loaded series A's NEXT item instead —
@@ -2512,10 +2513,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static volatile String previousLoadIntentOrigin = null;
     private static volatile String previousLoadIntentMediaId = null;
 
-    /**
-     * DIAGNOSTIC ONLY (2026-09-21): monotonic ordering for load intents, so which command owns the
-     * item that actually loaded is read off an identity rather than inferred from timestamps.
-     */
+    /** Monotonic ordering for load intents, used for ownership and verbose diagnostics. */
     private static volatile long loadIntentSeqCounter = 0L;
     private static volatile long lastLoadIntentSeq = 0L;
     private static volatile long previousLoadIntentSeq = 0L;
@@ -2670,13 +2668,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     /**
-     * DIAGNOSTIC ONLY: records who asked for a load, and with what identity. Changes no behaviour.
+     * Records an authoritative load intent and, when verbose logging is enabled, describes it.
      *
-     * `seq` is a monotonic counter, so two intents can be ordered without reading timestamps — the
-     * final {@code LOADTRACE[loaded]} names the seq that owns it. `sinceCompletion` states, as a
+     * `seq` is a monotonic counter used to order intents and supersede pending skip ownership —
+     * two intents can be ordered without reading timestamps. The final
+     * {@code LOADTRACE[loaded]} names the seq that owns the load. `sinceCompletion` states, as a
      * fact rather than an inference, how long before this load the last completion fired; it is
-     * reported, never used to classify the load, because native cannot know whether an RN load is an
-     * automatic advance or a user action.
+     * reported, never used to classify the load, because native cannot know whether an RN load is
+     * an automatic advance or a user action.
      */
     public static void noteLoadIntent(String origin, String mediaId) {
         previousLoadIntentOrigin = lastLoadIntentOrigin;

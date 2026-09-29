@@ -2502,13 +2502,12 @@ public class RNJWPlayerView extends RelativeLayout implements
                 JWLog.d(TAG, "PUSH_TRACE setConfig: unavailable (" + t.getMessage() + ")");
             }
         }
-        // DIAGNOSTIC ONLY (2026-09-21): a config push that carries a playlist IS a load command, and
-        // until now it recorded no intent at all — so an RN load that overwrote an Android Auto
-        // selection left no trace and the race could not be attributed. Recorded here, BEFORE the
-        // config-equality gate, so what RN asked for is visible whether or not the gate skips it.
-        // Origin names only the entry point: native cannot know whether this push is an automatic
-        // completion advance or a user action, so it must not claim to.
-        if (prop != null && prop.hasKey("playlist") && !prop.isNull("playlist") && JWLog.isVerbose()) {
+        // A config push carrying a playlist is a load command and must record an intent in every
+        // build. Record it BEFORE the config-equality gate, so what RN asked for is known whether
+        // or not the gate skips it. Origin names only the entry point: native cannot know whether
+        // this push is an automatic completion advance or a user action; diagnostic detail remains
+        // verbose-gated.
+        if (prop != null && prop.hasKey("playlist") && !prop.isNull("playlist")) {
             try {
                 ReadableArray intentArr = prop.getArray("playlist");
                 if (intentArr != null && intentArr.size() > 0) {
@@ -2523,22 +2522,26 @@ public class RNJWPlayerView extends RelativeLayout implements
                             intentFile = intentFirst.getString("file");
                         }
                     }
-                    Long intentGeneration = null;
-                    if (prop.hasKey("androidHandoffGeneration") && !prop.isNull("androidHandoffGeneration")) {
-                        intentGeneration = (long) prop.getDouble("androidHandoffGeneration");
-                    }
                     com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
                             "rn-setConfig",
                             intentMediaId != null ? intentMediaId : intentFile);
-                    JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-setConfig"
-                            + " mediaId=" + intentMediaId
-                            + " file=" + intentFile
-                            + " handoffGeneration=" + intentGeneration
-                            + " playlistSize=" + intentArr.size()
-                            + " liveFile=" + currentPlayerItemFile());
+                    if (JWLog.isVerbose()) {
+                        Long intentGeneration = null;
+                        if (prop.hasKey("androidHandoffGeneration") && !prop.isNull("androidHandoffGeneration")) {
+                            intentGeneration = (long) prop.getDouble("androidHandoffGeneration");
+                        }
+                        JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-setConfig"
+                                + " mediaId=" + intentMediaId
+                                + " file=" + intentFile
+                                + " handoffGeneration=" + intentGeneration
+                                + " playlistSize=" + intentArr.size()
+                                + " liveFile=" + currentPlayerItemFile());
+                    }
                 }
             } catch (Throwable t) {
-                JWLog.d(TAG, "LOADTRACE[intent] rn-setConfig: unavailable (" + t.getMessage() + ")");
+                if (JWLog.isVerbose()) {
+                    JWLog.d(TAG, "LOADTRACE[intent] rn-setConfig: unavailable (" + t.getMessage() + ")");
+                }
             }
         }
         if (prop != null && prop.hasKey("androidHandoffGeneration")
