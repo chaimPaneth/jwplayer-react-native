@@ -100,6 +100,12 @@ public final class PipOwnershipRegressionTest {
         check("SOURCE_NATIVE_SELECTION_RECORDED_BEFORE_HANDLER",
                 mediaSession.indexOf("androidAutoSelectedMediaId = mediaId;")
                         < mediaSession.indexOf("jwPlayerNativePlaybackHandler.handleHeadlessMediaSelection"));
+        String module = read(root,
+                "android/src/main/java/com/jwplayer/rnjwplayer/RNJWPlayerModule.java");
+        check("SOURCE_APP_ADOPTION_MOVES_APP_POST",
+                module.contains("public void noteAppAdoptedPost(")
+                        && module.contains(".noteAppAdoptedMediaId(mediaId)")
+                        && mediaSession.contains("appProvidedMediaId = adopted;"));
     }
 
     public static void main(String[] args) throws Exception {
@@ -143,6 +149,15 @@ public final class PipOwnershipRegressionTest {
         identity.appProvided = "A";
         check("STALE_REACT_IDENTITY_REJECTED",
                 identity.rejectStaleForegroundConfig("A"));
+
+        // 5b. The app adopted B (state only) and then opens A again: a navigation, not a stale
+        // re-assert (it was refused, or B stayed the skip base).
+        IdentityModel adopted = new IdentityModel();
+        adopted.nativeSelected = "B";
+        adopted.livePlayer = "B";
+        adopted.appProvided = "B";  // RNJWMediaSessionHelper.noteAppAdoptedMediaId
+        check("ADOPTED_THEN_REOPEN_PREVIOUS_ALLOWED",
+                !adopted.rejectStaleForegroundConfig("A"));
 
         // 6. Normal PiP enter/exit retains the owner and does not invoke cleanup.
         OwnerModel normalExit = new OwnerModel();

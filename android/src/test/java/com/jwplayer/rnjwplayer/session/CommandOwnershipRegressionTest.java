@@ -4,6 +4,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,13 +89,17 @@ public final class CommandOwnershipRegressionTest {
         long ownerIntentSeq = -1L;
         long intentSeq = 0L;
         int loads = 0;
+        /** Mirrors PlaybackManager.isHeadlessOwner(): the background player owns playback. */
+        boolean headlessOwnsPlayback = false;
 
         SkipOwner(SkipRegistry registry) { this.registry = registry; }
 
-        /** A new authoritative playback intent. Returns the new sequence. */
+        /** A new load intent. Returns the new sequence. */
         long noteLoadIntent(String origin, String mediaId) {
             long seq = ++intentSeq;
-            if (token != null && ownerIntentSeq >= 0 && seq > ownerIntentSeq) {
+            // A React load staged while the background player owns playback is not authority.
+            boolean staged = origin.startsWith("rn-") && headlessOwnsPlayback;
+            if (!staged && token != null && ownerIntentSeq >= 0 && seq > ownerIntentSeq) {
                 registry.invalidate(token);
                 token = null;
                 baseMediaId = null;
@@ -150,6 +155,36 @@ public final class CommandOwnershipRegressionTest {
                 && hasExplicitStart
                 && incomingOwnSavedMs >= 0
                 && Math.abs(explicitStartMs - incomingOwnSavedMs) > CROSS_TRACK_AGREEMENT_MS;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Pending resume target model: mirrors postIdOfPlaylistItem + pendingSeekIsForAnotherItem.
+    // ---------------------------------------------------------------------------------------------
+
+    static final java.util.regex.Pattern APP_POST = java.util.regex.Pattern.compile(
+            "^(post-)?\\d+$", java.util.regex.Pattern.CASE_INSENSITIVE);
+    static final java.util.regex.Pattern HLS = java.util.regex.Pattern.compile(
+            ".*/(\\d+)/hls/.*", java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    static String postOfKey(String key, Map<String, String> postByKey) {
+        if (key == null) return null;
+        if (APP_POST.matcher(key.trim()).matches()) return key.trim();
+        String k = key.trim();
+        if (k.startsWith("file://")) k = k.substring("file://".length());
+        return k.isEmpty() ? null : postByKey.get(k);
+    }
+
+    static String postOfItem(String itemMediaId, String file, Map<String, String> postByKey) {
+        String key = itemMediaId != null && !itemMediaId.trim().isEmpty() ? itemMediaId.trim() : file;
+        String post = postOfKey(key, postByKey);
+        if (post != null || file == null) return post;
+        java.util.regex.Matcher m = HLS.matcher(file);
+        return m.matches() ? m.group(1) : postOfKey(file, postByKey);
+    }
+
+    static boolean pendingSeekIsForAnotherPost(String targetPost, String currentPost) {
+        return targetPost != null && APP_POST.matcher(targetPost.trim()).matches()
+                && currentPost != null && !targetPost.trim().equals(currentPost);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -327,6 +362,80 @@ public final class CommandOwnershipRegressionTest {
                   "playFromMediaId(10643) would still have executed");
         }
 
+        // 13. no PiP, app in the background: the previous shade Prev put an item on the background
+        //     player; the app's own load of that item is staged and must not kill the next Prev,
+        //     armed under that selection.
+        {
+            SkipRegistry r = new SkipRegistry(); SkipOwner o = new SkipOwner(r);
+            o.headlessOwnsPlayback = true;
+            long n = o.noteLoadIntent("aa-selection", "10675");
+            o.armSkip("1f1b1f45", "10675");
+            o.noteLoadIntent("rn-loadPlaylist", "10675");
+            check("I1_STAGED_REACT_LOAD_KEEPS_SKIP", o.jsMayLoad("1f1b1f45", "10675", n),
+                  "the app following the background player's item killed the next press");
+        }
+
+        // 14. the app's load lags one skip behind (it follows the previous selection): still staged
+        {
+            SkipRegistry r = new SkipRegistry(); SkipOwner o = new SkipOwner(r);
+            o.headlessOwnsPlayback = true;
+            o.noteLoadIntent("aa-selection", "10676");
+            long n = o.noteLoadIntent("aa-selection", "10675");
+            o.armSkip("t14", "10675");
+            o.noteLoadIntent("rn-loadPlaylist", "10676");
+            check("I1_STAGED_LAGGING_REACT_LOAD_KEEPS_SKIP", o.jsMayLoad("t14", "10675", n),
+                  "a staged load of the previous selection killed the press");
+        }
+
+        // 15. a native selection is still authority while the background player plays
+        {
+            SkipRegistry r = new SkipRegistry(); SkipOwner o = new SkipOwner(r);
+            o.headlessOwnsPlayback = true;
+            long n = o.noteLoadIntent("aa-selection", "A");
+            o.armSkip("t15", "A");
+            o.noteLoadIntent("aa-selection", "C");
+            check("I1_AA_SELECTION_SUPERSEDES_WHILE_BACKGROUND_PLAYER_PLAYS",
+                  !o.jsMayLoad("t15", "A", n), "stale skip survived an AA selection");
+        }
+
+        // 16. the in-app player owns playback (foreground or PiP): a React load is authority
+        {
+            SkipRegistry r = new SkipRegistry(); SkipOwner o = new SkipOwner(r);
+            o.headlessOwnsPlayback = false;
+            long n = o.noteLoadIntent("aa-selection", "10644");
+            o.armSkip("t16", "10644");
+            o.noteLoadIntent("rn-setConfig", "10644");
+            check("I1_REACT_LOAD_SUPERSEDES_WHEN_IN_APP_PLAYER_OWNS",
+                  !o.jsMayLoad("t16", "10644", n), "a React re-assert in PiP no longer supersedes");
+        }
+
+        // ---------------- pending resume target vs the item the player holds ----------------
+
+        // 17. Next onto a new post while the background player is still on the previous post's
+        //     stream, whose item id is its JW media id: the new post's target must not be applied
+        //     to that item.
+        {
+            Map<String, String> postByKey = new HashMap<>();
+            String streamPost = postOfItem("QSjml6oQ",
+                    "https://media.ou.org/torah/2906/10674/hls/10674.m3u8", postByKey);
+            check("SEEK_STREAM_ITEM_RESOLVES_TO_ITS_POST", "10674".equals(streamPost),
+                  "resolved " + streamPost);
+            check("SEEK_TARGET_FOR_NEXT_POST_NOT_APPLIED",
+                  pendingSeekIsForAnotherPost("10673", streamPost),
+                  "10673's target would be applied to 10674");
+            check("SEEK_TARGET_FOR_SAME_POST_APPLIED",
+                  !pendingSeekIsForAnotherPost("10674", streamPost),
+                  "10674's own target refused");
+            postByKey.put("/data/user/0/org.ou.all.daf/files/alldaf/10674-QSjml6oQ.mp3", "10674");
+            String filePost = postOfItem(null,
+                    "file:///data/user/0/org.ou.all.daf/files/alldaf/10674-QSjml6oQ.mp3", postByKey);
+            check("SEEK_DOWNLOADED_FILE_RESOLVES_TO_ITS_POST", "10674".equals(filePost),
+                  "resolved " + filePost);
+            check("SEEK_UNKNOWN_ITEM_NOT_COMPARED",
+                  !pendingSeekIsForAnotherPost("10673", postOfItem("zzz", "https://x/y.mp3", postByKey)),
+                  "an item with no known post was refused");
+        }
+
         // ---------------- INVARIANT 2 ----------------
 
         // 1. same item + valid resume -> accepted (not a cross-item case at all)
@@ -395,6 +504,34 @@ public final class CommandOwnershipRegressionTest {
             check("SRC_SUPERSEDE_HOOKED_INTO_INTENT_RECORDER",
                   src.contains("supersedePendingSkipIfAny(lastLoadIntentSeq, origin, mediaId)"),
                   "supersede is not driven by the intent recorder");
+            check("SRC_STAGED_REACT_LOAD_IS_NOT_AUTHORITY",
+                  src.contains("origin.startsWith(\"rn-\")")
+                  && src.contains("PlaybackManager.getInstance().isHeadlessOwner()")
+                  && src.contains("if (lastSkipAuthorityIntentSeq > ownerIntentSeq)"),
+                  "a staged React load still supersedes, or the dispatch race ignores authority");
+            check("SRC_PENDING_SEEK_GUARD_RESOLVES_ITEM_POST",
+                  src.contains("String current = postIdOfPlaylistItem(item);")
+                  && src.contains("pendingSeekPostId = itemPostId;"),
+                  "the pending-seek guard still compares raw item ids");
+            // Re-registering a session callback drops the commands queued for the old one: only
+            // the shared callback may be registered, and an owner handover must not register it
+            // again.
+            check("SRC_ONE_SESSION_CALLBACK_NOT_REREGISTERED_ON_HANDOVER",
+                  countOutsideComments(src, "setCallback(") == 1
+                  && src.contains("session.setCallback(sharedSessionCallback);")
+                  && src.contains("if (session == callbackSession && !force) {")
+                  && src.contains("attachSharedSessionCallback(this.mediaSessionStateProvider.mediaSessionCompat, this,\n"
+                          + "                        false, \"initServiceMediaApi\");"),
+                  "a helper still registers its own callback on every handover");
+            check("SRC_CLEANUP_KEEPS_NO_POSITION_DISAGREEING_WITH_SEEK_IN_FLIGHT",
+                  src.contains("helper.seekState.blocksStore(positionMs, SystemClock.elapsedRealtime())"),
+                  "the background player's cleanup can keep a playhead its resume seek replaces");
+            // The app's lagging staged load must not move the skip base off the item the
+            // background player is on.
+            check("SRC_STAGED_LOAD_KEEPS_BACKGROUND_SKIP_BASE",
+                  src.contains("boolean stagedWhileBackgroundPlays = PlaybackManager.getInstance().isHeadlessOwner();")
+                  && src.contains("if (appTrackChanged && stagedWhileBackgroundPlays"),
+                  "a staged React load still retires the background player's skip base");
         } else {
             check("SRC_HELPER_FOUND", false, "could not read " + helper);
         }

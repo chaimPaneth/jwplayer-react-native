@@ -10,12 +10,18 @@ public final class ForegroundReconfigureHarness {
     private String mForegroundRebuildFile = "current.mp4";
     private long mForegroundRebuildPositionMs = 115000L;
     private long mForegroundRebuildCapturedAtMs = 1000L;
+    private long mForegroundReturnAtMs = 1000L;
+    private long pendingTargetMs = -1L;
     private final Player mPlayer = new Player();
     private boolean userPaused;
     private ReadableMap mConfig;
     private ReadableMap mPlaylistProp;
 
     /* PRODUCTION_METHODS */
+
+    private long pendingResumeTargetMs() { return pendingTargetMs; }
+    private String firstPlaylistMediaIdFromConfig(ReadableMap prop) { return prop.mediaId; }
+    private String currentPlayerItemMediaId() { return mPlayer.liveMediaId; }
 
     private PlayerConfig buildPlayerConfig(ReadableMap prop, PlayerConfig oldConfig) {
         return new PlayerConfig.Builder().playlist(Util.createPlaylist(prop, null)).build();
@@ -82,8 +88,56 @@ public final class ForegroundReconfigureHarness {
         assertReload("actual player already reset", resetPlayer, new ReadableMap("current.mp4", 0d));
         ForegroundReconfigureHarness loadingPlayer = foregroundReturn();
         loadingPlayer.mPlayer.state = PlayerState.BUFFERING;
-        assertReload("unsettled player", loadingPlayer, new ReadableMap("current.mp4", 0d));
-        System.out.println("PASS: 19 production reconfigure cases, including foreground reuse and reload boundaries");
+        assertReuse("buffering on the same item", loadingPlayer, new ReadableMap("current.mp4", 115d));
+        ForegroundReconfigureHarness loadingReset = foregroundReturn();
+        loadingReset.mPlayer.state = PlayerState.BUFFERING;
+        loadingReset.mPlayer.position = 0d;
+        assertReload("buffering player that lost its place", loadingReset, new ReadableMap("current.mp4", 115d));
+        ForegroundReconfigureHarness idlePlayer = foregroundReturn();
+        idlePlayer.mPlayer.state = PlayerState.IDLE;
+        assertReload("idle player", idlePlayer, new ReadableMap("current.mp4", 115d));
+        // Loading the item at the return: it read 0, so no snapshot; its resume seek is pending.
+        ForegroundReconfigureHarness loadingAtReturn = foregroundReturn();
+        loadingAtReturn.mForegroundRebuildFile = null;
+        loadingAtReturn.mPlayer.state = PlayerState.BUFFERING;
+        loadingAtReturn.mPlayer.position = 0d;
+        loadingAtReturn.pendingTargetMs = 1115902L;
+        assertReuse("loading at the return, resume pending", loadingAtReturn,
+                new ReadableMap("current.mp4", 1114d));
+        ForegroundReconfigureHarness loadingNoResume = foregroundReturn();
+        loadingNoResume.mForegroundRebuildFile = null;
+        loadingNoResume.mPlayer.state = PlayerState.BUFFERING;
+        loadingNoResume.mPlayer.position = 0d;
+        assertReload("loading from 0 while the app asks for 1114s", loadingNoResume,
+                new ReadableMap("current.mp4", 1114d));
+        // Switched to this item after the return, so the snapshot names the previous one.
+        ForegroundReconfigureHarness switchedAfter = foregroundReturn();
+        switchedAfter.mForegroundRebuildFile = "previous.mp4";
+        switchedAfter.mForegroundRebuildPositionMs = 1619369L;
+        switchedAfter.mPlayer.position = 1116.4d;
+        assertReuse("switched to this item after the return", switchedAfter,
+                new ReadableMap("current.mp4", 1114d));
+        ForegroundReconfigureHarness noReturn = foregroundReturn();
+        noReturn.mForegroundReturnAtMs = 0L;
+        assertReload("no foreground return", noReturn, new ReadableMap("current.mp4", 0d));
+        // A system skip back to a download loaded its stream; the app re-pushes the local file.
+        ForegroundReconfigureHarness otherSource = foregroundReturn();
+        otherSource.mForegroundRebuildFile = null;
+        otherSource.mPlayer.config.playlist = Collections.singletonList(new PlaylistItem("stream.m3u8", 0));
+        otherSource.mPlayer.liveMediaId = "10674";
+        otherSource.mPlayer.state = PlayerState.BUFFERING;
+        otherSource.mPlayer.position = 0d;
+        otherSource.pendingTargetMs = 1115856L;
+        assertReuse("same post from its other source", otherSource,
+                new ReadableMap("local.mp3", 1114d, "10674"));
+        ForegroundReconfigureHarness otherPost = foregroundReturn();
+        otherPost.mPlayer.config.playlist = Collections.singletonList(new PlaylistItem("stream.m3u8", 0));
+        otherPost.mPlayer.liveMediaId = "10674";
+        assertReload("another post", otherPost, new ReadableMap("other.mp3", 0d, "10675"));
+        ForegroundReconfigureHarness noLiveId = foregroundReturn();
+        noLiveId.mPlayer.config.playlist = Collections.singletonList(new PlaylistItem("stream.m3u8", 0));
+        assertReload("live item without a media id", noLiveId, new ReadableMap("local.mp3", 0d, "10674"));
+        System.out.println("PASS: 28 production reconfigure cases, including foreground reuse and reload boundaries");
     }
 
     private static ForegroundReconfigureHarness foregroundReturn() {
@@ -134,9 +188,15 @@ public final class ForegroundReconfigureHarness {
     private static final class ReadableMap {
         final String file;
         final Double start;
+        final String mediaId;
         final Map<String, Object> settings = new HashMap<>();
         int playlistSize = 1;
-        ReadableMap(String file, Double start) { this.file = file; this.start = start; }
+        ReadableMap(String file, Double start) { this(file, start, null); }
+        ReadableMap(String file, Double start, String mediaId) {
+            this.file = file;
+            this.start = start;
+            this.mediaId = mediaId;
+        }
         boolean hasKey(String key) { return "playlist".equals(key); }
         boolean isNull(String key) { return false; }
         boolean getBoolean(String key) { return false; }
@@ -195,6 +255,7 @@ public final class ForegroundReconfigureHarness {
     private final class Player {
         PlayerConfig config = new PlayerConfig();
         double position = 115d;
+        String liveMediaId;
         int stopCount;
         int setupCount;
         PlayerState state = PlayerState.PLAYING;

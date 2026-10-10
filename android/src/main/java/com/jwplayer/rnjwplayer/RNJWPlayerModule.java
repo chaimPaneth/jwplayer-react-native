@@ -162,6 +162,18 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /**
+     * The app adopted {@code mediaId} as its post without loading it (the item a system or car skip
+     * moved the player to). Run on the main looper, in order with setConfig. See
+     * RNJWMediaSessionHelper.noteAppAdoptedMediaId.
+     */
+    @ReactMethod
+    public void noteAppAdoptedPost(final String mediaId) {
+        new Handler(Looper.getMainLooper()).post(() ->
+                com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                        .noteAppAdoptedMediaId(mediaId));
+    }
+
     @ReactMethod
     public void loadPlaylist(final int reactTag, final ReadableArray playlistItems) {
         JWLog.d(TAG, "loadPlaylist(reactTag=" + reactTag + ", itemsLength=" + (playlistItems != null ? playlistItems.size() : -1) + ")");
@@ -192,8 +204,7 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                     }
                 }
                 com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
-                        "rn-loadPlaylist",
-                        intentMediaId != null ? intentMediaId : intentFile);
+                        "rn-loadPlaylist", intentMediaId, intentFile);
                 if (JWLog.isVerbose()) {
                     JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-loadPlaylist"
                             + " mediaId=" + intentMediaId + " file=" + intentFile
@@ -526,6 +537,18 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 JWPlayerNativePlaybackHandler handler = JWPlayerNativePlaybackHandler.getInstance(mReactContext);
                 Map<String, Object> info = handler.getCurrentBackgroundPlayerInfo();
                 if (info != null && info.get("position") instanceof Number) {
+                    // The background player takes over when a system skip arrives while the app
+                    // is in the background without PiP (phone locked from the app, PiP off), and
+                    // until the app takes that item over its post is another one. Returning that
+                    // player's position here made the app save it as its own post's history.
+                    Object backgroundMediaId = info.get("mediaId");
+                    if (backgroundMediaId != null && com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper
+                            .isOtherThanAppPost(String.valueOf(backgroundMediaId))) {
+                        JWLog.d(TAG, "position: background player is on " + backgroundMediaId
+                                + ", not the app's post -> no position");
+                        promise.reject("RNJW Error", "Background player is on another post");
+                        return;
+                    }
                     int seconds = ((Double) ((Number) info.get("position")).doubleValue()).intValue();
                     promise.resolve(seconds);
                     return;
@@ -688,8 +711,7 @@ public class RNJWPlayerModule extends ReactContextBaseJavaModule {
                 }
             }
             com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
-                    "rn-resolveNextPlaylistItem",
-                    intentMediaId != null ? intentMediaId : intentFile);
+                    "rn-resolveNextPlaylistItem", intentMediaId, intentFile);
             if (JWLog.isVerbose()) {
                 JWLog.d(TAG, "LOADTRACE[intent-detail] origin=rn-resolveNextPlaylistItem"
                         + " mediaId=" + intentMediaId + " file=" + intentFile);

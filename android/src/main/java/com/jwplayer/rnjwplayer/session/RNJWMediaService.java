@@ -207,7 +207,15 @@ public class RNJWMediaService extends Service {
                 JWLog.w(TAG, "Ignoring stale transfer token=" + token + " current=" + ownerToken);
                 return false;
             }
-            showBootstrapNotification("transfer:" + reason);
+            if (foreground) {
+                // Keep the outgoing owner's media notification while the successor attaches;
+                // attachOwner re-posts it in place. Re-posting the plain bootstrap under the same
+                // id made the system media controls drop and rebuild their player, and a
+                // notification Previous tapped in that moment was lost.
+                JWLog.d(TAG, "prepareOwnerTransfer: keeping the media notification; reason=" + reason);
+            } else {
+                showBootstrapNotification("transfer:" + reason);
+            }
             previousHelper = mediaSessionHelper;
             mediaSessionHelper = null;
             notificationHelper = null;

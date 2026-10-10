@@ -916,6 +916,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     if (extIdObj instanceof String) {
                         String externalMediaId = (String) extIdObj;
                         if (externalMediaId != null && !externalMediaId.isEmpty()) {
+                            if (RNJWMediaSessionHelper.isBeforeResumeSeek(externalMediaId, lastMs)) {
+                                JWLog.d(TAG, "saveCurrentSeekPosition: " + lastMs + "ms for mediaId="
+                                        + externalMediaId + " is from before its resume seek; not kept");
+                                return;
+                            }
                             // CRITICAL: Also update static cache in RNJWMediaSessionHelper
                             // This ensures the UI player gets the correct position on handoff
                             try {

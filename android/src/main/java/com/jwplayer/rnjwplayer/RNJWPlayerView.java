@@ -284,6 +284,9 @@ public class RNJWPlayerView extends RelativeLayout implements
     private String mForegroundRebuildFile = null;
     private long mForegroundRebuildPositionMs = -1L;
     private long mForegroundRebuildCapturedAtMs = 0L;
+    // When the activity last came back (PiP exit or host resume), whether or not a playhead could
+    // be captured then. A player still loading an item reads 0 and leaves no snapshot.
+    private long mForegroundReturnAtMs = 0L;
     // The snapshot is only meant to cover the config burst that immediately follows the
     // foreground transition (observed: three pushes within ~85ms of onHostResume). Anything later
     // is an ordinary update and must be honoured as sent.
@@ -518,6 +521,14 @@ public class RNJWPlayerView extends RelativeLayout implements
         // inherit it (file identity and the TTL would usually reject it, but do not rely on that).
         clearForegroundRebuildSnapshot();
         boolean replacingOwner = PlaybackManager.getInstance().isTransitioning();
+        if (mPlayer != null && !isDestroying) {
+            // Before the service is released, while the helper still tracks this player's item.
+            // Also when another player takes over (a lock-screen/notification skip with no PiP
+            // hands playback to the background player): only this player knows where its item
+            // is, and the new one refuses to guess. Without this the item kept nothing, and a
+            // skip back to it started at an older cached position.
+            com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.rememberPositionOnClose(mPlayer);
+        }
         releaseMediaService(
             replacingOwner,
             replacingOwner ? "ui-player-replacement" : "ui-player-destroyed");
@@ -1369,6 +1380,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         if (mPlayer == null) {
             return;
         }
+        mForegroundReturnAtMs = SystemClock.elapsedRealtime();
         try {
             String file = currentPlayerItemFile();
             long positionMs = (long) (mPlayer.getPosition() * 1000d);
@@ -2523,8 +2535,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                         }
                     }
                     com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.noteLoadIntent(
-                            "rn-setConfig",
-                            intentMediaId != null ? intentMediaId : intentFile);
+                            "rn-setConfig", intentMediaId, intentFile);
                     if (JWLog.isVerbose()) {
                         Long intentGeneration = null;
                         if (prop.hasKey("androidHandoffGeneration") && !prop.isNull("androidHandoffGeneration")) {
@@ -2770,14 +2781,35 @@ public class RNJWPlayerView extends RelativeLayout implements
         return false;
     }
 
+    /**
+     * True when a playlist-only push right after a foreground return names the item the player is
+     * already on, and the player is where it should be: the push is the app re-asserting state,
+     * and rebuilding would reload the item. JW, seeked twice on a freshly reloaded stream,
+     * restarts it at 0:00 often enough that a reload must never be the default here.
+     *
+     * Example: a lock-screen/PiP Next back to a download loads its stream; on return the app
+     * re-pushes that same stream at the live position, and the rebuild played it from 0:00 while
+     * the player
+     *   - was still BUFFERING it, or
+     *   - was still loading it at the return (position 0, resume seek pending), so no snapshot
+     *     was captured.
+     * Where the player should be is the playhead captured at the return for this file, or the
+     * start the app asks for when there is none. A player that lost its place is still rebuilt.
+     */
     private boolean reuseForegroundPlayerForConfig(ReadableMap prop) {
-        if (mPlayer == null || mConfig == null || prop == null
-                || !isForegroundRebuildSnapshotFresh()) {
+        if (mPlayer == null || mConfig == null || prop == null || !isForegroundReturnRecent()) {
             return false;
         }
+        String liveFile = currentPlayerItemFile();
         String incomingFile = firstPlaylistFileFromConfig(prop);
-        if (incomingFile == null || !incomingFile.equals(mForegroundRebuildFile)
-                || !incomingFile.equals(currentPlayerItemFile())) {
+        boolean sameFile = incomingFile != null && incomingFile.equals(liveFile);
+        // The same post from its other source: a system skip back to a download loads its stream,
+        // and an app that returns before it heard which source the player took re-pushes the
+        // local file. Reloading switches the source and restarted it at 0:00.
+        String incomingMediaId = firstPlaylistMediaIdFromConfig(prop);
+        boolean samePost = !sameFile && liveFile != null && incomingMediaId != null
+                && incomingMediaId.equals(currentPlayerItemMediaId());
+        if (!sameFile && !samePost) {
             return false;
         }
         if (prop.getArray("playlist").size() != 1 || mPlayer.getPlaylist() == null
@@ -2785,21 +2817,25 @@ public class RNJWPlayerView extends RelativeLayout implements
             return false;
         }
         PlayerState state = mPlayer.getState();
-        if (state != PlayerState.PLAYING && state != PlayerState.PAUSED) {
+        if (state != PlayerState.PLAYING && state != PlayerState.PAUSED
+                && state != PlayerState.BUFFERING) {
             return false;
         }
         double positionSec = mPlayer.getPosition();
         if (Double.isNaN(positionSec) || Double.isInfinite(positionSec) || positionSec < 0d) {
             return false;
         }
-        long positionMs = (long) (positionSec * 1000d);
-        if (positionMs + FOREGROUND_REBUILD_MIN_REWIND_MS < mForegroundRebuildPositionMs) {
-            return false;
-        }
+        long positionMs = Math.max((long) (positionSec * 1000d), pendingResumeTargetMs());
         Double requestedStartSec = firstPlaylistStartTimeFromConfig(prop);
         if (requestedStartSec != null && (Double.isNaN(requestedStartSec)
                 || Double.isInfinite(requestedStartSec) || requestedStartSec < 0d
                 || requestedStartSec * 1000d > positionMs + FOREGROUND_REBUILD_MIN_REWIND_MS)) {
+            return false;
+        }
+        boolean snapshotForThisFile = isForegroundRebuildSnapshotFresh()
+                && liveFile != null && liveFile.equals(mForegroundRebuildFile);
+        if (snapshotForThisFile
+                && positionMs + FOREGROUND_REBUILD_MIN_REWIND_MS < mForegroundRebuildPositionMs) {
             return false;
         }
         Map<String, Object> currentSettings = mConfig.toHashMap();
@@ -2813,8 +2849,54 @@ public class RNJWPlayerView extends RelativeLayout implements
         }
         mPlaylistProp = prop.getArray("playlist");
         JWLog.d(TAG, "FOREGROUND_REUSE: keeping same-item player without stop/setup"
-                + " positionMs=" + positionMs + " state=" + state);
+                + " positionMs=" + positionMs + " state=" + state
+                + " snapshot=" + (snapshotForThisFile ? mForegroundRebuildPositionMs : -1L)
+                + (samePost ? " samePost=" + incomingMediaId + " liveFile=" + liveFile : ""));
         return true;
+    }
+
+    /** The app post id the pushed playlist item carries ("mediaId"), or null. */
+    private String firstPlaylistMediaIdFromConfig(ReadableMap configProp) {
+        try {
+            if (configProp != null && configProp.hasKey("playlist")) {
+                ReadableArray playlist = configProp.getArray("playlist");
+                if (playlist != null && playlist.size() > 0) {
+                    ReadableMap first = playlist.getMap(0);
+                    if (first != null && first.hasKey("mediaId") && !first.isNull("mediaId")) {
+                        String id = first.getString("mediaId");
+                        return id == null || id.trim().isEmpty() ? null : id.trim();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // Unknown: the push is then matched by file only.
+        }
+        return null;
+    }
+
+    /**
+     * Media id of the item the player is on, or null. A native load (system skip, Android Auto)
+     * sets it to the app post id; JW drops it from items RN pushes, which then match by file.
+     */
+    private String currentPlayerItemMediaId() {
+        try {
+            PlaylistItem item = mPlayer != null ? mPlayer.getPlaylistItem() : null;
+            String id = item != null ? item.getMediaId() : null;
+            return id == null || id.trim().isEmpty() ? null : id.trim();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private boolean isForegroundReturnRecent() {
+        return mForegroundReturnAtMs > 0L
+                && SystemClock.elapsedRealtime() - mForegroundReturnAtMs
+                        <= FOREGROUND_REBUILD_SNAPSHOT_TTL_MS;
+    }
+
+    /** The resume position the media session is still about to seek this player to, or -1. */
+    private long pendingResumeTargetMs() {
+        return com.jwplayer.rnjwplayer.session.RNJWMediaSessionHelper.pendingResumeTargetMs(mPlayer);
     }
 
     /**

@@ -135,6 +135,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     // Pending seek info
     private static Long pendingSeekMs = null;
+    // The app post pendingSeekMs was chosen for, or null when unknown / the item it is on.
+    private static String pendingSeekPostId = null;
+    // The item the player loaded with a resume position it has not reached yet (its resume seek
+    // is not confirmed). Left before then, the item is still where that target says.
+    private static String unresumedItemPostId = null;
+    private static long unresumedItemTargetMs = -1L;
     private static boolean pendingSeekApplied = false;
     private static int autoHandoffSeekAttempts = 0; // Track number of onSeeked during handoff
     private static final long SEEK_END_GUARD_MS = 500L;
@@ -228,6 +234,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // 12 seconds of a fresh daf, and it would resume there next time. 12000 was RN's own
     // stale live-position tracker, which had been reading a rebuilding player.
     private static String lastPlaylistItemMediaId = null;
+    // The player that is on lastPlaylistItemMediaId. Only a helper attached to that player knows
+    // where the item is: after the user closed the player and opened another post, the NEW
+    // player's first item "left" the closed player's item, and the new player's own position
+    // (still at the start) was cached for it. A shade Next onto that item then started it from
+    // the beginning, and the vehicle package saved 0 as its history.
+    private static java.lang.ref.WeakReference<JWPlayer> lastPlaylistItemPlayer = null;
     private static long trackSwitchedAtMs = 0L;
     /**
      * NO LONGER AN AUTHORITY (2026-09-22). This window used to decide whether an explicit JS start
@@ -304,6 +316,31 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         };
     }
 
+    /**
+     * True when {@code mediaId} and the post the app last loaded are both app posts and differ,
+     * i.e. a player on {@code mediaId} is not playing the app's post. False when either is unknown.
+     */
+    public static boolean isOtherThanAppPost(String mediaId) {
+        String app = appProvidedMediaId;
+        return isAppPostMediaId(mediaId) && isAppPostMediaId(app)
+                && !mediaId.trim().equals(app.trim());
+    }
+
+    /**
+     * The resume position this session is still about to seek {@code player} to, or -1. Set when
+     * an item loads with a resume position and cleared once the seek lands; until then the SDK
+     * reports the fresh item at 0. Only for the player this session is attached to.
+     */
+    public static long pendingResumeTargetMs(JWPlayer player) {
+        RNJWMediaSessionHelper helper = activeInstance;
+        Long target = pendingSeekMs;
+        if (helper == null || player == null || helper.jwPlayer != player
+                || target == null || pendingSeekApplied) {
+            return -1L;
+        }
+        return target;
+    }
+
     /** TEMPORARY DIAGNOSTICS -- live position in ms of whichever player is active, or -1. */
     public static long getLivePositionMsSnapshot() {
         RNJWMediaSessionHelper helper = activeInstance;
@@ -345,6 +382,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             boolean appTrackChanged = !incoming.equals(appProvidedMediaId);
             lastAppPushChangedTrack = appTrackChanged;
             appProvidedMediaId = incoming;
+            // While the background player owns playback the app's load only stages the in-app
+            // player, and it lags a skip behind (it follows the previous selection). Retiring the
+            // background player's selection for it made the next notification Next start from
+            // the staged item, one skip behind, instead of from the item playing.
+            boolean stagedWhileBackgroundPlays = PlaybackManager.getInstance().isHeadlessOwner();
             // The app just told us which post it is loading, which makes this the freshest
             // authoritative id we have — so retire a now-stale androidAutoSelectedMediaId.
             // That field is only written on an explicit Android Auto selection or when the
@@ -356,7 +398,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // could advance to the just-finished track in a loop. An explicit Android Auto
             // selection still wins: finishMediaItemSelection/handlePlayFromMediaId write this
             // field after the fact.
-            if (appTrackChanged && !appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
+            if (appTrackChanged && stagedWhileBackgroundPlays
+                    && !appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
+                JWLog.d(TAG, "setAppProvidedMediaId: KEEPING androidAutoSelectedMediaId="
+                        + androidAutoSelectedMediaId + " (app staged " + appProvidedMediaId
+                        + " while the background player owns playback)");
+            } else if (appTrackChanged && !appProvidedMediaId.equals(androidAutoSelectedMediaId)) {
                 JWLog.d(TAG, "setAppProvidedMediaId: retiring stale androidAutoSelectedMediaId="
                         + androidAutoSelectedMediaId + " -> " + appProvidedMediaId);
                 androidAutoSelectedMediaId = appProvidedMediaId;
@@ -370,6 +417,36 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     + ", androidAutoSelectedMediaId=" + androidAutoSelectedMediaId
                     + ", appTrackChanged=" + appTrackChanged);
         }
+    }
+
+    /**
+     * The app took over {@code mediaId} as its post WITHOUT loading it: after a system or car skip
+     * moved the player on while the app was in the background, the app adopts the item the player
+     * is on (see RNJWPlayerModule.noteAppAdoptedPost). Nothing reaches setConfig then, so without
+     * this the post the app had before the skip stayed the app's post here.
+     *
+     * Example: a shade Previous moved the player from post A to post B and the app adopted B, but
+     * appProvidedMediaId stayed A. Opening A again was then "app re-asserted unchanged A": the B
+     * selection was kept, the foreground-rebuild gate refused the load, and the app switched back
+     * to B. When A did load later, B was still the skip base, so the next system Previous went to
+     * the item before B instead of to B. A load of the post the app had before is a navigation
+     * once the app has adopted another one.
+     */
+    public static void noteAppAdoptedMediaId(String mediaId) {
+        if (!isAppPostMediaId(mediaId)) {
+            return;
+        }
+        String adopted = mediaId.trim();
+        // Only the item the player is on can be adopted; a skip may have moved it on since.
+        String resolved = getPlaybackIdentitySnapshot()[0];
+        if (resolved == null || !resolved.equals(adopted)) {
+            JWLog.d(TAG, "noteAppAdoptedMediaId: ignored " + adopted + ", the player is on "
+                    + resolved);
+            return;
+        }
+        JWLog.d(TAG, "noteAppAdoptedMediaId: appProvidedMediaId " + appProvidedMediaId + " -> "
+                + adopted + " (androidAutoSelectedMediaId=" + androidAutoSelectedMediaId + ")");
+        appProvidedMediaId = adopted;
     }
 
     public static void noteUserPlaybackGesture(String reason) {
@@ -485,6 +562,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     // This is critical for handoff because MediaItemsStore only has the original extras bundle
     private static final java.util.Map<String, Long> lastKnownPositionCache = new java.util.concurrent.ConcurrentHashMap<>();
 
+    // The post React loaded each FILE for. JW's config parser drops the RN item's mediaId, so the
+    // player knows a downloaded item only by its file path, while the same post loaded by a system
+    // skip (lock screen, PiP, headset, Android Auto) is its stream, keyed by the post id. Without
+    // this link the position a download was left at never reached the post id: a lock-screen Next
+    // back to the post started at its stale browse-tree position, and the vehicle package then
+    // saved that as the post's history.
+    private static final java.util.Map<String, String> appPostIdByFile = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int APP_POST_ID_BY_FILE_MAX = 256;
+
+    private static String fileKey(String file) {
+        if (file == null) return null;
+        String key = file.trim();
+        if (key.startsWith("file://")) key = key.substring("file://".length());
+        return key.isEmpty() ? null : key;
+    }
+
     /**
      * Static method to cache a position for handoff from background player to UI player.
      * Called by JWPlayerNativePlaybackHandler during cleanup to ensure the position
@@ -500,6 +593,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private JWPlayerNativePlaybackHandler jwPlayerNativePlaybackHandler = null;
     private boolean lastSeekRequestedWhilePaused = false;
     private long lastRequestedSeekPositionMs = -1L;
+    // A seek JW makes by itself (its own seek bar) arms no target, and JW 4.26 then reports the
+    // playhead it LEFT in onSeek's position and in onSeeked. That old playhead was cached for the
+    // item and saved by the vehicle package; a lock-screen skip back to it started there, ahead
+    // of where the user had seeked to, and the app then saved that over the right position.
+    // onSeek's offset is where playback went; these remember it for the next few seconds.
+    private static final long UNARMED_SEEK_WINDOW_MS = 5_000L;
+    // JW's spurious echo targets 0 or a few ms; no seek JW makes by itself goes to the first second.
+    private static final long UNARMED_SEEK_MIN_TARGET_MS = 1_000L;
+    private long unarmedSeekTargetMs = -1L;
+    private long unarmedSeekFromMs = -1L;
+    private long unarmedSeekAtMs = 0L;
+    private String unarmedSeekItemKey = null;
     private long lastKnownDurationMs = -1L;
     private boolean suppressNextSeekCallback = false;
     private boolean completionScheduledFromSeek = false;
@@ -615,6 +720,105 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         } catch (Exception publishEx) {
             JWLog.w(TAG, "refreshSessionDurationFromPlayer: republish failed " + publishEx.getMessage());
+        }
+    }
+
+    // One callback object on the shared MediaSession, whichever helper owns playback. Android's
+    // MediaSession.setCallback drops every command still queued for the callback it replaces, and
+    // every owner handover (each system skip with the app in the background makes a new
+    // background player and helper) re-registered the new helper's callback: a notification Next
+    // that arrived while the next background player was being set up, just before its helper
+    // registered its callback, never reached the app.
+    // Commands go to the active helper at the moment they are handled; between an owner's detach
+    // and its successor's start they go to the helper that attached last, as before.
+    private static MediaSessionCompat callbackSession = null;
+    private static RNJWMediaSessionHelper callbackTarget = null;
+    private static final MediaSessionCompat.Callback sharedSessionCallback = new MediaSessionCompat.Callback() {
+        private MediaSessionCompat.Callback target(String command) {
+            RNJWMediaSessionHelper helper = activeInstance != null ? activeInstance : callbackTarget;
+            if (helper == null) {
+                JWLog.w(TAG, "sessionCallback." + command + ": no helper to handle it");
+                return null;
+            }
+            return helper.mediaSessionCallback;
+        }
+
+        @Override public void onPlay() {
+            MediaSessionCompat.Callback t = target("onPlay");
+            if (t != null) t.onPlay();
+        }
+
+        @Override public void onPause() {
+            MediaSessionCompat.Callback t = target("onPause");
+            if (t != null) t.onPause();
+        }
+
+        @Override public void onStop() {
+            MediaSessionCompat.Callback t = target("onStop");
+            if (t != null) t.onStop();
+        }
+
+        @Override public void onSeekTo(long position) {
+            MediaSessionCompat.Callback t = target("onSeekTo");
+            if (t != null) t.onSeekTo(position);
+        }
+
+        @Override public void onSkipToNext() {
+            MediaSessionCompat.Callback t = target("onSkipToNext");
+            if (t != null) t.onSkipToNext();
+        }
+
+        @Override public void onSkipToPrevious() {
+            MediaSessionCompat.Callback t = target("onSkipToPrevious");
+            if (t != null) t.onSkipToPrevious();
+        }
+
+        @Override public void onPlayFromMediaId(String mediaId, Bundle extras) {
+            MediaSessionCompat.Callback t = target("onPlayFromMediaId");
+            if (t != null) t.onPlayFromMediaId(mediaId, extras);
+        }
+
+        @Override public void onCustomAction(String action, Bundle extras) {
+            MediaSessionCompat.Callback t = target("onCustomAction");
+            if (t != null) t.onCustomAction(action, extras);
+        }
+
+        @Override public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+            MediaSessionCompat.Callback t = target("onMediaButtonEvent");
+            // The helper handles play/pause/stop keys itself; anything else gets the default
+            // handling of the callback that is actually registered (this one).
+            return (t != null && t.onMediaButtonEvent(mediaButtonIntent))
+                    || super.onMediaButtonEvent(mediaButtonIntent);
+        }
+    };
+
+    /**
+     * Registers {@link #sharedSessionCallback} on the session unless it already is (force: the
+     * media-browser service set its own callback when it was created). Never re-registers on an
+     * owner handover, which would drop the commands queued during it.
+     */
+    private static synchronized void attachSharedSessionCallback(
+            MediaSessionCompat session, RNJWMediaSessionHelper owner, boolean force, String site) {
+        callbackTarget = owner;
+        if (session == null) return;
+        if (session == callbackSession && !force) {
+            JWLog.d(TAG, site + ": session callback already registered; not re-registering");
+            return;
+        }
+        session.setCallback(sharedSessionCallback);
+        callbackSession = session;
+        JWLog.d(TAG, site + ": session callback registered" + (force ? " (forced)" : ""));
+    }
+
+    /**
+     * A helper released for good (not handed over): the next helper registers the callback again,
+     * as every new helper did before. It stays the fallback target meanwhile, so a command that
+     * arrives with no player (an Android Auto pick after the player was closed) is still handled
+     * the way the last helper's own callback handled it.
+     */
+    private static synchronized void forgetSharedSessionCallback(RNJWMediaSessionHelper owner) {
+        if (callbackTarget == owner) {
+            callbackSession = null;
         }
     }
 
@@ -790,6 +994,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             return;
         }
 
+        // A freshly loaded item reads 0 until its resume seek runs, and a second skip can arrive
+        // before it does. Storing that 0 (from onPlay) made the vehicle package save 0 as the
+        // item's history.
+        if (unresumedItemPostId != null && unresumedItemPostId.equals(postIdOfItem(externalMediaId))
+                && unresumedItemTargetMs > 0
+                && position < UNRESUMED_PLAYED_LIMIT_MS
+                && unresumedItemTargetMs - position > CROSS_TRACK_AGREEMENT_MS) {
+            JWLog.d(TAG, "storeSeekPosition: BLOCKED " + position + "ms for mediaId=" + externalMediaId
+                    + " before its resume seek to " + unresumedItemTargetMs + "ms");
+            return;
+        }
+
         // CRITICAL: Never store 0 during Android Auto handoff - it's spurious noise from JWPlayer
         if (position == 0 && isPlayingFromAndroidAuto && pendingSeekMs != null && pendingSeekMs > 0) {
             JWLog.d(TAG, "storeSeekPosition: BLOCKED storing 0 during AA handoff (pendingSeekMs=" + pendingSeekMs + ")");
@@ -805,6 +1021,14 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (seekState.blocksStore(position, SystemClock.elapsedRealtime())) {
             JWLog.d(TAG, "storeSeekPosition: BLOCKED storing " + position
                     + "ms disagreeing with in-flight seek target " + seekState.targetInFlightMs() + "ms");
+            return;
+        }
+
+        // The same for a seek JW made by itself, which arms no target: every writer (onSeeked,
+        // pause/buffer captures, the network guard) would otherwise store the playhead it left.
+        if (isStalePlayheadOfUnarmedSeek(position)) {
+            JWLog.d(TAG, "storeSeekPosition: BLOCKED " + position + "ms for mediaId=" + externalMediaId
+                    + ": the playhead a seek to " + unarmedSeekTargetMs + "ms just left");
             return;
         }
 
@@ -889,11 +1113,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 ? self.mediaSessionStateProvider.mediaSessionCompat : null;
         if (currentSession == newSession) {
             JWLog.d(TAG, "refreshSessionReference: session reference unchanged — re-pushing state");
+            // The media-browser service calls this when it is created, right after registering its
+            // own session callback; put the shared one back so commands reach the helper directly.
+            try {
+                attachSharedSessionCallback(newSession, self, true, "refreshSessionReference");
+            } catch (Exception e) {
+                JWLog.w(TAG, "refreshSessionReference: failed to set callback: " + e.getMessage());
+            }
         } else {
             JWLog.d(TAG, "refreshSessionReference: session reference CHANGED — updating provider");
             self.mediaSessionStateProvider = new MediaSessionStateProvider(newSession);
             try {
-                newSession.setCallback(self.mediaSessionCallback);
+                attachSharedSessionCallback(newSession, self, false, "refreshSessionReference");
             } catch (Exception e) {
                 JWLog.w(TAG, "refreshSessionReference: failed to set callback: " + e.getMessage());
             }
@@ -963,7 +1194,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // Attach callback (was previously intentionally omitted)
         try {
             if (this.mediaSessionStateProvider != null && this.mediaSessionStateProvider.mediaSessionCompat != null) {
-                this.mediaSessionStateProvider.mediaSessionCompat.setCallback(mediaSessionCallback);
+                attachSharedSessionCallback(this.mediaSessionStateProvider.mediaSessionCompat, this,
+                        false, "initServiceMediaApi");
             }
         } catch (Exception cbEx) {
             JWLog.w(TAG, "Failed to set MediaSession callback: " + cbEx.getMessage());
@@ -1030,7 +1262,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // be safe and skip seeding on errors to avoid replay storms
             JWLog.w(TAG, "initServiceMediaApi: capability check failed, skipping updatePlaylistItem: " + t.getMessage());
         }
-        this.updatePlayerState(currentJwPlayer.getState());
+        PlayerState initialState = currentJwPlayer.getState();
+        if (initialState == PlayerState.IDLE && isSessionActive()) {
+            // A player replacing a live owner (the background player taking a system skip over
+            // from the UI player, or the UI player taking it back) is IDLE until its item loads.
+            // Publishing that IDLE switched the session off until the new player's first state,
+            // and a notification Previous tapped then never reached the app. Leave the session as
+            // published: this player publishes its state on its first PLAY, PAUSE, BUFFER or
+            // ERROR event.
+            JWLog.d(TAG, "initServiceMediaApi: new player IDLE while the session is active; not publishing IDLE (handover)");
+        } else {
+            this.updatePlayerState(initialState);
+        }
         // Try to apply any pending seek right away
         try { 
             applyPendingSeekWhenReady(currentJwPlayer.getPlaylistItem()); 
@@ -1844,6 +2087,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
             if (safeResumePositionMs > 0) {
                 pendingSeekMs = safeResumePositionMs;
+                pendingSeekPostId = null;  // recovery reload of the item it is on
                 pendingSeekApplied = false;
                 autoHandoffSeekAttempts = 0;
                 lastRequestedSeekPositionMs = safeResumePositionMs;
@@ -1978,12 +2222,75 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
     private long rememberPlaybackPosition(String reason) {
         long positionMs = getCurrentPositionMs();
-        if (positionMs >= 0 && !seekState.blocksStore(positionMs, SystemClock.elapsedRealtime())) {
+        long nowMs = SystemClock.elapsedRealtime();
+        // Just after a seek JW still reports the playhead it left, so right after a resume seek
+        // onPlay read the item's start; the cache and the media browser stored it, and the vehicle
+        // package saved 0:00 as the item's history. The position model already knows where
+        // playback is; a sample it disagrees with is not remembered.
+        long modelMs = positionModel.projectedMs(nowMs);
+        if (modelMs >= 0 && Math.abs(positionMs - modelMs) > CROSS_TRACK_AGREEMENT_MS) {
+            JWLog.d(TAG, "NETWORK_GUARD: remember position reason=" + reason + " sample="
+                    + positionMs + "ms disagrees with the model " + modelMs + "ms -> using the model");
+            positionMs = modelMs;
+        }
+        if (positionMs >= 0 && !seekState.blocksStore(positionMs, nowMs)) {
             lastKnownRealPlaybackPositionMs = positionMs;
             storeSeekPosition(lastKnownRealPlaybackPositionMs);
         }
         JWLog.d(TAG, "NETWORK_GUARD: remember position reason=" + reason + " positionMs=" + lastKnownRealPlaybackPositionMs);
         return lastKnownRealPlaybackPositionMs;
+    }
+
+    // An item within this much of its end starts over, as the app does (buildPlaylistItem).
+    private static final long OUTGOING_END_MARGIN_MS = 15_000L;
+    // Below this an item left before its resume seek ran is still at its resume target.
+    private static final long UNRESUMED_PLAYED_LIMIT_MS = 15_000L;
+
+    /**
+     * The item the player is leaving keeps the position it had in the static cache.
+     *
+     * The cache was otherwise written only on seeks, so a later native load of the item (a
+     * Next/Prev from the system media controls, the lock screen or PiP, an Android Auto skip)
+     * restarted it at its last SEEK instead of where it had played on to, and the vehicle package
+     * then saved that as its history. A finished item reloaded at its end and completed again at
+     * once; one left within the end margin now starts over.
+     */
+    private void rememberOutgoingPosition(String mediaId, long durationMs) {
+        if (mediaId == null || mediaId.isEmpty()) return;
+        JWPlayer owner = lastPlaylistItemPlayer != null ? lastPlaylistItemPlayer.get() : null;
+        if (jwPlayer == null || owner != jwPlayer) {
+            JWLog.d(TAG, "onPlaylistItem: outgoing position for mediaId=" + mediaId
+                    + " not cached: another player was on it");
+            return;
+        }
+        long positionMs = positionModel.projectedMs(SystemClock.elapsedRealtime());
+        // Left before its own resume seek ran (a second skip within about a second): the item is
+        // still where it was resumed for, not at the start the fresh load read. Caching that start
+        // (two quick car Prevs) made the next Next start the item there, and the vehicle package
+        // saved 0 as its history.
+        String outgoingPostId = postIdOfItem(mediaId);
+        if (outgoingPostId != null && outgoingPostId.equals(unresumedItemPostId)
+                && unresumedItemTargetMs > 0 && positionMs < UNRESUMED_PLAYED_LIMIT_MS
+                && unresumedItemTargetMs - Math.max(positionMs, 0L) > CROSS_TRACK_AGREEMENT_MS) {
+            JWLog.d(TAG, "onPlaylistItem: " + mediaId + " left at " + positionMs
+                    + "ms before its resume seek to " + unresumedItemTargetMs + "ms -> keeping that");
+            positionMs = unresumedItemTargetMs;
+        }
+        if (positionMs < 0) return;
+        if (durationMs > 0 && positionMs >= durationMs - OUTGOING_END_MARGIN_MS) {
+            positionMs = 0L;
+        }
+        lastKnownPositionCache.put(mediaId, positionMs);
+        JWLog.d(TAG, "onPlaylistItem: cached outgoing position " + positionMs + "ms for mediaId="
+                + mediaId + " (duration " + durationMs + "ms)");
+        // A downloaded file is the same post as its stream, and a system skip loads the stream.
+        String file = isAppPostMediaId(mediaId) ? null : fileKey(mediaId);
+        String postId = file != null ? appPostIdByFile.get(file) : null;
+        if (postId != null) {
+            lastKnownPositionCache.put(postId, positionMs);
+            JWLog.d(TAG, "onPlaylistItem: cached outgoing position " + positionMs
+                    + "ms also for post " + postId + " (its downloaded file)");
+        }
     }
 
     private boolean shouldBlockPlayForNetwork(String reason) {
@@ -2049,6 +2356,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 activeInstance = null;
             }
         }
+        forgetSharedSessionCallback(this);
 
         softCleanup();
     }
@@ -2352,6 +2660,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return image;
     }
 
+    private boolean isSessionActive() {
+        try {
+            return this.mediaSessionStateProvider != null
+                    && this.mediaSessionStateProvider.mediaSessionCompat != null
+                    && this.mediaSessionStateProvider.mediaSessionCompat.isActive();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private void updatePlayerState(PlayerState playerState) {
         JWLog.d(TAG, "updatePlayerState(playerState=" + playerState + ")", true);
         PlaybackStateCompatWrapper currentPlaybackState = this.mediaSessionStateProvider.getPlaybackState();
@@ -2544,6 +2862,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private static volatile String pendingSkipBaseMediaId = null;
     private static volatile long pendingSkipIntentSeq = -1L;
     private static volatile String pendingSkipDirection = null;
+    /** Seq of the last load intent that may supersede a pending skip (staged React loads may not). */
+    private static volatile long lastSkipAuthorityIntentSeq = 0L;
 
     /** Records the ownership of a skip we just handed to RN. */
     private static void notePendingSkip(
@@ -2553,8 +2873,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         }
         // The service emits the JS event before returning the token. If another authoritative
         // intent arrived during that hand-off, the command is already stale: invalidate it now
-        // rather than arming it under the newer sequence.
-        if (lastLoadIntentSeq != ownerIntentSeq) {
+        // rather than arming it under the newer sequence. A staged React load is not one.
+        if (lastSkipAuthorityIntentSeq > ownerIntentSeq) {
             try {
                 Class<?> svc = Class.forName("com.mediabrowser.MediaBrowserService");
                 java.lang.reflect.Method invalidate =
@@ -2634,8 +2954,56 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (helper == null || positionMs < 0) {
             return;
         }
+        // The app computes the seek from ITS post. Right after a native load back to that post (a
+        // system or Android Auto skip) the player already holds the new item, but until
+        // onPlaylistItem the model still describes the item being left, and that item's position
+        // is cached from the model. After a car Next back to the app's post, the app's seek
+        // anchored the model, the item being left was cached at the app post's position, and the
+        // next skip onto it started there and saved that position.
+        String modelPostId = postIdOfItem(lastPlaylistItemMediaId);
+        String appPostId = isAppPostMediaId(appProvidedMediaId) ? appProvidedMediaId.trim() : null;
+        if (modelPostId != null && appPostId != null && !modelPostId.equals(appPostId)) {
+            JWLog.d(TAG, "POSMODEL[app-seek] " + positionMs + "ms is for post " + appPostId
+                    + " while the model is still on post " + modelPostId + " -> not anchored");
+            return;
+        }
         helper.positionModel.onCommandedPosition(positionMs, SystemClock.elapsedRealtime());
         JWLog.d(TAG, "POSMODEL[app-seek] anchored to commanded " + positionMs + "ms");
+    }
+
+    /**
+     * The post an item key ({@link #lastPlaylistItemMediaId}) belongs to: a stream's own post id,
+     * or the post React loaded a file for. Null when unknown.
+     */
+    private static String postIdOfItem(String itemKey) {
+        if (itemKey == null) return null;
+        if (isAppPostMediaId(itemKey)) return itemKey.trim();
+        String file = fileKey(itemKey);
+        return file != null ? appPostIdByFile.get(file) : null;
+    }
+
+    /**
+     * The post a loaded item belongs to: its post id, the post React loaded its file for, or the
+     * post in its stream URL (".../ID/hls/ID.m3u8"). The background player's items carry the
+     * post's JW media id, so only the URL names their post. Null when unknown.
+     */
+    private String postIdOfPlaylistItem(PlaylistItem item) {
+        String postId = postIdOfItem(inferMediaIdFromPlaylistItem(item));
+        if (postId != null) return postId;
+        String file = extractPrimarySourceFile(item);
+        if (file == null) return null;
+        java.util.regex.Matcher stream = HLS_PATTERN.matcher(file);
+        return stream.matches() ? stream.group(1) : postIdOfItem(file);
+    }
+
+    /** Links an item key that is not a post id (a JW media id) to its post, for postIdOfItem. */
+    private static void rememberPostOfItemKey(String itemKey, String postId) {
+        String key = fileKey(itemKey);
+        if (key == null || postId.equals(appPostIdByFile.get(key))) return;
+        if (appPostIdByFile.size() >= APP_POST_ID_BY_FILE_MAX) {
+            appPostIdByFile.clear();
+        }
+        appPostIdByFile.put(key, postId);
     }
 
     /**
@@ -2668,6 +3036,21 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     /**
+     * {@link #noteLoadIntent(String, String)} for a React load command, which names both the post
+     * and the file: also remembers which post the file belongs to (see {@link #appPostIdByFile}).
+     */
+    public static void noteLoadIntent(String origin, String mediaId, String file) {
+        String key = fileKey(file);
+        if (key != null && isAppPostMediaId(mediaId)) {
+            if (appPostIdByFile.size() >= APP_POST_ID_BY_FILE_MAX) {
+                appPostIdByFile.clear();
+            }
+            appPostIdByFile.put(key, mediaId.trim());
+        }
+        noteLoadIntent(origin, mediaId != null ? mediaId : file);
+    }
+
+    /**
      * Records an authoritative load intent and, when verbose logging is enabled, describes it.
      *
      * `seq` is a monotonic counter used to order intents and supersede pending skip ownership —
@@ -2687,7 +3070,24 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         lastLoadIntentSeq = ++loadIntentSeqCounter;
         // INVARIANT 1: a newer authoritative playback intent kills any skip claim created under an
         // older one. Runs before the log below so the rejection and its cause appear in order.
-        supersedePendingSkipIfAny(lastLoadIntentSeq, origin, mediaId);
+        //
+        // A React load made while the background player owns playback (app in the background, no
+        // PiP) is not a playback intent: it only stages the in-app player for the return, and the
+        // user keeps hearing the background player. It arrives shortly after each system skip,
+        // because the app follows the skip's selection, and it killed the next shade Prev armed
+        // before it, so that press was lost. In PiP the in-app player owns playback, so a React
+        // re-assert there still supersedes, as INVARIANT 1 requires.
+        if (origin != null && origin.startsWith("rn-")
+                && PlaybackManager.getInstance().isHeadlessOwner()) {
+            if (pendingSkipToken != null) {
+                JWLog.d(TAG, "SKIPGUARD[kept] skipToken=" + pendingSkipToken
+                        + " ownerIntentSeq=" + pendingSkipIntentSeq + " staged=" + origin + "/"
+                        + mediaId + "#" + lastLoadIntentSeq + " (background player owns playback)");
+            }
+        } else {
+            lastSkipAuthorityIntentSeq = lastLoadIntentSeq;
+            supersedePendingSkipIfAny(lastLoadIntentSeq, origin, mediaId);
+        }
         if (!JWLog.isVerbose()) {
             return;
         }
@@ -2738,6 +3138,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     public void onPlaylistItem(PlaylistItemEvent playlistItemEvent) {
         JWLog.d(TAG, "onPlaylistItem(event.item=" + JWLog.playlistItemInfo(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null) + ")", true);
         logLoadOutcome(playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null);
+        // updatePlaylistItem below publishes the incoming item's duration; the item being left
+        // needs its own for rememberOutgoingPosition().
+        final long outgoingDurationMs = lastKnownDurationMs;
         this.updatePlaylistItem(playlistItemEvent.getPlaylistItem());
         completionScheduledFromSeek = false;
         PlaylistItem incomingItem = playlistItemEvent != null ? playlistItemEvent.getPlaylistItem() : null;
@@ -2771,6 +3174,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         String itemKey = (inferredMediaId != null && !inferredMediaId.trim().isEmpty())
                 ? inferredMediaId.trim()
                 : extractPrimarySourceFile(incomingItem);
+        // The background player's items are keyed by the post's JW media id, not its post id, which
+        // no position guard could map to its post. Link the key to the post here so they can.
+        String itemPostId = postIdOfPlaylistItem(incomingItem);
+        if (itemKey != null && itemPostId != null && !isAppPostMediaId(itemKey)) {
+            rememberPostOfItemKey(itemKey, itemPostId);
+        }
         if (itemKey != null && !itemKey.equals(lastPlaylistItemMediaId)) {
             if (lastPlaylistItemMediaId != null) {
                 trackSwitchedAtMs = System.currentTimeMillis();
@@ -2794,14 +3203,22 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                         + "#" + lastLoadIntentSeq + ")");
                 // A seek target belongs to the item it was requested on; never carry it across.
                 clearSeekTargetInFlight("track-switch " + lastPlaylistItemMediaId + " -> " + itemKey);
+                clearUnarmedSeek();
                 // Nothing about the previous item's position is meaningful for the new one.
                 // Measured 2026-09-19 16:40: a track boundary produced live=229942ms against a
                 // session already reset to 0, a one-tick divergence of 229942ms. Resetting here
                 // means the new item's first sample SEEDS the model rather than being judged
                 // against the old item's projection.
+                rememberOutgoingPosition(lastPlaylistItemMediaId, outgoingDurationMs);
                 positionModel.reset();
+                // Set again below if the incoming item gets a resume target.
+                unresumedItemPostId = null;
             }
             lastPlaylistItemMediaId = itemKey;
+        }
+        if (itemKey != null) {
+            // Also on a same-item reload, so a rebuilt player owns the item it took over.
+            lastPlaylistItemPlayer = new java.lang.ref.WeakReference<>(jwPlayer);
         }
 
         boolean hasPendingAndroidAutoResume = externalMediaId != null
@@ -2858,6 +3275,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             } else {
                 savedPositionMs = -1L;
                 positionSource = "explicit start only (non-handoff)";
+            }
+            // A saved position at the very end starts over, as the app does (buildPlaylistItem):
+            // otherwise the item completes as soon as it loads and auto-advances.
+            if (savedPositionMs > 0 && lastKnownDurationMs > 0
+                    && savedPositionMs >= lastKnownDurationMs - OUTGOING_END_MARGIN_MS) {
+                JWLog.d(TAG, "onPlaylistItem: saved position " + savedPositionMs + "ms is within "
+                        + OUTGOING_END_MARGIN_MS + "ms of the end (" + lastKnownDurationMs
+                        + "ms) -> starting over");
+                savedPositionMs = 0L;
             }
             long resumeMs;
             
@@ -2941,6 +3367,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             
             if (resumeMs >= 0) {
                 pendingSeekMs = resumeMs;
+                pendingSeekPostId = itemPostId;
+                unresumedItemPostId = pendingSeekPostId;
+                unresumedItemTargetMs = resumeMs;
                 pendingSeekApplied = false;
                 autoHandoffSeekAttempts = 0; // Reset for new handoff
                 JWLog.d(TAG, "onPlaylistItem: Set pendingSeekMs=" + pendingSeekMs + "ms for Android Auto handoff (autoHandoffSeekAttempts reset to 0)");
@@ -3109,6 +3538,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 JWLog.d(TAG, "onSeek: echo offset=" + offsetMs
                         + "ms corroborates no armed seek; leaving lastRequested="
                         + lastRequestedSeekPositionMs + "ms untouched");
+                // Not a target for the session (see above), but where the player went. A zero
+                // offset is the spurious echo described above and is never remembered, nor is a
+                // target of a few ms: one right after a resume seek made onSeeked keep it, and the
+                // vehicle package saved 0 as the item's history while it played on.
+                long fromMs = (long) (position * 1000d);
+                if (offsetMs >= UNARMED_SEEK_MIN_TARGET_MS && pendingSeekMs == null
+                        && Math.abs(offsetMs - fromMs) > SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS) {
+                    noteUnarmedSeek(fromMs, offsetMs);
+                }
             }
             lastSeekRequestedWhilePaused = !isCurrentlyPlaying();
             // Shield the MediaSession from the stale live position JW 4.26.0 reports for seconds
@@ -3228,6 +3666,43 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
      *     0:00 straight after a large seek would be refused. A non-authoritative JW echo is refused
      *     when it disagrees with a fresher target in either direction.
      */
+    private void noteUnarmedSeek(long fromMs, long targetMs) {
+        unarmedSeekTargetMs = targetMs;
+        unarmedSeekFromMs = fromMs;
+        unarmedSeekAtMs = SystemClock.elapsedRealtime();
+        unarmedSeekItemKey = lastPlaylistItemMediaId;
+        JWLog.d(TAG, "SEEKTRACE[UNARMED] from=" + fromMs + "ms target=" + targetMs
+                + "ms item=" + unarmedSeekItemKey);
+    }
+
+    private void clearUnarmedSeek() {
+        unarmedSeekTargetMs = -1L;
+        unarmedSeekFromMs = -1L;
+        unarmedSeekItemKey = null;
+    }
+
+    /**
+     * True when positionMs is the playhead an unarmed seek on this item just LEFT and not where
+     * it went: near where it started from, and not near its target. A short seek, where the two
+     * overlap, is never judged stale.
+     */
+    private boolean isStalePlayheadOfUnarmedSeek(long positionMs) {
+        if (unarmedSeekTargetMs < 0 || unarmedSeekFromMs < 0 || unarmedSeekItemKey == null
+                || !unarmedSeekItemKey.equals(lastPlaylistItemMediaId)) {
+            return false;
+        }
+        long ageMs = SystemClock.elapsedRealtime() - unarmedSeekAtMs;
+        if (ageMs < 0 || ageMs > UNARMED_SEEK_WINDOW_MS) {
+            return false;
+        }
+        long agreeMs = SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS;
+        boolean nearFrom = positionMs >= unarmedSeekFromMs - 1_000L
+                && positionMs <= unarmedSeekFromMs + ageMs + 2_000L;
+        boolean nearTarget = positionMs >= unarmedSeekTargetMs - agreeMs
+                && positionMs <= unarmedSeekTargetMs + ageMs + agreeMs;
+        return nearFrom && !nearTarget;
+    }
+
     private void noteSeekTargetInFlight(long targetMs, String source, boolean authoritative) {
         SeekAcceptanceState.ArmOutcome outcome =
             seekState.arm(targetMs, authoritative, SystemClock.elapsedRealtime());
@@ -3627,6 +4102,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 && Math.abs(pendingSeekMs - targetMs) <= SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS) {
             pendingSeekMs = null;
             pendingSeekApplied = true;
+            unresumedItemPostId = null;
             resetAndroidAutoFlag();
         }
         storeSeekPosition(acceptedPositionMs);
@@ -3673,6 +4149,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 boolean ready = stateNow != null
                         && stateNow != PlayerState.IDLE
                         && stateNow != PlayerState.ERROR;
+                if (ready && pendingSeekIsForAnotherItem(jwPlayer.getPlaylistItem(), "re-seek")) {
+                    ready = false;
+                }
                 if (ready) {
                     JWLog.d(TAG, "onSeeked: Re-seeking to pendingSeekMs=" + pendingSeekMs
                             + " after spurious 0 (state=" + stateNow + ")");
@@ -3690,6 +4169,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
 
         long effectivePositionMs = resolveSeekedPosition(eventPositionMs);
         effectivePositionMs = sanitizeSeekPosition(effectivePositionMs);
+        if (seekState.targetInFlightMs() < 0L && lastRequestedSeekPositionMs < 0L
+                && pendingSeekMs == null && isStalePlayheadOfUnarmedSeek(eventPositionMs)) {
+            JWLog.d(TAG, "onSeeked: event=" + eventPositionMs + "ms is the playhead the seek left (from="
+                    + unarmedSeekFromMs + "ms) -> using its target " + unarmedSeekTargetMs + "ms");
+            effectivePositionMs = sanitizeSeekPosition(unarmedSeekTargetMs);
+            // As for an app seek (noteAppOriginatedSeek): the model follows the command, not the
+            // stale sample, so what is published and what an outgoing item keeps are right at once.
+            positionModel.onCommandedPosition(effectivePositionMs, SystemClock.elapsedRealtime());
+        }
 
         JWLog.d(TAG, "onSeeked(position=" + positionSeconds + ", effectiveMs=" + effectivePositionMs + ", Android=" + androidVersion + ")");
 
@@ -3701,7 +4189,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // - Track onSeeked attempts when position is wrong (but not 0)
         // - Allow first attempt, correct on second if still wrong
         // - Immediately accept correct positions
-        if (isPlayingFromAndroidAuto && pendingSeekMs != null && !pendingSeekApplied) {
+        if (isPlayingFromAndroidAuto && pendingSeekMs != null && !pendingSeekApplied
+                && !(jwPlayer != null && pendingSeekIsForAnotherItem(jwPlayer.getPlaylistItem(), "correction"))) {
             autoHandoffSeekAttempts++;
             long deltaFromTarget = Math.abs(eventPositionMs - pendingSeekMs);
             
@@ -3722,6 +4211,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                             double correctPositionSeconds = pendingSeekMs / 1000.0;
                             jwPlayer.seek(correctPositionSeconds);
                             pendingSeekApplied = true;
+                            unresumedItemPostId = null;
                             lastRequestedSeekPositionMs = pendingSeekMs;
                             JWLog.d(TAG, "onSeeked: Correction seek initiated to " + correctPositionSeconds + "s");
                         }
@@ -3736,6 +4226,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                 effectivePositionMs = pendingSeekMs; // Use the validated stored position
                 pendingSeekMs = null;
                 pendingSeekApplied = true;
+                unresumedItemPostId = null;
                 // Continue to normal playback state handling with corrected position
             }
         }
@@ -3747,6 +4238,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             long deltaFromTarget = Math.abs(eventPositionMs - pendingSeekMs);
             if (deltaFromTarget < 2000) {
                 pendingSeekApplied = true;
+                unresumedItemPostId = null;
                 pendingSeekMs = null;
             }
         }
@@ -4204,9 +4696,40 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         return state == PlayerState.BUFFERING && durationSeconds > 0;
     }
 
+    /**
+     * True while the pending resume target was chosen for another app post than the one the player
+     * holds (a newer selection waits for its item). The item's post is resolved from its JW media
+     * id, stream URL or file (see {@link #postIdOfPlaylistItem}); an item whose post is unknown is
+     * not compared.
+     *
+     * Example: a quick second shade Next, with the background player still on the previous post's
+     * stream (keyed by its JW media id). The new post's target was applied to the previous post
+     * because that item id is not a post id, and the vehicle package saved it as that post's
+     * history.
+     */
+    private boolean pendingSeekIsForAnotherItem(PlaylistItem item, String site) {
+        String target = pendingSeekPostId;
+        String current = postIdOfPlaylistItem(item);
+        if (!isAppPostMediaId(target) || current == null || target.trim().equals(current)) {
+            return false;
+        }
+        JWLog.d(TAG, "pending seek (" + site + "): target " + pendingSeekMs + "ms is for post "
+                + target.trim() + ", the player is still on post " + current.trim()
+                + " -> not applied to it");
+        return true;
+    }
+
     private void applyPendingSeekWhenReady(PlaylistItem item) {
         JWLog.d(TAG, "applyPendingSeekWhenReady(pendingSeekMs=" + pendingSeekMs + ", applied=" + pendingSeekApplied + ", item=" + JWLog.playlistItemInfo(item) + ")");
         if (pendingSeekMs == null || pendingSeekMs < 0 || jwPlayer == null || pendingSeekApplied) return;
+
+        // A pending seek belongs to the post it was chosen for. A second skip that arrives before
+        // the first item's resume seek has run replaces the target while the player still holds
+        // the first item: a quick car Next set the target to the next item's position, it was
+        // applied to the first item, and the vehicle package saved it as that item's history.
+        if (pendingSeekIsForAnotherItem(item, "apply")) {
+            return;
+        }
 
         // Do not block on id mismatches: items can legitimately differ across domains
         double duration = 0;
@@ -4519,6 +5042,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // A seek we issued is the one input that is authoritative by construction, so it re-anchors
         // the model outright: the disagreement it creates with the old projection is explained.
         positionModel.onCommandedPosition(safePositionMs, SystemClock.elapsedRealtime());
+        // From here the model knows where the item is (resume seek or user seek alike).
+        unresumedItemPostId = null;
 
         PlayerState previousState = null;
         if (jwPlayer != null) {
@@ -4546,10 +5071,12 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             // dropped seek would then also never confirm, freezing Android Auto's displayed
             // position at the lost target permanently (see the F2/F3 correction below).
             pendingSeekMs = safePositionMs;
+            pendingSeekPostId = null;  // a seek on the item the player is on
             pendingSeekApplied = false;
         } else if (supersedesPendingSeek) {
             pendingSeekMs = null;
             pendingSeekApplied = true;
+            unresumedItemPostId = null;
         }
         // An equal pending value means applyPendingSeekWhenReady is the caller; leaving it in place
         // keeps onSeeked's spurious-zero guard and the AA handoff counter armed until confirmation.
@@ -4790,6 +5317,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             String icon = iconFromExtras != null ? iconFromExtras : "";
 
             pendingSeekMs = resolveSelectionResumeMs(mediaId, extras);
+            pendingSeekPostId = isAppPostMediaId(mediaId) ? mediaId.trim() : null;
             pendingSeekApplied = false;
 
             externalMediaId = mediaId;
@@ -4833,6 +5361,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         lastSelectionAtMs = nowMs;
 
         pendingSeekMs = resolveSelectionResumeMs(mediaId, extras);
+        pendingSeekPostId = isAppPostMediaId(mediaId) ? mediaId.trim() : null;
         pendingSeekApplied = false;
         autoHandoffSeekAttempts = 0; // Reset counter for new handoff
         
@@ -4893,6 +5422,43 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             }
         }
         return false;
+    }
+
+    /**
+     * The user closed the player: its item keeps where it was, as when the player moves to another
+     * item, so a later system skip or Android Auto selection of it starts there and not at the
+     * browse tree's older position. Call before the player stops.
+     */
+    public static void rememberPositionOnClose(JWPlayer player) {
+        RNJWMediaSessionHelper helper = activeInstance;
+        if (helper == null || player == null || helper.jwPlayer != player) {
+            JWLog.d(TAG, "rememberPositionOnClose: no helper attached to the closing player");
+            return;
+        }
+        helper.rememberOutgoingPosition(lastPlaylistItemMediaId, helper.lastKnownDurationMs);
+    }
+
+    /**
+     * True while positionMs is only where a fresh load of mediaId starts, before its resume seek
+     * ran (a second skip within about a second of the first), or while that resume seek is still
+     * in flight and positionMs disagrees with it. The background player's cleanup must not keep
+     * that: the same rules storeSeekPosition and rememberOutgoingPosition apply.
+     *
+     * Example: returning to the app right after the background player dispatched its resume
+     * seek, its cleanup read the item's start (the seek had not landed yet), and the vehicle
+     * package saved 0 as the item's history.
+     */
+    public static boolean isBeforeResumeSeek(String mediaId, long positionMs) {
+        String postId = postIdOfItem(mediaId);
+        if (postId != null && postId.equals(unresumedItemPostId)
+                && unresumedItemTargetMs > 0 && positionMs < UNRESUMED_PLAYED_LIMIT_MS
+                && unresumedItemTargetMs - Math.max(positionMs, 0L) > CROSS_TRACK_AGREEMENT_MS) {
+            return true;
+        }
+        RNJWMediaSessionHelper helper = activeInstance;
+        return helper != null && postId != null && postId.equals(postIdOfItem(lastPlaylistItemMediaId))
+                && helper.seekState.targetInFlightMs() >= 0
+                && helper.seekState.blocksStore(positionMs, SystemClock.elapsedRealtime());
     }
 
     public static boolean handleDestroy() {

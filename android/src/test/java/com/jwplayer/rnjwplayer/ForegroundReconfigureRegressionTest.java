@@ -28,7 +28,7 @@ public final class ForegroundReconfigureRegressionTest {
         }
         Map<String, String> methods = new LinkedHashMap<>();
         for (String name : Arrays.asList("reconfigurePlayer", "reuseForegroundPlayerForConfig",
-            "resolveForegroundRebuildStartOverrideSec",
+            "resolveForegroundRebuildStartOverrideSec", "isForegroundReturnRecent",
                 "isForegroundRebuildSnapshotFresh", "clearForegroundRebuildSnapshot")) {
             methods.put(name, null);
         }

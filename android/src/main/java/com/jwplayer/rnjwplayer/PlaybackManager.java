@@ -181,6 +181,17 @@ public class PlaybackManager {
     }
 
     /**
+     * True while the background (headless) player owns playback: a system skip made with the app
+     * in the background and no PiP replaced the in-app player. A React load in this state only
+     * stages the in-app player for the user's return to the app; what the user hears is unchanged.
+     */
+    public boolean isHeadlessOwner() {
+        synchronized (mutex) {
+            return mActivePlayerHandler != null && !(mActivePlayerHandler instanceof RNJWPlayerView);
+        }
+    }
+
+    /**
      * Returns true if any player is currently registered as active.
      */
     public boolean hasActivePlayer() {
