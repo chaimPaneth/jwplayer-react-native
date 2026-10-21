@@ -4948,17 +4948,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // This allows RN to fetch the next post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
-            Object result;
-            try {
-                java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod(
-                        "sendSkipToNextEventToReactNative", String.class, long.class);
-                result = sendSkipNextMethod.invoke(null, mediaIdForSkip, skipOwnerIntentSeq);
-            } catch (NoSuchMethodException legacyMediaBrowser) {
-                // A media-browser fork before 0.1.9 takes no owner intent; the skip then
-                // reaches React Native as before, without the ownership guard.
-                result = mediaBrowserServiceClass.getMethod(
-                        "sendSkipToNextEventToReactNative", String.class).invoke(null, mediaIdForSkip);
-            }
+            java.lang.reflect.Method sendSkipNextMethod = mediaBrowserServiceClass.getMethod(
+                    "sendSkipToNextEventToReactNative", String.class, long.class);
+            Object result = sendSkipNextMethod.invoke(null, mediaIdForSkip, skipOwnerIntentSeq);
             skipToken = (result instanceof String) ? (String) result : null;
             notifiedReactNative = (skipToken != null);
             JWLog.d(TAG, "external-skip-rn-dispatch command=next, mediaIdForSkip=" + mediaIdForSkip
@@ -5000,16 +4992,9 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // This allows RN to fetch the previous post from series and load it
         try {
             Class<?> mediaBrowserServiceClass = Class.forName("com.mediabrowser.MediaBrowserService");
-            Object result;
-            try {
-                java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod(
-                        "sendSkipToPreviousEventToReactNative", String.class, long.class);
-                result = sendSkipPrevMethod.invoke(null, mediaIdForSkip, skipOwnerIntentSeq);
-            } catch (NoSuchMethodException legacyMediaBrowser) {
-                // See performSkipToNext(): a media-browser fork before 0.1.9.
-                result = mediaBrowserServiceClass.getMethod(
-                        "sendSkipToPreviousEventToReactNative", String.class).invoke(null, mediaIdForSkip);
-            }
+            java.lang.reflect.Method sendSkipPrevMethod = mediaBrowserServiceClass.getMethod(
+                    "sendSkipToPreviousEventToReactNative", String.class, long.class);
+            Object result = sendSkipPrevMethod.invoke(null, mediaIdForSkip, skipOwnerIntentSeq);
             skipToken = (result instanceof String) ? (String) result : null;
             notifiedReactNative = (skipToken != null);
             JWLog.d(TAG, "external-skip-rn-dispatch command=previous, mediaIdForSkip=" + mediaIdForSkip
