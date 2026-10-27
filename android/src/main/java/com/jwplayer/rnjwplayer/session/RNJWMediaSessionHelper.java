@@ -1684,6 +1684,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             case android.media.AudioManager.AUDIOFOCUS_LOSS:
                 JWLog.d(TAG, "AUDIOFOCUS_LOSS received (timeSinceLastRequest=" + timeSinceLastRequest + "ms, isPlayingFromAndroidAuto=" + isPlayingFromAndroidAuto + ")");
                 currentlyHasFocus = false;
+
+                // The reverse of the deferral in requestAudioFocusForPlayback: when this layer
+                // requested focus first (the item loaded before RNJWPlayerView held focus, e.g.
+                // the first play after launch or after another app took focus), RNJWPlayerView's
+                // own request on play evicts ours. The app still holds focus, so pausing here
+                // would stop the track the user just opened (once buffering outlasts
+                // FOCUS_LOSS_IGNORE_WINDOW_MS). A loss from another app goes to RNJWPlayerView,
+                // which then clears its flag, so this check cannot hide a real loss.
+                if (PlaybackManager.getInstance().hasUiAudioFocus()) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: focus moved to RNJWPlayerView for the same player, not pausing");
+                    return;
+                }
                 
                 // If focus loss happens long after the last request, this is Android Auto disconnect, not handoff
                 // Clear the flag so normal pause/audio focus behavior resumes
