@@ -1710,6 +1710,16 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
                     JWLog.d(TAG, "AUDIOFOCUS_LOSS: Ignoring due to timing window (< " + FOCUS_LOSS_IGNORE_WINDOW_MS + "ms)");
                     return;
                 }
+
+                // RNJWPlayerView took the focus for the same player (it requests on play, after
+                // this layer requested when the item loaded): the app still holds focus, so
+                // pausing would stop the track the user just opened. Checked after the Android
+                // Auto bookkeeping above, which still runs as before. A loss to another app goes
+                // to RNJWPlayerView, which clears its flag, so this cannot hide a real loss.
+                if (PlaybackManager.getInstance().hasUiAudioFocus()) {
+                    JWLog.d(TAG, "AUDIOFOCUS_LOSS: focus moved to RNJWPlayerView for the same player, not pausing");
+                    return;
+                }
                 
                 if (currentlyPlaying) {
                     wasPlayingBeforeFocusLoss = true;
