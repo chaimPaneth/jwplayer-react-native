@@ -246,6 +246,20 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                 || normalized.startsWith("data:");
     }
 
+    /** The `file://` url when it names a non-empty file on disk, otherwise null. */
+    private String existingLocalFileUrl(String url) {
+        if (url == null) return null;
+        String trimmed = url.trim();
+        if (!trimmed.toLowerCase(Locale.US).startsWith("file://")) return null;
+        try {
+            java.io.File file = new java.io.File(android.net.Uri.parse(trimmed).getPath());
+            return file.isFile() && file.length() > 0 ? trimmed : null;
+        } catch (Exception e) {
+            JWLog.w(TAG, "existingLocalFileUrl: cannot check " + JWLog.safe(trimmed) + ": " + e.getMessage());
+            return null;
+        }
+    }
+
     private boolean isNetworkAvailable() {
         try {
             ConnectivityManager manager = (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -605,6 +619,15 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
     private String resolvePlaybackUrl(Map<String, Object> postData) {
         if (postData == null) {
             return null;
+        }
+
+        // A downloaded file wins over the network: it plays with no connection, and a
+        // file source is exempt from the NETWORK_GUARD. Used only if it exists, so a
+        // download whose file went missing still falls back to the stream below.
+        String localFileUrl = existingLocalFileUrl(stringOrNull(postData.get("localFileUrl")));
+        if (localFileUrl != null) {
+            JWLog.d(TAG, "resolvePlaybackUrl: playing downloaded file=" + JWLog.safe(localFileUrl));
+            return localFileUrl;
         }
 
         String hlsUrl = stringOrNull(postData.get("hls_url"));
