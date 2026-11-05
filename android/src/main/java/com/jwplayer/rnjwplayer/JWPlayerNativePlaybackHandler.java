@@ -12,6 +12,7 @@ import com.facebook.react.ReactApplication;
 import com.facebook.react.ReactNativeHost;
 import com.facebook.react.ReactInstanceManager;
 import com.facebook.react.bridge.ReactContext;
+import com.facebook.react.common.LifecycleState;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import java.lang.reflect.Type;
@@ -65,6 +66,8 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
 import android.app.NotificationManager;
 import android.os.Build;
+import android.os.Bundle;
+import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import android.support.v4.media.MediaMetadataCompat;
@@ -1209,7 +1212,8 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     final JWPlayer uiPlayer = PlaybackManager.getInstance().getActivePlayerIfUI();
                     if (uiPlayer != null && postJsonForUi != null) {
                         Type t = new TypeToken<Map<String, Object>>(){}.getType();
-                        final Map<String, Object> post = gson.fromJson(postJsonForUi, t);
+                        final Map<String, Object> post =
+                                withAppPlaybackSource(mediaId, gson.fromJson(postJsonForUi, t));
                         final String playbackUrl = resolvePlaybackUrl(post);
                         final String artworkUrl = resolveImageUrl(post);
                         final int duration = post != null && post.get("duration") instanceof Number
@@ -1323,7 +1327,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
             if (postJson != null) {
                 JWLog.d(TAG, "📱 JAVA: Found post JSON in extras, parsing...");
                 Type type = new TypeToken<Map<String, Object>>(){}.getType();
-                post = gson.fromJson(postJson, type);
+                post = withAppPlaybackSource(mediaId, gson.fromJson(postJson, type));
             } else {
                 JWLog.w(TAG, "📱 JAVA: No post JSON found in extras");
             }
@@ -1348,9 +1352,11 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
                     startBackgroundPlayback(post, title, subtitle);
                 } else {
                     JWLog.w(TAG, "📱 JAVA: No valid URLs found for playback");
+                    forgetUnloadedSelection(mediaId);
                 }
             } else {
                 updateMediaSessionMetadata(title, subtitle, artworkUrl, null);
+                forgetUnloadedSelection(mediaId);
             }
             
         } catch (Exception e) {
@@ -2331,8 +2337,84 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         }
     }
 
+    /** Post fields {@link #resolvePlaybackUrl} plays from. */
+    private static final String[] PLAYBACK_SOURCE_KEYS =
+            {"localFileUrl", "hls_url", "s3Url", "playerSources", "mediaId"};
+
+    /**
+     * The car's copy of a list item ({@code carPost}, from the selection's extras), with the
+     * playback address taken from the app's own copy of the same item when the car's has none.
+     *
+     * Android Auto keeps showing a list it loaded earlier, and a list loaded before sign-in
+     * finished carries no playback address, while the media browser's item store already holds
+     * the app's newer copy of the same item (the copy the app's JS also receives for the
+     * selection). Without this, nothing loaded the selection: the car showed the new title while
+     * the previous lesson kept playing. Only the address fields are taken; title, position and
+     * the rest stay the car's, as before.
+     */
+    private Map<String, Object> withAppPlaybackSource(String mediaId, Map<String, Object> carPost) {
+        if (carPost == null || resolvePlaybackUrl(carPost) != null) return carPost;
+        Map<String, Object> appPost = appCopyOfListItem(mediaId);
+        if (appPost == null || resolvePlaybackUrl(appPost) == null) return carPost;
+        Map<String, Object> merged = new HashMap<>(carPost);
+        for (String key : PLAYBACK_SOURCE_KEYS) {
+            if (appPost.containsKey(key)) merged.put(key, appPost.get(key));
+        }
+        JWLog.d(TAG, "withAppPlaybackSource: car copy of mediaId=" + JWLog.safe(mediaId)
+                + " has no playback URL; using the app's copy");
+        return merged;
+    }
+
+    /** The app's copy of a car list item from the media browser's item store, or null. */
+    private Map<String, Object> appCopyOfListItem(String mediaId) {
+        if (mediaId == null) return null;
+        try {
+            Class<?> storeClass = Class.forName("com.mediabrowser.MediaItemsStore");
+            Object store = storeClass.getMethod("getInstance").invoke(null);
+            Object item = storeClass.getMethod("getMediaItemById", String.class).invoke(store, mediaId);
+            if (!(item instanceof MediaBrowserCompat.MediaItem)) return null;
+            Bundle itemExtras = ((MediaBrowserCompat.MediaItem) item).getDescription().getExtras();
+            Object info = itemExtras != null ? itemExtras.get("info") : null;
+            if (!(info instanceof String)) return null;
+            Type type = new TypeToken<Map<String, Object>>(){}.getType();
+            return gson.fromJson((String) info, type);
+        } catch (Exception e) {
+            JWLog.w(TAG, "appCopyOfListItem(mediaId=" + JWLog.safe(mediaId) + ") failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Forgets {@code mediaId} in both duplicate-selection filters when nothing was loaded for it
+     * and the app is not in front. A car list item can carry no playback URL. While the app is
+     * not in front (PiP, locked phone) React does not open it, so the app fetches the full post
+     * and asks for the same item again (carSelection.ts in the vehicle package); both filters
+     * must let that retry through. In front, React opens the item itself and the filters keep
+     * dropping a duplicate tap, as before.
+     */
+    private void forgetUnloadedSelection(String mediaId) {
+        if (mediaId == null || isReactHostResumed()) return;
+        if (mediaId.equals(lastHeadlessSelectionMediaId)) {
+            lastHeadlessSelectionMediaId = null;
+            lastHeadlessSelectionAtMs = 0L;
+        }
+        RNJWMediaSessionHelper.clearSelectionDedupe(mediaId);
+    }
+
+    /** True when React's host Activity is resumed: the state React Native reports as AppState 'active'. */
+    private boolean isReactHostResumed() {
+        try {
+            ReactContext reactContext = getReactContext();
+            return reactContext != null
+                    && reactContext.getLifecycleState() == LifecycleState.RESUMED;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private void fallbackToReactNative(String mediaId, JWPlayer uiPlayer) {
         JWLog.d(TAG, "fallbackToReactNative(mediaId=" + JWLog.safe(mediaId) + ")");
+        forgetUnloadedSelection(mediaId);
         if (uiPlayer != null) {
             try { uiPlayer.pause(); } catch (Exception ignored) {}
             try { uiPlayer.stop(); } catch (Exception ignored) {}

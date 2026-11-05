@@ -5352,6 +5352,18 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     /**
+     * Forgets the last selection of {@code mediaId} for the duplicate filter in
+     * {@link #handlePlayFromMediaId}. Called when that selection could not be loaded, so the
+     * app's retry of it is not dropped as a duplicate.
+     */
+    public static void clearSelectionDedupe(String mediaId) {
+        if (mediaId != null && mediaId.equals(lastSelectionMediaId)) {
+            lastSelectionMediaId = null;
+            lastSelectionAtMs = 0L;
+        }
+    }
+
+    /**
      * Static methods for MediaBrowserService to delegate to active instance
      */
     public static boolean handlePlayFromMediaId(String mediaId, Bundle extras) {
