@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.NotificationManager;
 import android.app.PictureInPictureParams;
+import java.util.Collections;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
@@ -1164,6 +1165,9 @@ public class RNJWPlayerView extends RelativeLayout implements
             mPlayer.onPictureInPictureModeChanged(isInPip, newConfig);
 
             PlaybackManager.getInstance().setUiInPip(isInPip);
+            if (isInPip) {
+                removeSdkPipButtons();
+            }
 
             // On ENTER, hide controls so the PiP window is video-only. Done after the SDK
             // notify (runtime hide of the existing control views, which works).
@@ -1910,6 +1914,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         try {
             if (allow) {
                 mPlayer.registerActivityForPip(mActivity, mActivity.getSupportActionBar());
+                removeSdkPipButtons();
                 registerPipBackCallback();
                 JWLog.d(TAG, "updatePipRegistration: PiP enabled (pipVideoOnly=" + pipVideoOnly
                         + ", hasVideoTrack=" + mHasVideoTrack + ")");
@@ -1939,6 +1944,41 @@ public class RNJWPlayerView extends RelativeLayout implements
      * the SDK's params would drop the aspect ratio / source rect hint it configures for the video
      * PiP window. Re-registering restores whatever the SDK wants.
      */
+    /**
+     * Removes the JW SDK's own Picture-in-Picture buttons, so the PiP window always shows
+     * Android's media buttons from the app's media session: previous lesson, play/pause, next
+     * lesson, the same as the lock screen, the notification and the car.
+     *
+     * The SDK installs rewind / play-pause / fast-forward buttons (15 s seeks) with
+     * setPictureInPictureParams when the activity registers for PiP, when it enters PiP and on
+     * every play, pause and ad break (to swap the play/pause icon). Android shows an app's own PiP
+     * buttons instead of the media session's, and both sets use the same icons, so the PiP
+     * window's rewind/forward seeked 15 s or changed the lesson depending on whether the SDK had
+     * installed its buttons when PiP started (seen: full player seeked, mini player skipped).
+     *
+     * Posted to the main thread so it runs after the SDK's own listener for the same event. Only
+     * the actions are replaced: Android copies just the fields a params object sets, so the aspect
+     * ratio, source rect hint and auto-enter flag stay as the SDK and this view set them.
+     */
+    private void removeSdkPipButtons() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || mActivity == null) {
+            return;
+        }
+        final Activity activity = mActivity;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (activity.isFinishing() || activity.isDestroyed()) {
+                return;
+            }
+            try {
+                activity.setPictureInPictureParams(new PictureInPictureParams.Builder()
+                        .setActions(Collections.emptyList())
+                        .build());
+            } catch (Throwable t) {
+                JWLog.w(TAG, "removeSdkPipButtons failed: " + t.getMessage());
+            }
+        });
+    }
+
     private void disableSystemAutoEnterPip() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || mActivity == null) {
             return;
@@ -3790,6 +3830,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         event.putInt("client", Util.getAdEventClientValue(adBreakEndEvent));
         event.putInt("type", Util.getAdEventTypeValue(Util.AdEventType.JWAdEventTypeAdBreakEnd));
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topAdEvent", event);
+        if (mPipRegisteredForVideo != null && mPipRegisteredForVideo) {
+            removeSdkPipButtons();
+        }
     }
 
     @Override
@@ -3800,6 +3843,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         event.putInt("client", Util.getAdEventClientValue(adBreakStartEvent));
         event.putInt("type", Util.getAdEventTypeValue(Util.AdEventType.JWAdEventTypeAdBreakStart));
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topAdEvent", event);
+        if (mPipRegisteredForVideo != null && mPipRegisteredForVideo) {
+            removeSdkPipButtons();
+        }
     }
 
     @Override
@@ -4148,6 +4194,9 @@ public class RNJWPlayerView extends RelativeLayout implements
         if (!wasInterrupted) {
             userPaused = true;
         }
+        if (mPipRegisteredForVideo != null && mPipRegisteredForVideo) {
+            removeSdkPipButtons();
+        }
     }
 
     @Override
@@ -4166,6 +4215,9 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         userPaused = false;
         wasInterrupted = false;
+        if (mPipRegisteredForVideo != null && mPipRegisteredForVideo) {
+            removeSdkPipButtons();
+        }
     }
 
     @Override
