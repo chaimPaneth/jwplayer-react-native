@@ -2922,6 +2922,28 @@ public class RNJWPlayerView extends RelativeLayout implements
         boolean wasPausedByUser = userPaused;
         Double startOverrideSec = resolveForegroundRebuildStartOverrideSec(
             firstPlaylistFileFromConfig(prop), firstPlaylistStartTimeFromConfig(prop));
+
+        // Keep a user's pause when this rebuild is for the item already loaded. The
+        // playlist-only fast path in setConfig already does; this path is taken when another
+        // setting changed with the same item, e.g. the app's autostart (its Autoplay setting
+        // became known only after the item was opened offline, or a car connected). setup()
+        // below would otherwise start the item the user paused. A handoff push carries the
+        // state its owner asked for (androidHandoffDesiredState) and is applied as sent; a
+        // different item is a new open and keeps the app's autostart. mConfig still holds the
+        // previous push here (setConfig updates it after this call).
+        // The player must also still be PAUSED: the stop() bridge sets userPaused as well, and the
+        // app calls it before it pushes an item it opens, so a stopped (IDLE) player is an open in
+        // progress whose autostart applies (e.g. the same lesson opened again with a car connected).
+        String previousFile = firstPlaylistFileFromConfig(mConfig);
+        String incomingFile = firstPlaylistFileFromConfig(prop);
+        String previousMediaId = firstPlaylistMediaIdFromConfig(mConfig);
+        String incomingMediaId = firstPlaylistMediaIdFromConfig(prop);
+        boolean sameItem = (previousFile != null && previousFile.equals(incomingFile))
+                || (previousMediaId != null && previousMediaId.equals(incomingMediaId));
+        boolean isHandoffPush = prop.hasKey("androidHandoffGeneration")
+                && !prop.isNull("androidHandoffGeneration");
+        boolean pausedNow = mPlayer.getState() == PlayerState.PAUSED;
+        boolean keepUserPause = wasPausedByUser && pausedNow && sameItem && !isHandoffPush;
         
         // Stop playback before reconfiguration to avoid issues (Issue #188 fix)
         mPlayer.stop();
@@ -2932,6 +2954,12 @@ public class RNJWPlayerView extends RelativeLayout implements
             newConfig = new PlayerConfig.Builder(newConfig)
                 .playlist(Util.createPlaylist(prop.getArray("playlist"), startOverrideSec))
                     .autostart(newConfig.getAutostart() && !wasPausedByUser)
+                .build();
+        } else if (keepUserPause && newConfig.getAutostart()) {
+            JWLog.d(TAG, "reconfigurePlayer: same item + userPaused -> forcing autostart=false"
+                    + " to preserve user pause");
+            newConfig = new PlayerConfig.Builder(newConfig)
+                .autostart(false)
                 .build();
         }
         newConfig = applyHiddenUiGroups(newConfig, prop);
