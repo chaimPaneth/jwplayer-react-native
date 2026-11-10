@@ -273,6 +273,9 @@ public class RNJWPlayerView extends RelativeLayout implements
     // exit. Populated by hideJwUiForPip(), which is the actual enforcement for "no JW control
     // overlay inside the PiP window" — the SDK's controls flag proved insufficient.
     private final Map<View, Integer> mJwUiVisibilitySnapshot = new LinkedHashMap<>();
+    // JW's artwork views shown in the PiP window while the lesson has ended, with the visibility
+    // they had. See showArtworkInPipIfEnded().
+    private final Map<View, Integer> mPipArtworkSnapshot = new LinkedHashMap<>();
     private ViewTreeObserver.OnGlobalLayoutListener mPipUiEnforcer = null;
     // ── Foreground-rebuild playhead snapshot ────────────────────────────────────────────────
     // The live playhead captured the moment the app comes back to the foreground (PiP exit /
@@ -518,6 +521,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         hidePipProgress();
         stopPipUiEnforcer();
         mJwUiVisibilitySnapshot.clear();
+        mPipArtworkSnapshot.clear();
         // The snapshot describes a player instance that is going away; a rebuilt player must not
         // inherit it (file identity and the TTL would usually reject it, but do not rely on that).
         clearForegroundRebuildSnapshot();
@@ -1224,6 +1228,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 hidePipProgress();
                 stopPipUiEnforcer();
                 restoreJwUiAfterPip();
+                restoreArtworkAfterPip();
 
                 // Exit without a prior enter snapshot means this view instance did
                 // not own the PiP transition. Skip reparenting to avoid applying an
@@ -1817,7 +1822,118 @@ public class RNJWPlayerView extends RelativeLayout implements
     private void enforcePipUiHidden() {
         if (isPipSuppressingControls()) {
             hideJwUiForPip();
+            showArtworkInPipIfEnded();
         }
+    }
+
+    /**
+     * Keeps the lesson's artwork in the PiP window after the lesson ends.
+     *
+     * When an item completes, JW hides its overlay (the artwork) and shows only a replay button
+     * over black. The PiP window hides JW's buttons, so it went fully black. While PiP is active
+     * and the player is COMPLETE, this shows the overlay and its poster image again; the title and
+     * description inside it stay hidden by hideJwUiForPip(). Once playback starts again JW owns
+     * these views again, so nothing is restored then.
+     */
+    private void showArtworkInPipIfEnded() {
+        if (mPlayer == null || mPlayerView == null) {
+            return;
+        }
+        boolean ended;
+        try {
+            ended = mPlayer.getState() == PlayerState.COMPLETE;
+        } catch (Throwable t) {
+            ended = false;
+        }
+        if (!ended) {
+            mPipArtworkSnapshot.clear();
+            return;
+        }
+        try {
+            List<View> artwork = new ArrayList<>();
+            collectArtworkViews(mPlayerView, artwork);
+            int shown = 0;
+            for (View view : artwork) {
+                if (view.getVisibility() != View.VISIBLE) {
+                    if (!mPipArtworkSnapshot.containsKey(view)) {
+                        mPipArtworkSnapshot.put(view, view.getVisibility());
+                    }
+                    view.setVisibility(View.VISIBLE);
+                    shown++;
+                }
+            }
+            if (shown > 0) {
+                JWLog.d(TAG, "showArtworkInPipIfEnded: showed " + shown + " artwork view(s)");
+            }
+        } catch (Throwable t) {
+            JWLog.w(TAG, "showArtworkInPipIfEnded failed: " + t.getMessage());
+        }
+    }
+
+    /** JW's OverlayView and the poster image(s) directly inside it. */
+    private void collectArtworkViews(View root, List<View> out) {
+        if (!(root instanceof ViewGroup)) {
+            return;
+        }
+        ViewGroup group = (ViewGroup) root;
+        if ("OverlayView".equals(root.getClass().getSimpleName())) {
+            out.add(root);
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (isPosterView(group.getChildAt(i))) {
+                    out.add(group.getChildAt(i));
+                }
+            }
+            return;
+        }
+        for (int i = 0; i < group.getChildCount(); i++) {
+            collectArtworkViews(group.getChildAt(i), out);
+        }
+    }
+
+    /**
+     * On PiP exit: if the lesson is still ended, gives JW back its ended look in the full player
+     * (artwork hidden, replay button). Otherwise JW already owns these views.
+     */
+    private void restoreArtworkAfterPip() {
+        boolean ended = false;
+        try {
+            ended = mPlayer != null && mPlayer.getState() == PlayerState.COMPLETE;
+        } catch (Throwable ignored) {
+            // Player torn down; nothing to restore into.
+        }
+        if (ended) {
+            for (Map.Entry<View, Integer> entry : mPipArtworkSnapshot.entrySet()) {
+                try {
+                    entry.getKey().setVisibility(entry.getValue());
+                } catch (Throwable ignored) {
+                    // View detached since; nothing to restore.
+                }
+            }
+        }
+        mPipArtworkSnapshot.clear();
+    }
+
+    /**
+     * Turns the JW SDK's "enter PiP when the app is left" on or off.
+     *
+     * The SDK enters PiP on Home (system auto-enter while playing, and its own Home-key receiver
+     * whenever this is on), and it turns auto-enter off only on pause. An ended lesson fires
+     * complete, not pause, so Home after a lesson ended opened a PiP window with nothing in it.
+     * Android's guidance is not to enter PiP when nothing is playing. Off when the lesson ends,
+     * on again when a new item loads or playback starts. Only while this view is registered for
+     * PiP; setPipOnBackground re-sends the SDK's PiP params, so its buttons are removed again.
+     */
+    private void setPipOnLeave(boolean enabled, String reason) {
+        if (mPlayer == null || !Boolean.TRUE.equals(mPipRegisteredForVideo)) {
+            return;
+        }
+        try {
+            mPlayer.setPipOnBackground(enabled);
+            JWLog.d(TAG, "setPipOnLeave(" + enabled + ", " + reason + ")");
+        } catch (Throwable t) {
+            JWLog.w(TAG, "setPipOnLeave failed: " + t.getMessage());
+        }
+        removeSdkPipButtons();
     }
 
     /**
@@ -4087,6 +4203,12 @@ public class RNJWPlayerView extends RelativeLayout implements
         getReactContext().getJSModule(RCTEventEmitter.class).receiveEvent(getId(), "topComplete", event);
 
         updateWakeLock(false);
+        // Nothing to show any more: Home must not open an empty PiP window. If PiP is already
+        // open, keep the lesson's artwork in it instead of black (after JW's own handler).
+        setPipOnLeave(false, "lesson ended");
+        if (mPlayerView != null) {
+            mPlayerView.post(this::enforcePipUiHidden);
+        }
     }
 
     @Override
@@ -4215,9 +4337,8 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         userPaused = false;
         wasInterrupted = false;
-        if (mPipRegisteredForVideo != null && mPipRegisteredForVideo) {
-            removeSdkPipButtons();
-        }
+        // Also removes the SDK's PiP buttons it re-installs on play.
+        setPipOnLeave(true, "playing");
     }
 
     @Override
@@ -4252,6 +4373,8 @@ public class RNJWPlayerView extends RelativeLayout implements
         // }
 
         currentPlayingIndex = playlistItemEvent.getIndex();
+        // A newly loaded item has something to show in PiP again (see onComplete).
+        setPipOnLeave(true, "new item");
 
         WritableMap event = Arguments.createMap();
         event.putString("message", "onPlaylistItem");
