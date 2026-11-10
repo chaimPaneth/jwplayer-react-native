@@ -127,6 +127,15 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private int networkRecoveryReloadAttempts = 0;
     private long lastKnownRealPlaybackPositionMs = 0L;
 
+    // The background player the car drives (phone locked, app in the background or not started)
+    // has no app screen saving its place; the app's own player saves it every 5 s from JS while
+    // the app is open. So a car lesson was saved only on play, pause, seek and network loss:
+    // measured 2026-11-07, the car played 42:18 -> 48:55 without a pause and the next open
+    // started at 42:18. While it plays, its place is now saved once this long has passed since
+    // the last save.
+    private static final long BACKGROUND_PLAYING_SAVE_INTERVAL_MS = 15_000L;
+    private long lastPositionStoredAtMs = 0L;
+
     // Static reference to track the active instance for delegation from MediaBrowserService
     private static RNJWMediaSessionHelper activeInstance = null;
 
@@ -1062,6 +1071,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
             java.lang.reflect.Method reportSeek =
                     mediaBrowserServiceClass.getMethod("updateSeekPosition", String.class, long.class);
             reportSeek.invoke(null, externalMediaId, position); // position in ms
+            lastPositionStoredAtMs = SystemClock.elapsedRealtime();
             JWLog.d(TAG, "storeSeekPosition: Successfully stored position " + position + "ms for mediaId=" + externalMediaId + " via MediaBrowserService.updateSeekPosition()");
         } catch (Exception e) {
             // Safe to ignore; just don't break the seek
@@ -4078,8 +4088,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         // inside, and it publishes nothing.
         logPositionTruth("onTime");
         reconcileServedAnchor();
-        if (activeInstance != this || jwPlayer == null || timeEvent == null
-                || seekState.targetInFlightMs() < 0L) {
+        if (activeInstance != this || jwPlayer == null || timeEvent == null) {
+            return;
+        }
+        if (seekState.targetInFlightMs() < 0L) {
+            saveBackgroundPlayingPosition(timeEvent);
             return;
         }
         PlayerState playerState = jwPlayer.getState();
@@ -4119,6 +4132,36 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         updatePlaybackState(jwPlayer, playbackState, acceptedPositionMs);
         JWLog.d(TAG, "SEEKTRACE[CONFIRMED_TIME] target=" + targetMs
                 + "ms actual=" + acceptedPositionMs + "ms state=" + playerState);
+    }
+
+    /**
+     * Saves the background player's place while it plays, at most once per
+     * {@link #BACKGROUND_PLAYING_SAVE_INTERVAL_MS}, through the same path a pause takes. Only a
+     * PLAYING sample past 0 that the event and the player agree on, with no resume seek still
+     * pending: JW reports a stale or 0 playhead while it loads or seeks.
+     */
+    private void saveBackgroundPlayingPosition(TimeEvent timeEvent) {
+        if (jwPlayer.getState() != PlayerState.PLAYING || (pendingSeekMs != null && pendingSeekMs > 0L)) {
+            return;
+        }
+        if (SystemClock.elapsedRealtime() - lastPositionStoredAtMs < BACKGROUND_PLAYING_SAVE_INTERVAL_MS) {
+            return;
+        }
+        // Not isBackgroundPlayerActive(): its playing flag stays false in car playback (the
+        // handler's onPlay did not run in any 2026-11-07 capture).
+        if (jwPlayerNativePlaybackHandler == null || !jwPlayerNativePlaybackHandler.isManagingPlayer(jwPlayer)) {
+            return;
+        }
+        double eventSeconds = timeEvent.getPosition();
+        double liveSeconds = jwPlayer.getPosition();
+        if (!(eventSeconds > 0d) || !(liveSeconds > 0d)
+                || Double.isInfinite(eventSeconds) || Double.isInfinite(liveSeconds)
+                || Math.abs(eventSeconds - liveSeconds) * 1000d > SeekAcceptanceState.SEEKED_TARGET_AGREEMENT_MS) {
+            return;
+        }
+        // Set before the save, so a blocked one is retried after the interval, not on every tick.
+        lastPositionStoredAtMs = SystemClock.elapsedRealtime();
+        rememberPlaybackPosition("background-playing");
     }
 
     @Override
