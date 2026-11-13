@@ -273,7 +273,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     // exit. Populated by hideJwUiForPip(), which is the actual enforcement for "no JW control
     // overlay inside the PiP window" — the SDK's controls flag proved insufficient.
     private final Map<View, Integer> mJwUiVisibilitySnapshot = new LinkedHashMap<>();
-    // JW's artwork views shown in the PiP window while the lesson has ended, with the visibility
+    // JW's artwork views shown in the PiP window while the item has ended, with the visibility
     // they had. See showArtworkInPipIfEnded().
     private final Map<View, Integer> mPipArtworkSnapshot = new LinkedHashMap<>();
     private ViewTreeObserver.OnGlobalLayoutListener mPipUiEnforcer = null;
@@ -1827,13 +1827,13 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
-     * Keeps the lesson's artwork in the PiP window after the lesson ends.
+     * Keeps the item's artwork in the PiP window after the item ends.
      *
      * When an item completes, JW hides its overlay (the artwork) and shows only a replay button
-     * over black. The PiP window hides JW's buttons, so it went fully black. While PiP is active
-     * and the player is COMPLETE, this shows the overlay and its poster image again; the title and
-     * description inside it stay hidden by hideJwUiForPip(). Once playback starts again JW owns
-     * these views again, so nothing is restored then.
+     * over black. The PiP window hides JW's buttons, so it would be fully black. While PiP is
+     * active and the player is COMPLETE, this shows the overlay and its poster image again; the
+     * title and description inside it stay hidden by hideJwUiForPip(). Once playback starts again
+     * JW owns these views again, so nothing is restored then.
      */
     private void showArtworkInPipIfEnded() {
         if (mPlayer == null || mPlayerView == null) {
@@ -1891,7 +1891,7 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
-     * On PiP exit: if the lesson is still ended, gives JW back its ended look in the full player
+     * On PiP exit: if the item is still ended, gives JW back its ended look in the full player
      * (artwork hidden, replay button). Otherwise JW already owns these views.
      */
     private void restoreArtworkAfterPip() {
@@ -1917,9 +1917,9 @@ public class RNJWPlayerView extends RelativeLayout implements
      * Turns the JW SDK's "enter PiP when the app is left" on or off.
      *
      * The SDK enters PiP on Home (system auto-enter while playing, and its own Home-key receiver
-     * whenever this is on), and it turns auto-enter off only on pause. An ended lesson fires
-     * complete, not pause, so Home after a lesson ended opened a PiP window with nothing in it.
-     * Android's guidance is not to enter PiP when nothing is playing. Off when the lesson ends,
+     * whenever this is on), and it turns auto-enter off only on pause. An ended item fires
+     * complete, not pause, so Home after the end would open a PiP window with nothing in it.
+     * Android's guidance is not to enter PiP when nothing is playing. Off when the item ends,
      * on again when a new item loads or playback starts. Only while this view is registered for
      * PiP; setPipOnBackground re-sends the SDK's PiP params, so its buttons are removed again.
      */
@@ -2048,29 +2048,16 @@ public class RNJWPlayerView extends RelativeLayout implements
     }
 
     /**
-     * Second, independent lever against auto-entering PiP on fold.
-     *
-     * Deregistering with the SDK is the primary mechanism, but it only helps if the SDK enters PiP
-     * via its own lifecycle observer. On Android 12+ an activity can also be auto-entered by the
-     * system itself when {@code PictureInPictureParams.autoEnterEnabled} is set, which survives
-     * anything done at the SDK level. Clearing it here means both routes are closed regardless of
-     * which one the SDK actually uses.
-     *
-     * Only ever clears the flag — the allow path deliberately does not set it, because overwriting
-     * the SDK's params would drop the aspect ratio / source rect hint it configures for the video
-     * PiP window. Re-registering restores whatever the SDK wants.
-     */
-    /**
      * Removes the JW SDK's own Picture-in-Picture buttons, so the PiP window always shows
-     * Android's media buttons from the app's media session: previous lesson, play/pause, next
-     * lesson, the same as the lock screen, the notification and the car.
+     * Android's media buttons from the app's media session: previous item, play/pause, next
+     * item, the same as the lock screen, the notification and the car.
      *
      * The SDK installs rewind / play-pause / fast-forward buttons (15 s seeks) with
      * setPictureInPictureParams when the activity registers for PiP, when it enters PiP and on
      * every play, pause and ad break (to swap the play/pause icon). Android shows an app's own PiP
      * buttons instead of the media session's, and both sets use the same icons, so the PiP
-     * window's rewind/forward seeked 15 s or changed the lesson depending on whether the SDK had
-     * installed its buttons when PiP started (seen: full player seeked, mini player skipped).
+     * window's rewind/forward would seek 15 s or change the item, depending on whether the SDK
+     * had installed its buttons when PiP started.
      *
      * Posted to the main thread so it runs after the SDK's own listener for the same event. Only
      * the actions are replaced: Android copies just the fields a params object sets, so the aspect
@@ -2095,6 +2082,19 @@ public class RNJWPlayerView extends RelativeLayout implements
         });
     }
 
+    /**
+     * Second, independent lever against auto-entering PiP on fold.
+     *
+     * Deregistering with the SDK is the primary mechanism, but it only helps if the SDK enters PiP
+     * via its own lifecycle observer. On Android 12+ an activity can also be auto-entered by the
+     * system itself when {@code PictureInPictureParams.autoEnterEnabled} is set, which survives
+     * anything done at the SDK level. Clearing it here means both routes are closed regardless of
+     * which one the SDK actually uses.
+     *
+     * Only ever clears the flag — the allow path deliberately does not set it, because overwriting
+     * the SDK's params would drop the aspect ratio / source rect hint it configures for the video
+     * PiP window. Re-registering restores whatever the SDK wants.
+     */
     private void disableSystemAutoEnterPip() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || mActivity == null) {
             return;
@@ -3089,7 +3089,7 @@ public class RNJWPlayerView extends RelativeLayout implements
         // previous push here (setConfig updates it after this call).
         // The player must also still be PAUSED: the stop() bridge sets userPaused as well, and the
         // app calls it before it pushes an item it opens, so a stopped (IDLE) player is an open in
-        // progress whose autostart applies (e.g. the same lesson opened again with a car connected).
+        // progress whose autostart applies (e.g. the same item opened again with a car connected).
         String previousFile = firstPlaylistFileFromConfig(mConfig);
         String incomingFile = firstPlaylistFileFromConfig(prop);
         String previousMediaId = firstPlaylistMediaIdFromConfig(mConfig);
@@ -4204,7 +4204,7 @@ public class RNJWPlayerView extends RelativeLayout implements
 
         updateWakeLock(false);
         // Nothing to show any more: Home must not open an empty PiP window. If PiP is already
-        // open, keep the lesson's artwork in it instead of black (after JW's own handler).
+        // open, keep the item's artwork in it instead of black (after JW's own handler).
         setPipOnLeave(false, "lesson ended");
         if (mPlayerView != null) {
             mPlayerView.post(this::enforcePipUiHidden);

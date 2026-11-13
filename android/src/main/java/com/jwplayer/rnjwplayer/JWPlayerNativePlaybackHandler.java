@@ -2348,9 +2348,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * Android Auto keeps showing a list it loaded earlier, and a list loaded before sign-in
      * finished carries no playback address, while the media browser's item store already holds
      * the app's newer copy of the same item (the copy the app's JS also receives for the
-     * selection). Without this, nothing loaded the selection: the car showed the new title while
-     * the previous lesson kept playing. Only the address fields are taken; title, position and
-     * the rest stay the car's, as before.
+     * selection). Without an address nothing loads the selection, and the car shows the new title
+     * while the previous item keeps playing. Only the address fields are taken; title, position
+     * and the rest stay the car's.
      */
     private Map<String, Object> withAppPlaybackSource(String mediaId, Map<String, Object> carPost) {
         if (carPost == null || resolvePlaybackUrl(carPost) != null) return carPost;
@@ -2390,7 +2390,7 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      * not in front (PiP, locked phone) React does not open it, so the app fetches the full post
      * and asks for the same item again (carSelection.ts in the vehicle package); both filters
      * must let that retry through. In front, React opens the item itself and the filters keep
-     * dropping a duplicate tap, as before.
+     * dropping a duplicate tap.
      */
     private void forgetUnloadedSelection(String mediaId) {
         if (mediaId == null || isReactHostResumed()) return;

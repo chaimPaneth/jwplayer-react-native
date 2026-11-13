@@ -128,11 +128,11 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     private long lastKnownRealPlaybackPositionMs = 0L;
 
     // The background player the car drives (phone locked, app in the background or not started)
-    // has no app screen saving its place; the app's own player saves it every 5 s from JS while
-    // the app is open. So a car lesson was saved only on play, pause, seek and network loss:
-    // measured 2026-11-07, the car played 42:18 -> 48:55 without a pause and the next open
-    // started at 42:18. While it plays, its place is now saved once this long has passed since
-    // the last save.
+    // has no app screen saving its position; the app's own player saves it every 5 s from JS
+    // while the app is open. Play, pause, seek and network loss save it too, but a long stretch
+    // of playback without them does not: if the app is stopped then, the next open starts where
+    // that stretch began. So while it plays, its position is saved once this long has passed
+    // since the last save.
     private static final long BACKGROUND_PLAYING_SAVE_INTERVAL_MS = 15_000L;
     private long lastPositionStoredAtMs = 0L;
 
@@ -4135,7 +4135,7 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
     }
 
     /**
-     * Saves the background player's place while it plays, at most once per
+     * Saves the background player's position while it plays, at most once per
      * {@link #BACKGROUND_PLAYING_SAVE_INTERVAL_MS}, through the same path a pause takes. Only a
      * PLAYING sample past 0 that the event and the player agree on, with no resume seek still
      * pending: JW reports a stale or 0 playhead while it loads or seeks.
@@ -4147,8 +4147,8 @@ public class RNJWMediaSessionHelper implements AdvertisingEvents.OnAdCompleteLis
         if (SystemClock.elapsedRealtime() - lastPositionStoredAtMs < BACKGROUND_PLAYING_SAVE_INTERVAL_MS) {
             return;
         }
-        // Not isBackgroundPlayerActive(): its playing flag stays false in car playback (the
-        // handler's onPlay did not run in any 2026-11-07 capture).
+        // Not isBackgroundPlayerActive(): its playing flag can stay false during car playback,
+        // because the handler's onPlay is not always called there.
         if (jwPlayerNativePlaybackHandler == null || !jwPlayerNativePlaybackHandler.isManagingPlayer(jwPlayer)) {
             return;
         }
