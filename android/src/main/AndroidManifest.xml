@@ -47,6 +47,15 @@
             android:supportsPictureInPicture="true"
             android:resizeableActivity="true"
             tools:node="merge" />
+
+        <!--
+            Starts PipRestoreGuard with the app's process, before the first activity is created: it
+            closes a PiP window that Android restored after stopping the process. It serves no data.
+        -->
+        <provider
+            android:name="com.jwplayer.rnjwplayer.PipRestoreGuard"
+            android:authorities="${applicationId}.rnjwplayer.piprestoreguard"
+            android:exported="false" />
     </application>
 
 </manifest>
