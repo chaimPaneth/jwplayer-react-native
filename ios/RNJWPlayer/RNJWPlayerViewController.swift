@@ -392,6 +392,8 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
 
         // Playback started and the player is on screen — arm auto-PIP-on-background.
         parentView?.enableAutomaticPipIfPossible()
+        // Keep a video item's audio playing if the app is backgrounded without PiP.
+        parentView?.applyBackgroundPlaybackPolicy()
     }
 
     override func jwplayer(_ player:JWPlayer, willPlayWithReason reason:JWPlayReason) {
