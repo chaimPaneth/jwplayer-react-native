@@ -1438,8 +1438,9 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
      *   1. explicit user pause  -> paused;
      *   2. network-recovery intent (was playing, blocked, will resume) -> playing;
      *   3. live player state PLAYING/BUFFERING -> playing;
-     *   4. any other definite state (PAUSED/IDLE/COMPLETE/ERROR) -> paused;
-     *   5. state unreadable -> fall back to the tracked flag.
+     *   4. not started yet (IDLE or unreadable) with autostart on -> playing;
+     *   5. any other definite state (PAUSED/IDLE/COMPLETE/ERROR) -> paused;
+     *   6. state unreadable -> fall back to the tracked flag.
      */
     private boolean resolveDesiredPlayingState(PlayerState observedState) {
         if (pausedByUser) {
@@ -1459,7 +1460,10 @@ public class JWPlayerNativePlaybackHandler implements VideoPlayerEvents.OnReadyL
         // "paused" makes the adopting UI mount with autostart=false, so the user has to press play
         // a SECOND time in the car. Autostart plus "never started" is the same intent-to-play
         // reasoning already used for network-recovery resumes further down this class.
-        if (autoStartEnabled && !hasStartedPlayback) {
+        // A PAUSED, COMPLETE or ERROR player has left that window, so only IDLE or an unreadable
+        // state counts as not started.
+        boolean notStartedState = observedState == null || observedState == PlayerState.IDLE;
+        if (autoStartEnabled && !hasStartedPlayback && notStartedState) {
             return true;
         }
         if (observedState != null) {
