@@ -1967,6 +1967,49 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
         }
     }
 
+    // MARK: - Background playback
+
+    /// Keeps the audio of a video item playing when the app moves to the background without PiP,
+    /// for example on a screen lock. AVFoundation pauses a player that renders video in that case;
+    /// with `backgroundAudioEnabled` the player continues, as it already does for audio-only items.
+    /// Idempotent.
+    func applyBackgroundPlaybackPolicy() {
+        guard backgroundAudioEnabled else { return }
+        guard #available(iOS 15.0, *) else { return }
+        guard let avPlayer = currentAVPlayer() else { return }
+        if avPlayer.audiovisualBackgroundPlaybackPolicy != .continuesIfPossible {
+            avPlayer.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+        }
+    }
+
+    /// The AVPlayer behind the active JW player view. JWPlayerKit does not expose it, so it is
+    /// taken from the PiP controller's player layer, or from the first AVPlayerLayer in the view.
+    private func currentAVPlayer() -> AVPlayer? {
+        let pipController = playerView?.pictureInPictureController ?? playerViewController?.playerView.pictureInPictureController
+        if let player = pipController?.playerLayer.player {
+            return player
+        }
+        var jwView: UIView? = playerView
+        if jwView == nil {
+            jwView = playerViewController?.playerView as? UIView
+        }
+        guard let rootLayer = jwView?.layer else { return nil }
+        return findPlayerLayer(in: rootLayer)?.player
+    }
+
+    /// Depth-first search for the first AVPlayerLayer under `layer`.
+    private func findPlayerLayer(in layer: CALayer) -> AVPlayerLayer? {
+        if let playerLayer = layer as? AVPlayerLayer {
+            return playerLayer
+        }
+        for sublayer in layer.sublayers ?? [] {
+            if let found = findPlayerLayer(in: sublayer) {
+                return found
+            }
+        }
+        return nil
+    }
+
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController:AVPictureInPictureController) {
         // Handle any pending content switch
         if let config = pendingPlayerConfig {
@@ -2024,6 +2067,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
 
         userPaused = false
         wasInterrupted = false
+        applyBackgroundPlaybackPolicy()
     }
 
     func jwplayer(_ player:JWPlayer, willPlayWithReason reason:JWPlayReason) {
@@ -2544,6 +2588,7 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     @objc func applicationWillResignActive(_ notification: Notification) {
         // Ensure auto-PIP is armed before the app backgrounds.
         enableAutomaticPipIfPossible()
+        applyBackgroundPlaybackPolicy()
         if !userPaused && backgroundAudioEnabled {
             if (playerView != nil) && playerView.player.getState() == .playing {
                 playerView.player.play()
