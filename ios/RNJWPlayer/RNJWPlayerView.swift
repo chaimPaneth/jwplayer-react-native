@@ -375,6 +375,20 @@ class RNJWPlayerView: UIView, JWPlayerDelegate, JWPlayerStateDelegate,
     /// PiP window happens while the host app is not foreground-active, and the
     /// configuration's own autostart does not reliably begin playback in that state.
     func applyPlaylistInPlace(config: [String: Any]) {
+        // Stop the current item first unless a PiP window is open. Reconfiguring a player
+        // that is still playing swaps its AVPlayerItem while AVKit observers are attached
+        // to it, and AVKit later throws when it removes them ("Cannot remove an observer
+        // ... for the key path currentItem.currentMediaSelection", ALLDAF-APP-7A7). It
+        // started with this function in 3.1.2 and happens when an item ends and the next
+        // one loads. reconfigurePlayer stops first for the same reason. An open PiP window
+        // is left alone: stopping there would close it.
+        if let player = playerViewController?.player {
+            let pipActive = playerViewController?.playerView.pictureInPictureController?.isPictureInPictureActive ?? false
+            if !pipActive {
+                player.stop()
+            }
+        }
+
         setNewConfig(config: config)
 
         guard let wantsAutostart = config["autostart"] as? Bool, wantsAutostart else { return }
