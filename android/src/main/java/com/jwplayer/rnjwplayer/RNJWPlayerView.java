@@ -1260,6 +1260,7 @@ public class RNJWPlayerView extends RelativeLayout implements
                 rootViewVisibilitySnapshot.clear();
                 // Add player view back in main spot
                 addView(mPlayerView, 0, layoutParams);
+                layoutPlayerViewToOwnBounds();
                 mLastHandledPipState = false;
 
                 // Controls were already re-enabled before the SDK notify above; nudge the
@@ -1274,6 +1275,29 @@ public class RNJWPlayerView extends RelativeLayout implements
         } catch (Throwable t) {
             JWLog.e(TAG, "applyPipChange: unexpected error: " + t.getMessage());
         }
+    }
+
+    /**
+     * Sizes the player view to this view's bounds after it is moved back from the activity's
+     * content root.
+     *
+     * The player view keeps the bounds the content root gave it, which are the PiP window size
+     * or the full window size depending on when the move runs. onLayout corrects them only if
+     * React Native changes this view's frame afterwards, and RNJWPlayer#requestLayout re-applies
+     * the current size, so without this the video can stay at PiP size or render at window size.
+     */
+    private void layoutPlayerViewToOwnBounds() {
+        int width = getWidth();
+        int height = getHeight();
+        JWLog.d(TAG, "layoutPlayerViewToOwnBounds: " + mPlayerView.getWidth() + "x"
+                + mPlayerView.getHeight() + " -> " + width + "x" + height);
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        mPlayerView.measure(
+                MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+                MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY));
+        mPlayerView.layout(0, 0, width, height);
     }
 
     /**
