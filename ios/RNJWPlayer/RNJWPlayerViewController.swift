@@ -178,7 +178,8 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
     // MARK: - JWPlayerViewControllerFullScreenDelegate
     func playerViewControllerWillGoFullScreen(_ controller:JWPlayerViewController) -> JWFullScreenViewController? {
         parentView?.onFullScreenRequested?([:])
-        return nil
+        // Fixes JWPlayerKit fullscreen size and iPhone Duo orientation (see the class docs).
+        return RNJWFullScreenViewController()
     }
 
     func playerViewControllerDidGoFullScreen(_ controller:JWPlayerViewController) {
@@ -731,4 +732,105 @@ class RNJWPlayerViewController : JWPlayerViewController, JWPlayerViewControllerF
         })
     }
 
+}
+
+/// JWPlayerKit's fullscreen controller with two fixes:
+///
+/// 1. Size. JWPlayerKit sets the fullscreen view's frame to
+///    `UIScreen.main.bounds` (on appear and on every layout pass). On iPhone Duo
+///    `UIScreen.main` is always the cover display, so on the open display the
+///    player filled only a cover-sized corner and kept the folded size after
+///    unfold. The root view swaps that frame for its container's bounds;
+///    wherever the window fills the screen the two are equal.
+///
+/// 2. Orientation on iPhone Duo. On the open display iOS rejects programmatic
+///    orientation requests, and the open display keeps the last orientation mask
+///    requested on the cover display, so it can't rotate after a portrait or
+///    landscape request. On Duo this controller therefore:
+///    - gets landscape on the cover display only from its landscape-only
+///      `supportedInterfaceOrientations` (UIKit rotates when it is presented),
+///      without JWPlayerKit's geometry request (JS also sets
+///      `landscapeOnFullScreen: false`);
+///    - ends every dismissal with a request that allows every orientation.
+class RNJWFullScreenViewController: JWFullScreenViewController {
+
+    private static let isIPhoneDuo: Bool = {
+        if let simulated = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] {
+            return simulated == "iPhone19,4"
+        }
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let model = withUnsafeBytes(of: &systemInfo.machine) { bytes in
+            String(decoding: bytes.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+        return model == "iPhone19,4"
+    }()
+
+    private weak var dismissingScene: UIWindowScene?
+
+    override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+        if Self.isIPhoneDuo {
+            // JWPlayerViewController sets this only with forceLandscapeOnFullScreen,
+            // which is off on Duo.
+            displayInLandscape = true
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func loadView() {
+        let rootView = ContainerSizedView(frame: UIScreen.main.bounds)
+        rootView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view = rootView
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        // JWFullScreenViewController.viewDidAppear requests landscape geometry
+        // when displayInLandscape is set; skip that request on Duo.
+        let skipRequest = Self.isIPhoneDuo && displayInLandscape
+        if skipRequest { displayInLandscape = false }
+        super.viewDidAppear(animated)
+        if skipRequest { displayInLandscape = true }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        dismissingScene = view.window?.windowScene
+    }
+
+    /// While this controller is dismissed, RNScreens and JWPlayerViewController
+    /// request portrait geometry to rotate the cover display back. On Duo, end
+    /// with a request that allows every orientation, so the open display can
+    /// rotate after unfold; the root controller's portrait-only mask keeps the
+    /// cover display portrait. JWPlayerViewController sends its request
+    /// asynchronously after this callback, so ours waits a moment to be last.
+    /// On the open display iOS rejects it, which is fine: nothing changes there.
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        guard Self.isIPhoneDuo, #available(iOS 16.0, *) else { return }
+        let scene = dismissingScene
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            scene?.requestGeometryUpdate(.iOS(interfaceOrientations: .allButUpsideDown)) { _ in }
+        }
+    }
+}
+
+/// Replaces a frame of exactly `UIScreen.main.bounds` (what JWPlayerKit
+/// assigns) with the superview's bounds. Other frames, such as those of the
+/// present/dismiss animation, pass through unchanged.
+private final class ContainerSizedView: UIView {
+    override var frame: CGRect {
+        get { super.frame }
+        set {
+            if let container = superview?.bounds, !container.isEmpty,
+               newValue == UIScreen.main.bounds, container != newValue {
+                super.frame = container
+            } else {
+                super.frame = newValue
+            }
+        }
+    }
 }
